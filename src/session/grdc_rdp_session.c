@@ -143,6 +143,10 @@ grdc_rdp_session_activate(GrdcRdpSession *self)
     g_return_val_if_fail(GRDC_IS_RDP_SESSION(self), FALSE);
     grdc_rdp_session_set_peer_state(self, "activated");
     self->is_activated = TRUE;
+    if (self->runtime != NULL)
+    {
+        grdc_server_runtime_request_keyframe(self->runtime);
+    }
     grdc_rdp_session_start_event_thread(self);
     return TRUE;
 }
@@ -236,7 +240,7 @@ grdc_rdp_session_pump(GrdcRdpSession *self)
     GrdcEncodedFrame *encoded = NULL;
     g_autoptr(GError) error = NULL;
     if (!grdc_server_runtime_pull_encoded_frame(self->runtime,
-                                                0,
+                                                16 * 1000, /* 16ms */
                                                 (gsize)negotiated_max_payload,
                                                 &encoded,
                                                 &error))

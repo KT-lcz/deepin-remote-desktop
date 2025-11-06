@@ -238,3 +238,13 @@ grdc_encoding_manager_get_codec(GrdcEncodingManager *self)
     g_return_val_if_fail(GRDC_IS_ENCODING_MANAGER(self), GRDC_FRAME_CODEC_RAW);
     return (self->mode == GRDC_ENCODING_MODE_RAW) ? GRDC_FRAME_CODEC_RAW : GRDC_FRAME_CODEC_RFX;
 }
+
+void
+grdc_encoding_manager_force_keyframe(GrdcEncodingManager *self)
+{
+    g_return_if_fail(GRDC_IS_ENCODING_MANAGER(self));
+    if (self->mode == GRDC_ENCODING_MODE_RFX && self->rfx_encoder != NULL)
+    {
+        grdc_rfx_encoder_force_keyframe(self->rfx_encoder);
+    }
+}

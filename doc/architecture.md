@@ -9,7 +9,7 @@
 
 ### 1. 核心层
 - `core/grdc_application`：负责命令行解析、GLib 主循环、信号处理与监听器启动（打包进 `libgrdc-core.a`）。
-- `core/grdc_server_runtime`：聚合 Capture/Encoding/Input 子系统，提供 `prepare_stream()` / `stop()` 接口。
+- `core/grdc_server_runtime`：聚合 Capture/Encoding/Input 子系统，提供 `prepare_stream()` / `stop()` 接口，并在内部启动编码线程，从抓屏队列取帧并通过 `GAsyncQueue` 将编码帧传递给会话层。
 - `core/grdc_config`：解析 INI/CLI 配置，集中管理绑定地址、TLS 证书、捕获尺寸等运行参数。
 - `security/grdc_tls_credentials`：加载并缓存 TLS 证书/私钥，供运行时向 FreeRDP Settings 注入。
 
@@ -38,8 +38,8 @@
 
 ## 数据流简述
 1. 应用启动后创建 `GrdcServerRuntime`，准备编码器与采集模块。
-2. `GrdcCaptureManager` 启动 `GrdcX11Capture`，在独立线程中推送 `GrdcFrame` 至队列。
-3. 传输层接受 FreeRDP 连接，将 `GrdcServerRuntime` 注入会话，为后续编码/输入对接留接口。
+2. `GrdcCaptureManager` 启动 `GrdcX11Capture`，持续推送 `GrdcFrame`；运行时编码线程消费该队列并将 `GrdcEncodedFrame` 写入异步队列。
+3. 会话层从编码队列拉取帧，经 `SurfaceFrameMarker`/`SurfaceBits` 推送给客户端，并在无帧时保持事件响应。
 
 ## 设计原则落实
 - **SOLID**：各模块限定单一职责；监听器依赖抽象的 runtime；待迁移的编码/输入将通过接口剥离具体实现。

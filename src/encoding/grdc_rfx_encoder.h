@@ -32,5 +32,6 @@ gboolean grdc_rfx_encoder_encode(GrdcRfxEncoder *self,
                                  GrdcFrame *frame,
                                  GrdcEncodedFrame *output,
                                  GError **error);
+void grdc_rfx_encoder_force_keyframe(GrdcRfxEncoder *self);
 
 G_END_DECLS

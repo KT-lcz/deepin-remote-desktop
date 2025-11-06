@@ -36,5 +36,6 @@ gboolean grdc_server_runtime_get_encoding_options(GrdcServerRuntime *self,
                                                   GrdcEncodingOptions *out_options);
 void grdc_server_runtime_set_tls_credentials(GrdcServerRuntime *self, GrdcTlsCredentials *credentials);
 GrdcTlsCredentials *grdc_server_runtime_get_tls_credentials(GrdcServerRuntime *self);
+void grdc_server_runtime_request_keyframe(GrdcServerRuntime *self);
 
 G_END_DECLS

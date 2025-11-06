@@ -25,5 +25,6 @@ gboolean grdc_encoding_manager_encode(GrdcEncodingManager *self,
                                       GError **error);
 
 GrdcFrameCodec grdc_encoding_manager_get_codec(GrdcEncodingManager *self);
+void grdc_encoding_manager_force_keyframe(GrdcEncodingManager *self);
 
 G_END_DECLS

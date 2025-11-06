@@ -22,6 +22,7 @@ struct _GrdcRfxEncoder
     GArray *tile_hashes;
     guint tiles_x;
     guint tiles_y;
+    gboolean force_keyframe;
 };
 
 G_DEFINE_TYPE(GrdcRfxEncoder, grdc_rfx_encoder, G_TYPE_OBJECT)
@@ -198,6 +199,7 @@ grdc_rfx_encoder_configure(GrdcRfxEncoder *self,
     self->enable_diff = enable_diff;
     self->quality = quality;
     self->last_frame_timestamp = 0;
+    self->force_keyframe = TRUE;
 
     g_byte_array_set_size(self->bottom_up_frame, (gsize)width * height * 4u);
     memset(self->bottom_up_frame->data, 0, self->bottom_up_frame->len);
@@ -235,6 +237,7 @@ grdc_rfx_encoder_reset(GrdcRfxEncoder *self)
     self->last_frame_timestamp = 0;
     self->tiles_x = 0;
     self->tiles_y = 0;
+    self->force_keyframe = TRUE;
 }
 
 static const guint8 *
@@ -380,7 +383,7 @@ grdc_rfx_encoder_encode(GrdcRfxEncoder *self,
                                         ? self->previous_frame->data
                                         : NULL;
 
-    if (!self->enable_diff)
+    if (self->force_keyframe || !self->enable_diff)
     {
         for (guint idx = 0; idx < self->tile_hashes->len; ++idx)
         {
@@ -464,6 +467,14 @@ grdc_rfx_encoder_encode(GrdcRfxEncoder *self,
         g_byte_array_set_size(self->previous_frame, self->bottom_up_frame->len);
     }
     memcpy(self->previous_frame->data, linear_frame, self->previous_frame->len);
+    self->force_keyframe = FALSE;
 
     return TRUE;
+}
+
+void
+grdc_rfx_encoder_force_keyframe(GrdcRfxEncoder *self)
+{
+    g_return_if_fail(GRDC_IS_RFX_ENCODER(self));
+    self->force_keyframe = TRUE;
 }
