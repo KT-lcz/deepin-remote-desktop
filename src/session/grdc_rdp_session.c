@@ -407,11 +407,28 @@ grdc_rdp_session_send_surface_bits(GrdcRdpSession *self,
     const guint8 *data = grdc_encoded_frame_get_data(frame, &data_size);
     if (data == NULL || data_size == 0)
     {
-        g_set_error_literal(error,
-                            G_IO_ERROR,
-                            G_IO_ERROR_FAILED,
-                            "Encoded frame payload is empty");
-        return FALSE;
+        SURFACE_FRAME_MARKER marker_begin = {SURFACECMD_FRAMEACTION_BEGIN, frame_id};
+        SURFACE_FRAME_MARKER marker_end = {SURFACECMD_FRAMEACTION_END, frame_id};
+
+        if (!update->SurfaceFrameMarker(context, &marker_begin))
+        {
+            g_set_error_literal(error,
+                                G_IO_ERROR,
+                                G_IO_ERROR_FAILED,
+                                "SurfaceFrameMarker (begin) failed");
+            return FALSE;
+        }
+
+        if (!update->SurfaceFrameMarker(context, &marker_end))
+        {
+            g_set_error_literal(error,
+                                G_IO_ERROR,
+                                G_IO_ERROR_FAILED,
+                                "SurfaceFrameMarker (end) failed");
+            return FALSE;
+        }
+
+        return TRUE;
     }
 
     const gsize stride = grdc_encoded_frame_get_stride(frame);

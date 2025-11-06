@@ -5,6 +5,8 @@
 - 引入 FreeRDP 事件专用线程，采用 `WaitForMultipleObjects` 监听传输句柄，避免主循环阻塞导致的输入延迟；主循环仅负责编码与帧发送。
 - `core/grdc_server_runtime` 增加编码线程与 `GAsyncQueue`，将屏幕捕获与编码解耦，保障帧发送与输入处理互不阻塞。
 - `encoding/grdc_rfx_encoder` 强制首帧发送整帧（`force_keyframe`），搭配会话层 16ms 拉取超时，解决初始黑屏与首帧丢失问题。
+- `session/grdc_rdp_session.c` 在空负载时仅发送 FrameMarker 心跳，避免差分帧缺失导致客户端保持黑屏。
+- `core/grdc_server_runtime` 新增阻塞等待逻辑（`grdc_server_runtime_wait_encoded`），避免编码队列空读导致首帧或差分帧被过早消费。
 
 ## 2025-11-06：FreeRDP 参数同步与 RFX 传输修整
 - **目的**：

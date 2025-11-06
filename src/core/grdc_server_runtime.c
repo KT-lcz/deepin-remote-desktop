@@ -8,6 +8,8 @@ static void grdc_server_runtime_start_encoder(GrdcServerRuntime *self);
 static void grdc_server_runtime_stop_encoder(GrdcServerRuntime *self);
 static gpointer grdc_server_runtime_encoder_thread(gpointer user_data);
 static void grdc_server_runtime_flush_encoded_queue(GrdcServerRuntime *self);
+static GrdcEncodedFrame *grdc_server_runtime_wait_encoded(GrdcServerRuntime *self,
+                                                          gint64 timeout_us);
 
 struct _GrdcServerRuntime
 {
@@ -154,30 +156,8 @@ grdc_server_runtime_pull_encoded_frame(GrdcServerRuntime *self,
     g_return_val_if_fail(out_frame != NULL, FALSE);
     g_return_val_if_fail(self->encoded_queue != NULL, FALSE);
 
-    gpointer item = NULL;
-    if (timeout_us < 0)
-    {
-        item = g_async_queue_pop(self->encoded_queue);
-    }
-    else if (timeout_us == 0)
-    {
-        item = g_async_queue_try_pop(self->encoded_queue);
-    }
-    else
-    {
-        item = g_async_queue_timeout_pop(self->encoded_queue, timeout_us);
-    }
-
-    if (item == ENCODED_QUEUE_STOP)
-    {
-        g_set_error_literal(error,
-                            G_IO_ERROR,
-                            G_IO_ERROR_FAILED,
-                            "Encoder pipeline stopped");
-        return FALSE;
-    }
-
-    if (item == NULL)
+    GrdcEncodedFrame *encoded = grdc_server_runtime_wait_encoded(self, timeout_us);
+    if (encoded == NULL)
     {
         if (error != NULL)
         {
@@ -190,7 +170,7 @@ grdc_server_runtime_pull_encoded_frame(GrdcServerRuntime *self,
     }
 
     (void)max_payload;
-    *out_frame = GRDC_ENCODED_FRAME(item);
+    *out_frame = encoded;
     return TRUE;
 }
 
@@ -355,4 +335,66 @@ grdc_server_runtime_request_keyframe(GrdcServerRuntime *self)
     g_return_if_fail(GRDC_IS_SERVER_RUNTIME(self));
     grdc_server_runtime_flush_encoded_queue(self);
     grdc_encoding_manager_force_keyframe(self->encoder);
+}
+static gpointer
+grdc_server_runtime_pop_queue(GrdcServerRuntime *self, gint64 timeout_us)
+{
+    gpointer item = NULL;
+
+    if (timeout_us < 0)
+    {
+        item = g_async_queue_pop(self->encoded_queue);
+    }
+    else if (timeout_us == 0)
+    {
+        item = g_async_queue_try_pop(self->encoded_queue);
+    }
+    else
+    {
+        item = g_async_queue_timeout_pop(self->encoded_queue, timeout_us);
+    }
+
+    return item;
+}
+
+static GrdcEncodedFrame *
+grdc_server_runtime_wait_encoded(GrdcServerRuntime *self, gint64 timeout_us)
+{
+    g_return_val_if_fail(self->encoded_queue != NULL, NULL);
+
+    const gint64 deadline = (timeout_us > 0) ? g_get_monotonic_time() + timeout_us : 0;
+
+    while (TRUE)
+    {
+        gint64 remaining = 0;
+        if (timeout_us > 0)
+        {
+            remaining = deadline - g_get_monotonic_time();
+            if (remaining <= 0)
+            {
+                return NULL;
+            }
+        }
+
+        gpointer item = grdc_server_runtime_pop_queue(self, timeout_us <= 0 ? timeout_us : remaining);
+        if (item == NULL)
+        {
+            if (timeout_us == 0)
+            {
+                return NULL;
+            }
+            continue;
+        }
+
+        if (item == ENCODED_QUEUE_STOP)
+        {
+            return NULL;
+        }
+
+        GrdcEncodedFrame *encoded = GRDC_ENCODED_FRAME(item);
+        if (GRDC_IS_ENCODED_FRAME(encoded))
+        {
+            return encoded;
+        }
+    }
 }

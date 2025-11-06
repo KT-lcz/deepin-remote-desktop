@@ -207,7 +207,6 @@ grdc_rdp_peer_pointer_event(rdpInput *input, UINT16 flags, UINT16 x, UINT16 y)
     {
         return TRUE;
     }
-    g_debug("xx %d %d %d",flags,x,y);
 
     g_autoptr(GError) error = NULL;
     if (!grdc_input_dispatcher_handle_pointer(dispatcher, flags, x, y, &error) && error != NULL)
