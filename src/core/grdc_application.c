@@ -24,6 +24,43 @@ struct _GrdcApplication
 
 G_DEFINE_TYPE(GrdcApplication, grdc_application, G_TYPE_OBJECT)
 
+/* 将编码模式转换成便于日志输出的字符串。 */
+static const gchar *
+grdc_application_mode_to_string(GrdcEncodingMode mode)
+{
+    switch (mode)
+    {
+        case GRDC_ENCODING_MODE_RAW:
+            return "raw";
+        case GRDC_ENCODING_MODE_RFX:
+            return "rfx";
+        default:
+            return "unknown";
+    }
+}
+
+/* 记录当前合并后的核心运行参数，帮助排查配置生效情况。 */
+static void
+grdc_application_log_effective_config(GrdcApplication *self)
+{
+    if (self->config == NULL)
+    {
+        return;
+    }
+
+    const GrdcEncodingOptions *encoding_opts = grdc_config_get_encoding_options(self->config);
+    if (encoding_opts == NULL)
+    {
+        return;
+    }
+
+    g_message("Effective capture geometry %ux%u, encoder=%s, frame diff %s",
+              encoding_opts->width,
+              encoding_opts->height,
+              grdc_application_mode_to_string(encoding_opts->mode),
+              encoding_opts->enable_frame_diff ? "enabled" : "disabled");
+}
+
 /* 释放主循环、监听器等运行期资源，确保干净退出。 */
 static void
 grdc_application_dispose(GObject *object)
@@ -93,28 +130,25 @@ grdc_application_start_listener(GrdcApplication *self, GError **error)
     g_assert(self->listener == NULL);
     g_return_val_if_fail(GRDC_IS_SERVER_RUNTIME(self->runtime), FALSE);
 
-    if (self->tls_credentials == NULL)
-    {
-        self->tls_credentials = grdc_tls_credentials_new(grdc_config_get_certificate_path(self->config),
-                                                         grdc_config_get_private_key_path(self->config),
-                                                         error);
-        if (self->tls_credentials == NULL)
-        {
-            return FALSE;
-        }
-        grdc_server_runtime_set_tls_credentials(self->runtime, self->tls_credentials);
-    }
-
     if (self->config == NULL)
     {
         self->config = grdc_config_new();
     }
 
+    const gchar *cert_path = grdc_config_get_certificate_path(self->config);
+    const gchar *key_path = grdc_config_get_private_key_path(self->config);
+    if (cert_path == NULL || key_path == NULL)
+    {
+        g_set_error_literal(error,
+                            G_IO_ERROR,
+                            G_IO_ERROR_INVALID_ARGUMENT,
+                            "TLS certificate or key path missing after config merge");
+        return FALSE;
+    }
+
     if (self->tls_credentials == NULL)
     {
-        self->tls_credentials = grdc_tls_credentials_new(grdc_config_get_certificate_path(self->config),
-                                                         grdc_config_get_private_key_path(self->config),
-                                                         error);
+        self->tls_credentials = grdc_tls_credentials_new(cert_path, key_path, error);
         if (self->tls_credentials == NULL)
         {
             return FALSE;
@@ -296,6 +330,8 @@ grdc_application_run(GrdcApplication *self, int argc, char **argv, GError **erro
     {
         return EXIT_FAILURE;
     }
+
+    grdc_application_log_effective_config(self);
 
     self->loop = g_main_loop_new(NULL, FALSE);
     if (self->loop == NULL)

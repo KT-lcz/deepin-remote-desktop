@@ -243,7 +243,6 @@ grdc_rdp_session_pump(GrdcRdpSession *self)
     g_autoptr(GError) error = NULL;
     if (!grdc_server_runtime_pull_encoded_frame(self->runtime,
                                                 16 * 1000, /* 16ms */
-                                                (gsize)negotiated_max_payload,
                                                 &encoded,
                                                 &error))
     {
@@ -566,6 +565,7 @@ grdc_rdp_session_send_surface_bits(GrdcRdpSession *self,
     }
     else
     {
+        /* 对 raw 帧执行按行分片，避免超出通道带宽的巨块推送。 */
         const gsize chunk_budget = (payload_limit > 0) ? payload_limit : (512 * 1024);
         guint rows_per_chunk = (guint)MAX((gsize)1, chunk_budget / stride);
         if (rows_per_chunk == 0)

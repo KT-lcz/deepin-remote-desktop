@@ -27,7 +27,6 @@ gboolean grdc_server_runtime_prepare_stream(GrdcServerRuntime *self,
 void grdc_server_runtime_stop(GrdcServerRuntime *self);
 gboolean grdc_server_runtime_pull_encoded_frame(GrdcServerRuntime *self,
                                                 gint64 timeout_us,
-                                                gsize max_payload,
                                                 GrdcEncodedFrame **out_frame,
                                                 GError **error);
 
