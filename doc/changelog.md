@@ -1,5 +1,14 @@
 # 变更记录
 
+## 2025-11-06：Remmina 分辨率强制同步
+- **修改目的**：复用 `rdp-cpp` `c982bcce` 提交思路，确保客户端在会话激活时被强制回写为服务器实际桌面尺寸，规避 Remmina 新版本报错 `Invalid surface bits command rectangle`。
+- **修改范围**：`session/grdc_rdp_session.c`、`doc/architecture.md`、`.codex/plan/remmina-compatibility.md`。
+- **修改内容**：
+  1. 新增 `grdc_rdp_session_enforce_peer_desktop_size()`，在激活阶段重写 `FreeRDP_DesktopWidth/Height` 并调用 `DesktopResize`。
+  2. 监听层计划文档与架构文档补充 Remmina 兼容性背景与同步策略。
+  3. 计划清单记录任务背景与反馈节点便于跟踪。
+- **项目影响**：会话激活阶段会产生一次额外的 `DesktopResize` 日志，客户端被强制保持服务器分辨率，防止握手后意外缩放导致 SurfaceBits 尺寸不一致。
+
 ## 2025-11-06：输入/视频管线排查（临时记录）
 - 恢复 `grdc_rdp_session` 中的 SurfaceBits 推送逻辑，确保后续测试包含完整视频链路。
 - 引入 FreeRDP 事件专用线程，采用 `WaitForMultipleObjects` 监听传输句柄，避免主循环阻塞导致的输入延迟；主循环仅负责编码与帧发送。
