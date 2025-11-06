@@ -1,5 +1,14 @@
 # 变更记录
 
+## 2025-11-06：移除质量档位与 RLGR 固定策略
+- **修改目的**：纠正 RLGR1/3 与画质档位的错误关联，避免质量配置误导用户；统一使用 RLGR3 并暂时下线“高/中/低”画质参数。
+- **修改范围**：`core/grdc_encoding_options.h`、`core/grdc_config.*`、`core/grdc_application.c`、`encoding/grdc_encoding_manager.c`、`encoding/grdc_rfx_encoder.*`、`config/default.ini`、`doc/architecture.md`、`.codex/plan/rlgr-cleanup.md`。
+- **修改内容**：
+  1. 删除质量枚举、配置项与 CLI `--quality` 参数，`GrdcEncodingOptions` 不再包含质量字段，默认配置文件亦移除相关键。
+  2. RFX 编码器固定切换为 RLGR3，去除 `quality_to_rlgr`、按档位调帧率的逻辑，编码管理器不再记录质量状态。
+  3. 文档说明更新为“RFX 默认 RLGR3 + 帧差分”，计划文件同步记录任务背景。
+- **项目影响**：现有配置无需再关注画质档位，所有 RFX 会话统一使用 RLGR3；若未来需要按带宽自适应，再在新迭代中补充独立机制。
+
 ## 2025-11-06：配置解析与输入注释优化
 - **修改目的**：确保 `--config` 中的监听端口等配置不会被 CLI 默认值覆盖，同时让 X11 输入模块移除硬编码分辨率并补齐函数级注释，便于后续维护。
 - **修改范围**：`core/grdc_application.c`、`core/grdc_config.c`、`input/grdc_x11_input.c`、`doc/architecture.md`、`.codex/plan/input-config-sync.md`。

@@ -17,7 +17,6 @@ struct _GrdcEncodingManager
     GrdcRfxEncoder *rfx_encoder;
     GrdcEncodedFrame *scratch_frame;
     gboolean enable_diff;
-    GrdcEncodingQuality quality;
 };
 
 G_DEFINE_TYPE(GrdcEncodingManager, grdc_encoding_manager, G_TYPE_OBJECT)
@@ -47,7 +46,6 @@ grdc_encoding_manager_init(GrdcEncodingManager *self)
     self->ready = FALSE;
     self->mode = GRDC_ENCODING_MODE_RAW;
     self->enable_diff = TRUE;
-    self->quality = GRDC_ENCODING_QUALITY_HIGH;
     self->raw_encoder = grdc_raw_encoder_new();
     self->rfx_encoder = grdc_rfx_encoder_new();
     self->scratch_frame = grdc_encoded_frame_new();
@@ -81,7 +79,6 @@ grdc_encoding_manager_prepare(GrdcEncodingManager *self,
     self->frame_height = options->height;
     self->mode = options->mode;
     self->enable_diff = options->enable_frame_diff;
-    self->quality = options->quality;
 
     gboolean ok = FALSE;
     gboolean raw_ok = grdc_raw_encoder_configure(self->raw_encoder,
@@ -107,25 +104,10 @@ grdc_encoding_manager_prepare(GrdcEncodingManager *self,
     }
     else
     {
-        GrdcRfxQuality q = GRDC_RFX_QUALITY_HIGH;
-        switch (options->quality)
-        {
-            case GRDC_ENCODING_QUALITY_LOW:
-                q = GRDC_RFX_QUALITY_LOW;
-                break;
-            case GRDC_ENCODING_QUALITY_MEDIUM:
-                q = GRDC_RFX_QUALITY_MEDIUM;
-                break;
-            case GRDC_ENCODING_QUALITY_HIGH:
-            default:
-                q = GRDC_RFX_QUALITY_HIGH;
-                break;
-        }
         ok = grdc_rfx_encoder_configure(self->rfx_encoder,
                                         options->width,
                                         options->height,
                                         options->enable_frame_diff,
-                                        q,
                                         error);
     }
 
@@ -137,12 +119,11 @@ grdc_encoding_manager_prepare(GrdcEncodingManager *self,
 
     self->ready = TRUE;
 
-    g_message("Encoding manager configured for %ux%u stream (mode=%s diff=%s quality=%d)",
+    g_message("Encoding manager configured for %ux%u stream (mode=%s diff=%s)",
               options->width,
               options->height,
               options->mode == GRDC_ENCODING_MODE_RAW ? "raw" : "rfx",
-              options->enable_frame_diff ? "on" : "off",
-              options->quality);
+              options->enable_frame_diff ? "on" : "off");
     return TRUE;
 }
 
@@ -161,7 +142,6 @@ grdc_encoding_manager_reset(GrdcEncodingManager *self)
     self->frame_height = 0;
     self->mode = GRDC_ENCODING_MODE_RAW;
     self->enable_diff = TRUE;
-    self->quality = GRDC_ENCODING_QUALITY_HIGH;
     if (self->raw_encoder != NULL)
     {
         grdc_raw_encoder_reset(self->raw_encoder);

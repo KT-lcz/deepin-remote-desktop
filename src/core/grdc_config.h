@@ -20,7 +20,6 @@ gboolean grdc_config_merge_cli(GrdcConfig *self,
                                gint width,
                                gint height,
                                const gchar *encoder_mode,
-                               const gchar *quality,
                                gint diff_override,
                                GError **error);
 

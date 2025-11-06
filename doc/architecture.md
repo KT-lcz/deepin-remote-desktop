@@ -21,7 +21,7 @@
 ### 3. 编码层
 - `encoding/grdc_encoding_manager`：统一编码配置、调度；对外暴露帧编码接口。
 - `encoding/grdc_raw_encoder`：原始帧编码器（BGRX → bottom-up），兼容旧客户端。
-- `encoding/grdc_rfx_encoder`：基于 RemoteFX 的压缩实现，支持帧差分、质量档位与底图缓存，为后续的多片段/差分优化提供基础。
+- `encoding/grdc_rfx_encoder`：基于 RemoteFX 的压缩实现，支持帧差分与底图缓存，默认使用 RLGR3 以保证压缩率。
 
 ### 4. 输入层
 - `input/grdc_input_dispatcher`：键鼠事件注入入口，管理 X11 注入后端与 FreeRDP 回调。

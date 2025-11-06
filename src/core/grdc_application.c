@@ -163,7 +163,6 @@ grdc_application_parse_options(GrdcApplication *self, gint *argc, gchar ***argv,
     gint capture_width = 0;
     gint capture_height = 0;
     gchar *encoder_mode = NULL;
-    gchar *quality = NULL;
     gboolean enable_diff_flag = FALSE;
     gboolean disable_diff_flag = FALSE;
 
@@ -176,7 +175,6 @@ grdc_application_parse_options(GrdcApplication *self, gint *argc, gchar ***argv,
         {"width", 0, 0, G_OPTION_ARG_INT, &capture_width, "Capture width override", "PX"},
         {"height", 0, 0, G_OPTION_ARG_INT, &capture_height, "Capture height override", "PX"},
         {"encoder", 0, 0, G_OPTION_ARG_STRING, &encoder_mode, "Encoder mode (raw|rfx)", "MODE"},
-        {"quality", 0, 0, G_OPTION_ARG_STRING, &quality, "Encoding quality (high|medium|low)", "LEVEL"},
         {"enable-diff", 0, 0, G_OPTION_ARG_NONE, &enable_diff_flag, "Enable frame difference even if disabled in config", NULL},
         {"disable-diff", 0, 0, G_OPTION_ARG_NONE, &disable_diff_flag, "Disable frame difference regardless of config", NULL},
         {NULL}
@@ -205,7 +203,6 @@ grdc_application_parse_options(GrdcApplication *self, gint *argc, gchar ***argv,
         g_clear_pointer(&key_path, g_free);
         g_clear_pointer(&config_path, g_free);
         g_clear_pointer(&encoder_mode, g_free);
-        g_clear_pointer(&quality, g_free);
         return FALSE;
     }
 
@@ -244,7 +241,6 @@ grdc_application_parse_options(GrdcApplication *self, gint *argc, gchar ***argv,
                                capture_width,
                                capture_height,
                                encoder_mode,
-                               quality,
                                diff_override,
                                error))
     {
@@ -253,7 +249,6 @@ grdc_application_parse_options(GrdcApplication *self, gint *argc, gchar ***argv,
         g_clear_pointer(&key_path, g_free);
         g_clear_pointer(&config_path, g_free);
         g_clear_pointer(&encoder_mode, g_free);
-        g_clear_pointer(&quality, g_free);
         return FALSE;
     }
 
@@ -262,7 +257,6 @@ grdc_application_parse_options(GrdcApplication *self, gint *argc, gchar ***argv,
     g_clear_pointer(&key_path, g_free);
     g_clear_pointer(&config_path, g_free);
     g_clear_pointer(&encoder_mode, g_free);
-    g_clear_pointer(&quality, g_free);
 
     return TRUE;
 }

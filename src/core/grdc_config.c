@@ -18,7 +18,6 @@ G_DEFINE_TYPE(GrdcConfig, grdc_config, G_TYPE_OBJECT)
 
 static gboolean grdc_config_parse_bool(const gchar *value, gboolean *out_value, GError **error);
 static gboolean grdc_config_set_mode_from_string(GrdcConfig *self, const gchar *value, GError **error);
-static gboolean grdc_config_set_quality_from_string(GrdcConfig *self, const gchar *value, GError **error);
 
 /* 释放配置对象中持有的动态字符串。 */
 static void
@@ -49,7 +48,6 @@ grdc_config_init(GrdcConfig *self)
     self->encoding.width = 1024;
     self->encoding.height = 768;
     self->encoding.mode = GRDC_ENCODING_MODE_RFX;
-    self->encoding.quality = GRDC_ENCODING_QUALITY_HIGH;
     self->encoding.enable_frame_diff = TRUE;
     self->base_dir = g_get_current_dir();
 }
@@ -111,37 +109,6 @@ grdc_config_set_mode_from_string(GrdcConfig *self, const gchar *value, GError **
                 G_IO_ERROR,
                 G_IO_ERROR_INVALID_ARGUMENT,
                 "Unknown encoder mode '%s' (expected raw or rfx)",
-                value);
-    return FALSE;
-}
-
-/* 根据名称设置编码质量。 */
-static gboolean
-grdc_config_set_quality_from_string(GrdcConfig *self, const gchar *value, GError **error)
-{
-    if (value == NULL)
-    {
-        return FALSE;
-    }
-    if (g_ascii_strcasecmp(value, "high") == 0)
-    {
-        self->encoding.quality = GRDC_ENCODING_QUALITY_HIGH;
-        return TRUE;
-    }
-    if (g_ascii_strcasecmp(value, "medium") == 0)
-    {
-        self->encoding.quality = GRDC_ENCODING_QUALITY_MEDIUM;
-        return TRUE;
-    }
-    if (g_ascii_strcasecmp(value, "low") == 0)
-    {
-        self->encoding.quality = GRDC_ENCODING_QUALITY_LOW;
-        return TRUE;
-    }
-    g_set_error(error,
-                G_IO_ERROR,
-                G_IO_ERROR_INVALID_ARGUMENT,
-                "Unknown encoding quality '%s' (expected high/medium/low)",
                 value);
     return FALSE;
 }
@@ -237,15 +204,6 @@ grdc_config_load_from_key_file(GrdcConfig *self, GKeyFile *keyfile, GError **err
         }
     }
 
-    if (g_key_file_has_key(keyfile, "encoding", "quality", NULL))
-    {
-        g_autofree gchar *quality = g_key_file_get_string(keyfile, "encoding", "quality", NULL);
-        if (!grdc_config_set_quality_from_string(self, quality, error))
-        {
-            return FALSE;
-        }
-    }
-
     if (g_key_file_has_key(keyfile, "encoding", "enable_diff", NULL))
     {
         g_autofree gchar *diff = g_key_file_get_string(keyfile, "encoding", "enable_diff", NULL);
@@ -330,7 +288,6 @@ grdc_config_merge_cli(GrdcConfig *self,
                       gint width,
                       gint height,
                       const gchar *encoder_mode,
-                      const gchar *quality,
                       gint diff_override,
                       GError **error)
 {
@@ -377,14 +334,6 @@ grdc_config_merge_cli(GrdcConfig *self,
     if (encoder_mode != NULL)
     {
         if (!grdc_config_set_mode_from_string(self, encoder_mode, error))
-        {
-            return FALSE;
-        }
-    }
-
-    if (quality != NULL)
-    {
-        if (!grdc_config_set_quality_from_string(self, quality, error))
         {
             return FALSE;
         }

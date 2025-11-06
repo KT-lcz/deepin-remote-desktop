@@ -15,8 +15,6 @@ struct _GrdcRfxEncoder
     guint width;
     guint height;
     gboolean enable_diff;
-    GrdcRfxQuality quality;
-    guint64 last_frame_timestamp;
     GByteArray *bottom_up_frame;
     GByteArray *previous_frame;
     GArray *tile_hashes;
@@ -52,33 +50,6 @@ hash_tile(const guint8 *data,
     return hash;
 }
 
-static gboolean
-should_drop_frame(GrdcRfxEncoder *self, guint64 timestamp)
-{
-    if (self->quality == GRDC_RFX_QUALITY_HIGH || timestamp == 0)
-    {
-        self->last_frame_timestamp = timestamp;
-        return FALSE;
-    }
-
-    guint64 min_interval =
-        (self->quality == GRDC_RFX_QUALITY_MEDIUM) ? G_USEC_PER_SEC / 40 : G_USEC_PER_SEC / 20;
-
-    if (self->last_frame_timestamp == 0 || timestamp <= self->last_frame_timestamp)
-    {
-        self->last_frame_timestamp = timestamp;
-        return FALSE;
-    }
-
-    if (timestamp - self->last_frame_timestamp < min_interval)
-    {
-        return TRUE;
-    }
-
-    self->last_frame_timestamp = timestamp;
-    return FALSE;
-}
-
 static void
 grdc_rfx_encoder_dispose(GObject *object)
 {
@@ -111,8 +82,6 @@ grdc_rfx_encoder_init(GrdcRfxEncoder *self)
     self->width = 0;
     self->height = 0;
     self->enable_diff = FALSE;
-    self->quality = GRDC_RFX_QUALITY_HIGH;
-    self->last_frame_timestamp = 0;
     self->bottom_up_frame = g_byte_array_new();
     self->previous_frame = g_byte_array_new();
     self->tile_hashes = g_array_new(FALSE, TRUE, sizeof(guint64));
@@ -126,26 +95,11 @@ grdc_rfx_encoder_new(void)
     return g_object_new(GRDC_TYPE_RFX_ENCODER, NULL);
 }
 
-static RLGR_MODE
-quality_to_rlgr(GrdcRfxQuality quality)
-{
-    switch (quality)
-    {
-        case GRDC_RFX_QUALITY_LOW:
-            return RLGR1;
-        case GRDC_RFX_QUALITY_MEDIUM:
-        case GRDC_RFX_QUALITY_HIGH:
-        default:
-            return RLGR3;
-    }
-}
-
 gboolean
 grdc_rfx_encoder_configure(GrdcRfxEncoder *self,
                            guint width,
                            guint height,
                            gboolean enable_diff,
-                           GrdcRfxQuality quality,
                            GError **error)
 {
     g_return_val_if_fail(GRDC_IS_RFX_ENCODER(self), FALSE);
@@ -192,13 +146,11 @@ grdc_rfx_encoder_configure(GrdcRfxEncoder *self,
         return FALSE;
     }
 
-    rfx_context_set_mode(self->context, quality_to_rlgr(quality));
+    rfx_context_set_mode(self->context, RLGR3);
 
     self->width = width;
     self->height = height;
     self->enable_diff = enable_diff;
-    self->quality = quality;
-    self->last_frame_timestamp = 0;
     self->force_keyframe = TRUE;
 
     g_byte_array_set_size(self->bottom_up_frame, (gsize)width * height * 4u);
@@ -233,8 +185,6 @@ grdc_rfx_encoder_reset(GrdcRfxEncoder *self)
     self->width = 0;
     self->height = 0;
     self->enable_diff = FALSE;
-    self->quality = GRDC_RFX_QUALITY_HIGH;
-    self->last_frame_timestamp = 0;
     self->tiles_x = 0;
     self->tiles_y = 0;
     self->force_keyframe = TRUE;
@@ -350,19 +300,6 @@ grdc_rfx_encoder_encode(GrdcRfxEncoder *self,
     }
 
     guint64 timestamp = grdc_frame_get_timestamp(frame);
-    if (should_drop_frame(self, timestamp))
-    {
-        grdc_encoded_frame_configure(output,
-                                     self->width,
-                                     self->height,
-                                     grdc_frame_get_stride(frame),
-                                     FALSE,
-                                     timestamp,
-                                     GRDC_FRAME_CODEC_RFX);
-        grdc_encoded_frame_set_quality(output, 0, 0, FALSE);
-        return TRUE;
-    }
-
     if (!rfx_context_reset(self->context, self->width, self->height))
     {
         g_set_error_literal(error,

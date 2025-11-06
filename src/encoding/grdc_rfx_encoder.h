@@ -7,13 +7,6 @@
 
 G_BEGIN_DECLS
 
-typedef enum
-{
-    GRDC_RFX_QUALITY_HIGH,
-    GRDC_RFX_QUALITY_MEDIUM,
-    GRDC_RFX_QUALITY_LOW
-} GrdcRfxQuality;
-
 #define GRDC_TYPE_RFX_ENCODER (grdc_rfx_encoder_get_type())
 G_DECLARE_FINAL_TYPE(GrdcRfxEncoder, grdc_rfx_encoder, GRDC, RFX_ENCODER, GObject)
 
@@ -23,7 +16,6 @@ gboolean grdc_rfx_encoder_configure(GrdcRfxEncoder *self,
                                     guint width,
                                     guint height,
                                     gboolean enable_diff,
-                                    GrdcRfxQuality quality,
                                     GError **error);
 
 void grdc_rfx_encoder_reset(GrdcRfxEncoder *self);
