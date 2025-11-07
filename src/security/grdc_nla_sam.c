@@ -15,32 +15,43 @@ struct _GrdcNlaSamFile
     gchar *path;
 };
 
-/* 根据用户名/密码生成 SAM 条目文本（username:::NTLM_HASH:::）。 */
-static gchar *
-grdc_nla_sam_format_entry(const gchar *username, const gchar *password)
+/* 简单的内存清零帮助函数，避免编译器优化。 */
+static void
+grdc_nla_memzero(gchar *buffer, gsize len)
 {
-    uint8_t hash[16];
-    const gsize username_len = strlen(username);
-    const gsize buffer_len = username_len + 3 + 32 + 4;
-    gchar *line = g_malloc0(buffer_len);
+    if (buffer == NULL || len == 0)
+    {
+        return;
+    }
 
-    NTOWFv1A((LPSTR)password, strlen(password), hash);
+    volatile gchar *ptr = buffer;
+    while (len-- > 0)
+    {
+        ptr[len] = 0;
+    }
+}
+
+/* 根据用户名和 NT 哈希生成 SAM 条目文本（username:::NTLM_HASH:::）。 */
+static gchar *
+grdc_nla_sam_format_entry(const gchar *username, const gchar *nt_hash_hex)
+{
+    const gsize username_len = strlen(username);
+    const gsize hash_len = strlen(nt_hash_hex);
+    const gsize buffer_len = username_len + 3 + hash_len + 4;
+    gchar *line = g_malloc0(buffer_len);
 
     g_stpcpy(line, username);
     g_stpcpy(line + strlen(line), ":::");
-    for (gsize i = 0; i < G_N_ELEMENTS(hash); i++)
-    {
-        g_snprintf(line + strlen(line), 3, "%02" PRIx8, hash[i]);
-    }
+    g_stpcpy(line + strlen(line), nt_hash_hex);
     g_stpcpy(line + strlen(line), ":::\n");
     return line;
 }
 
 /* 将内容写入 SAM 文件，确保完整落盘。 */
 static gboolean
-grdc_nla_sam_write_entry(int fd, const gchar *username, const gchar *password, GError **error)
+grdc_nla_sam_write_entry(int fd, const gchar *username, const gchar *nt_hash_hex, GError **error)
 {
-    g_autofree gchar *entry = grdc_nla_sam_format_entry(username, password);
+    g_autofree gchar *entry = grdc_nla_sam_format_entry(username, nt_hash_hex);
     const gsize total = strlen(entry);
     gsize written = 0;
 
@@ -73,6 +84,8 @@ grdc_nla_sam_write_entry(int fd, const gchar *username, const gchar *password, G
         return FALSE;
     }
 
+    grdc_nla_memzero(entry, total);
+
     return TRUE;
 }
 
@@ -89,10 +102,10 @@ grdc_nla_sam_default_dir(void)
 }
 
 GrdcNlaSamFile *
-grdc_nla_sam_file_new(const gchar *username, const gchar *password, GError **error)
+grdc_nla_sam_file_new(const gchar *username, const gchar *nt_hash_hex, GError **error)
 {
     g_return_val_if_fail(username != NULL && *username != '\0', NULL);
-    g_return_val_if_fail(password != NULL && *password != '\0', NULL);
+    g_return_val_if_fail(nt_hash_hex != NULL && *nt_hash_hex != '\0', NULL);
 
     g_autofree gchar *base_dir = grdc_nla_sam_default_dir();
     if (g_mkdir_with_parents(base_dir, 0700) != 0 && errno != EEXIST)
@@ -118,7 +131,7 @@ grdc_nla_sam_file_new(const gchar *username, const gchar *password, GError **err
         return NULL;
     }
 
-    if (!grdc_nla_sam_write_entry(fd, username, password, error))
+    if (!grdc_nla_sam_write_entry(fd, username, nt_hash_hex, error))
     {
         close(fd);
         g_unlink(template_path);
@@ -154,4 +167,24 @@ grdc_nla_sam_file_free(GrdcNlaSamFile *sam_file)
 
     g_free(sam_file->path);
     g_free(sam_file);
+}
+
+gchar *
+grdc_nla_sam_hash_password(const gchar *password)
+{
+    g_return_val_if_fail(password != NULL && *password != '\0', NULL);
+
+    uint8_t hash[16];
+    if (!NTOWFv1A((LPSTR)password, strlen(password), hash))
+    {
+        g_warning("Failed to initialize NT hash for NLA credentials");
+        return NULL;
+    }
+
+    gchar *hex = g_malloc0(33);
+    for (gsize i = 0; i < G_N_ELEMENTS(hash); i++)
+    {
+        g_snprintf(hex + (i * 2), 3, "%02" PRIx8, hash[i]);
+    }
+    return hex;
 }

@@ -3,6 +3,7 @@
 #include <gio/gio.h>
 #include <glib-unix.h>
 #include <signal.h>
+#include <winpr/ssl.h>
 
 #include "transport/grdc_rdp_listener.h"
 #include "security/grdc_tls_credentials.h"
@@ -334,6 +335,11 @@ grdc_application_init(GrdcApplication *self)
     self->config = grdc_config_new();
     self->runtime = grdc_server_runtime_new();
     self->tls_credentials = NULL;
+
+    if (!winpr_InitializeSSL(WINPR_SSL_INIT_DEFAULT))
+    {
+        g_warning("Failed to initialize WinPR SSL context, NTLM may be unavailable");
+    }
 }
 
 /* 绑定类虚函数。 */

@@ -1,6 +1,7 @@
 #include "transport/grdc_rdp_listener.h"
 
 #include <gio/gio.h>
+#include <string.h>
 #include <freerdp/freerdp.h>
 #include <freerdp/listener.h>
 #include <freerdp/settings.h>
@@ -37,11 +38,43 @@ struct _GrdcRdpListener
     GrdcServerRuntime *runtime;
     gchar *nla_username;
     gchar *nla_password;
+    gchar *nla_hash;
 };
 
 G_DEFINE_TYPE(GrdcRdpListener, grdc_rdp_listener, G_TYPE_OBJECT)
 
 static void grdc_rdp_listener_stop_internal(GrdcRdpListener *self);
+
+static gboolean grdc_rdp_listener_ensure_nla_hash(GrdcRdpListener *self, GError **error)
+{
+    if (self->nla_hash != NULL)
+    {
+        return TRUE;
+    }
+
+    if (self->nla_password == NULL)
+    {
+        g_set_error_literal(error,
+                            G_IO_ERROR,
+                            G_IO_ERROR_FAILED,
+                            "NLA password is not available");
+        return FALSE;
+    }
+
+    self->nla_hash = grdc_nla_sam_hash_password(self->nla_password);
+    if (self->nla_hash == NULL)
+    {
+        g_set_error_literal(error,
+                            G_IO_ERROR,
+                            G_IO_ERROR_FAILED,
+                            "Failed to derive NT hash for NLA user");
+        return FALSE;
+    }
+
+    memset(self->nla_password, 0, strlen(self->nla_password));
+    g_clear_pointer(&self->nla_password, g_free);
+    return TRUE;
+}
 
 static void
 grdc_rdp_listener_dispose(GObject *object)
@@ -59,7 +92,16 @@ grdc_rdp_listener_finalize(GObject *object)
     g_clear_pointer(&self->bind_address, g_free);
     g_clear_pointer(&self->sessions, g_ptr_array_unref);
     g_clear_pointer(&self->nla_username, g_free);
-    g_clear_pointer(&self->nla_password, g_free);
+    if (self->nla_password != NULL)
+    {
+        memset(self->nla_password, 0, strlen(self->nla_password));
+        g_clear_pointer(&self->nla_password, g_free);
+    }
+    if (self->nla_hash != NULL)
+    {
+        memset(self->nla_hash, 0, strlen(self->nla_hash));
+        g_clear_pointer(&self->nla_hash, g_free);
+    }
     G_OBJECT_CLASS(grdc_rdp_listener_parent_class)->finalize(object);
 }
 
@@ -94,6 +136,7 @@ grdc_rdp_listener_new(const gchar *bind_address,
     self->runtime = g_object_ref(runtime);
     self->nla_username = g_strdup(nla_username);
     self->nla_password = g_strdup(nla_password);
+    self->nla_hash = NULL;
     return self;
 }
 
@@ -270,7 +313,8 @@ grdc_configure_peer_settings(GrdcRdpListener *self, freerdp_peer *client, GError
         return FALSE;
     }
 
-    if (self->nla_username == NULL || self->nla_password == NULL)
+    if (self->nla_username == NULL ||
+        !grdc_rdp_listener_ensure_nla_hash(self, error))
     {
         g_set_error_literal(error,
                             G_IO_ERROR,
@@ -280,7 +324,7 @@ grdc_configure_peer_settings(GrdcRdpListener *self, freerdp_peer *client, GError
     }
 
     g_clear_pointer(&ctx->nla_sam, grdc_nla_sam_file_free);
-    ctx->nla_sam = grdc_nla_sam_file_new(self->nla_username, self->nla_password, error);
+    ctx->nla_sam = grdc_nla_sam_file_new(self->nla_username, self->nla_hash, error);
     if (ctx->nla_sam == NULL)
     {
         return FALSE;
