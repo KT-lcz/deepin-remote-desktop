@@ -11,12 +11,14 @@
 #include "input/grdc_input_dispatcher.h"
 #include "session/grdc_rdp_session.h"
 #include "security/grdc_tls_credentials.h"
+#include "security/grdc_nla_sam.h"
 
 typedef struct
 {
     rdpContext context;
     GrdcRdpSession *session;
     GrdcServerRuntime *runtime;
+    GrdcNlaSamFile *nla_sam;
 } GrdcRdpPeerContext;
 
 static BOOL grdc_rdp_peer_keyboard_event(rdpInput *input, UINT16 flags, UINT8 code);
@@ -33,6 +35,8 @@ struct _GrdcRdpListener
     guint tick_id;
     GPtrArray *sessions;
     GrdcServerRuntime *runtime;
+    gchar *nla_username;
+    gchar *nla_password;
 };
 
 G_DEFINE_TYPE(GrdcRdpListener, grdc_rdp_listener, G_TYPE_OBJECT)
@@ -54,6 +58,8 @@ grdc_rdp_listener_finalize(GObject *object)
     GrdcRdpListener *self = GRDC_RDP_LISTENER(object);
     g_clear_pointer(&self->bind_address, g_free);
     g_clear_pointer(&self->sessions, g_ptr_array_unref);
+    g_clear_pointer(&self->nla_username, g_free);
+    g_clear_pointer(&self->nla_password, g_free);
     G_OBJECT_CLASS(grdc_rdp_listener_parent_class)->finalize(object);
 }
 
@@ -72,14 +78,22 @@ grdc_rdp_listener_init(GrdcRdpListener *self)
 }
 
 GrdcRdpListener *
-grdc_rdp_listener_new(const gchar *bind_address, guint16 port, GrdcServerRuntime *runtime)
+grdc_rdp_listener_new(const gchar *bind_address,
+                      guint16 port,
+                      GrdcServerRuntime *runtime,
+                      const gchar *nla_username,
+                      const gchar *nla_password)
 {
     g_return_val_if_fail(GRDC_IS_SERVER_RUNTIME(runtime), NULL);
+    g_return_val_if_fail(nla_username != NULL && *nla_username != '\0', NULL);
+    g_return_val_if_fail(nla_password != NULL && *nla_password != '\0', NULL);
 
     GrdcRdpListener *self = g_object_new(GRDC_TYPE_RDP_LISTENER, NULL);
     self->bind_address = g_strdup(bind_address != NULL ? bind_address : "0.0.0.0");
     self->port = port;
     self->runtime = g_object_ref(runtime);
+    self->nla_username = g_strdup(nla_username);
+    self->nla_password = g_strdup(nla_password);
     return self;
 }
 
@@ -96,6 +110,7 @@ grdc_peer_context_new(freerdp_peer *client, rdpContext *context)
     GrdcRdpPeerContext *ctx = (GrdcRdpPeerContext *)context;
     ctx->session = grdc_rdp_session_new(client);
     ctx->runtime = NULL;
+    ctx->nla_sam = NULL;
     return ctx->session != NULL;
 }
 
@@ -114,6 +129,8 @@ grdc_peer_context_free(freerdp_peer *client G_GNUC_UNUSED, rdpContext *context)
         g_object_unref(ctx->runtime);
         ctx->runtime = NULL;
     }
+
+    g_clear_pointer(&ctx->nla_sam, grdc_nla_sam_file_free);
 }
 
 static BOOL
@@ -124,7 +141,9 @@ grdc_peer_post_connect(freerdp_peer *client)
     {
         return FALSE;
     }
-    return grdc_rdp_session_post_connect(ctx->session);
+    BOOL result = grdc_rdp_session_post_connect(ctx->session);
+    g_clear_pointer(&ctx->nla_sam, grdc_nla_sam_file_free);
+    return result;
 }
 
 static BOOL
@@ -230,6 +249,12 @@ grdc_configure_peer_settings(GrdcRdpListener *self, freerdp_peer *client, GError
         return FALSE;
     }
 
+    GrdcRdpPeerContext *ctx = (GrdcRdpPeerContext *)client->context;
+    if (ctx == NULL)
+    {
+        return FALSE;
+    }
+
     GrdcTlsCredentials *tls = grdc_server_runtime_get_tls_credentials(self->runtime);
     if (tls == NULL)
     {
@@ -242,6 +267,33 @@ grdc_configure_peer_settings(GrdcRdpListener *self, freerdp_peer *client, GError
 
     if (!grdc_tls_credentials_apply(tls, settings, error))
     {
+        return FALSE;
+    }
+
+    if (self->nla_username == NULL || self->nla_password == NULL)
+    {
+        g_set_error_literal(error,
+                            G_IO_ERROR,
+                            G_IO_ERROR_FAILED,
+                            "NLA credentials not configured");
+        return FALSE;
+    }
+
+    g_clear_pointer(&ctx->nla_sam, grdc_nla_sam_file_free);
+    ctx->nla_sam = grdc_nla_sam_file_new(self->nla_username, self->nla_password, error);
+    if (ctx->nla_sam == NULL)
+    {
+        return FALSE;
+    }
+
+    if (!freerdp_settings_set_string(settings,
+                                     FreeRDP_NtlmSamFile,
+                                     grdc_nla_sam_file_get_path(ctx->nla_sam)))
+    {
+        g_set_error_literal(error,
+                            G_IO_ERROR,
+                            G_IO_ERROR_FAILED,
+                            "Failed to configure SAM database for NLA");
         return FALSE;
     }
 
@@ -292,8 +344,8 @@ grdc_configure_peer_settings(GrdcRdpListener *self, freerdp_peer *client, GError
         return FALSE;
     }
 
-    if (!freerdp_settings_set_bool(settings, FreeRDP_TlsSecurity, TRUE) ||
-        !freerdp_settings_set_bool(settings, FreeRDP_NlaSecurity, FALSE) ||
+    if (!freerdp_settings_set_bool(settings, FreeRDP_TlsSecurity, FALSE) ||
+        !freerdp_settings_set_bool(settings, FreeRDP_NlaSecurity, TRUE) ||
         !freerdp_settings_set_bool(settings, FreeRDP_RdpSecurity, FALSE))
     {
         g_set_error_literal(error,

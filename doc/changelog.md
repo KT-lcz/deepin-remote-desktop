@@ -1,5 +1,14 @@
 # 变更记录
 
+## 2025-11-07：接入 NLA 安全协议
+- **目的**：对齐 GNOME Remote Desktop 的 CredSSP 流程，让 `glib-rewrite` 通过 NLA 完成身份验证并阻止 TLS/RDP 降级。
+- **范围**：`core/grdc_application.c`、`core/grdc_config.*`、`transport/grdc_rdp_listener.*`、`security/grdc_tls_credentials.c`、`security/grdc_nla_sam.*`、`config/default.ini`、`doc/architecture.md`、`.codex/plan/实现NLA安全协议.md`。
+- **主要改动**：
+  1. CLI/INI 新增 `--nla-username/--nla-password` 与 `[auth]` 配置，配置合并阶段校验凭据缺失即报错。
+  2. 新增 `grdc_nla_sam` 模块生成临时 SAM 文件，监听器为每个 peer 注入 `FreeRDP_NtlmSamFile`，并在 PostConnect/析构时删除文件。
+  3. 监听器切换到 `NlaSecurity=TRUE`、`TlsSecurity=FALSE`，TLS 模块仅负责证书注入；文档补充安全链路 mermaid 图与配置说明。
+- **影响**：服务端现在要求显式提供 NLA 凭据；凭据泄露范围限定在内存+一次性 SAM 文件，客户端需支持 NLA（CredSSP）才能接入。
+
 ## 2025-11-06：日志与注释审视
 - **目的**：提升运行态可观察性并补齐核心线程流程的中文注释，方便后续排障。
 - **范围**：`core/grdc_application.c`、`core/grdc_server_runtime.c`、`transport/grdc_rdp_listener.c`、`session/grdc_rdp_session.c`、`security/grdc_tls_credentials.c`、`doc/architecture.md`、`.codex/plan/logging-annotation.md`。

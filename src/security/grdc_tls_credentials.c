@@ -171,10 +171,5 @@ grdc_tls_credentials_apply(GrdcTlsCredentials *self, rdpSettings *settings, GErr
         return FALSE;
     }
 
-    freerdp_settings_set_bool(settings, FreeRDP_ServerMode, TRUE);
-    freerdp_settings_set_bool(settings, FreeRDP_TlsSecurity, TRUE);
-    freerdp_settings_set_bool(settings, FreeRDP_NlaSecurity, FALSE);
-    freerdp_settings_set_bool(settings, FreeRDP_RdpSecurity, FALSE);
-
     return TRUE;
 }

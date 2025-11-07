@@ -10,6 +10,8 @@ struct _GrdcConfig
     guint16 port;
     gchar *certificate_path;
     gchar *private_key_path;
+    gchar *nla_username;
+    gchar *nla_password;
     gchar *base_dir;
     GrdcEncodingOptions encoding;
 };
@@ -27,6 +29,8 @@ grdc_config_dispose(GObject *object)
     g_clear_pointer(&self->bind_address, g_free);
     g_clear_pointer(&self->certificate_path, g_free);
     g_clear_pointer(&self->private_key_path, g_free);
+    g_clear_pointer(&self->nla_username, g_free);
+    g_clear_pointer(&self->nla_password, g_free);
     g_clear_pointer(&self->base_dir, g_free);
     G_OBJECT_CLASS(grdc_config_parent_class)->dispose(object);
 }
@@ -50,6 +54,8 @@ grdc_config_init(GrdcConfig *self)
     self->encoding.mode = GRDC_ENCODING_MODE_RFX;
     self->encoding.enable_frame_diff = TRUE;
     self->base_dir = g_get_current_dir();
+    self->nla_username = NULL;
+    self->nla_password = NULL;
 }
 
 /* 构造新的配置实例。 */
@@ -215,6 +221,18 @@ grdc_config_load_from_key_file(GrdcConfig *self, GKeyFile *keyfile, GError **err
         self->encoding.enable_frame_diff = value;
     }
 
+    if (g_key_file_has_key(keyfile, "auth", "username", NULL))
+    {
+        g_clear_pointer(&self->nla_username, g_free);
+        self->nla_username = g_key_file_get_string(keyfile, "auth", "username", NULL);
+    }
+
+    if (g_key_file_has_key(keyfile, "auth", "password", NULL))
+    {
+        g_clear_pointer(&self->nla_password, g_free);
+        self->nla_password = g_key_file_get_string(keyfile, "auth", "password", NULL);
+    }
+
     return TRUE;
 }
 
@@ -285,6 +303,8 @@ grdc_config_merge_cli(GrdcConfig *self,
                       gint port,
                       const gchar *cert_path,
                       const gchar *key_path,
+                      const gchar *nla_username,
+                      const gchar *nla_password,
                       gint width,
                       gint height,
                       const gchar *encoder_mode,
@@ -321,6 +341,16 @@ grdc_config_merge_cli(GrdcConfig *self,
         grdc_config_set_path(self, &self->private_key_path, key_path);
     }
 
+    if (nla_username != NULL)
+    {
+        grdc_config_set_string(&self->nla_username, nla_username);
+    }
+
+    if (nla_password != NULL)
+    {
+        grdc_config_set_string(&self->nla_password, nla_password);
+    }
+
     if (width > 0)
     {
         self->encoding.width = (guint)width;
@@ -350,6 +380,16 @@ grdc_config_merge_cli(GrdcConfig *self,
                             G_OPTION_ERROR,
                             G_OPTION_ERROR_BAD_VALUE,
                             "TLS certificate and private key must be specified via config or CLI");
+        return FALSE;
+    }
+
+    if (self->nla_username == NULL || *self->nla_username == '\0' ||
+        self->nla_password == NULL || *self->nla_password == '\0')
+    {
+        g_set_error_literal(error,
+                            G_OPTION_ERROR,
+                            G_OPTION_ERROR_BAD_VALUE,
+                            "NLA username and password must be specified via config or CLI");
         return FALSE;
     }
 
@@ -386,6 +426,20 @@ grdc_config_get_private_key_path(GrdcConfig *self)
 {
     g_return_val_if_fail(GRDC_IS_CONFIG(self), NULL);
     return self->private_key_path;
+}
+
+const gchar *
+grdc_config_get_nla_username(GrdcConfig *self)
+{
+    g_return_val_if_fail(GRDC_IS_CONFIG(self), NULL);
+    return self->nla_username;
+}
+
+const gchar *
+grdc_config_get_nla_password(GrdcConfig *self)
+{
+    g_return_val_if_fail(GRDC_IS_CONFIG(self), NULL);
+    return self->nla_password;
 }
 
 /* 获取采集宽度。 */

@@ -146,6 +146,17 @@ grdc_application_start_listener(GrdcApplication *self, GError **error)
         return FALSE;
     }
 
+    const gchar *nla_username = grdc_config_get_nla_username(self->config);
+    const gchar *nla_password = grdc_config_get_nla_password(self->config);
+    if (nla_username == NULL || nla_password == NULL)
+    {
+        g_set_error_literal(error,
+                            G_IO_ERROR,
+                            G_IO_ERROR_INVALID_ARGUMENT,
+                            "NLA username/password missing after config merge");
+        return FALSE;
+    }
+
     if (self->tls_credentials == NULL)
     {
         self->tls_credentials = grdc_tls_credentials_new(cert_path, key_path, error);
@@ -164,7 +175,9 @@ grdc_application_start_listener(GrdcApplication *self, GError **error)
 
     self->listener = grdc_rdp_listener_new(grdc_config_get_bind_address(self->config),
                                            grdc_config_get_port(self->config),
-                                           self->runtime);
+                                           self->runtime,
+                                           nla_username,
+                                           nla_password);
     if (self->listener == NULL)
     {
         g_set_error_literal(error,
@@ -199,6 +212,8 @@ grdc_application_parse_options(GrdcApplication *self, gint *argc, gchar ***argv,
     gchar *encoder_mode = NULL;
     gboolean enable_diff_flag = FALSE;
     gboolean disable_diff_flag = FALSE;
+    gchar *nla_username = NULL;
+    gchar *nla_password = NULL;
 
     GOptionEntry entries[] = {
         {"bind-address", 'b', 0, G_OPTION_ARG_STRING, &bind_address, "Bind address (default 0.0.0.0)", "ADDR"},
@@ -209,6 +224,8 @@ grdc_application_parse_options(GrdcApplication *self, gint *argc, gchar ***argv,
         {"width", 0, 0, G_OPTION_ARG_INT, &capture_width, "Capture width override", "PX"},
         {"height", 0, 0, G_OPTION_ARG_INT, &capture_height, "Capture height override", "PX"},
         {"encoder", 0, 0, G_OPTION_ARG_STRING, &encoder_mode, "Encoder mode (raw|rfx)", "MODE"},
+        {"nla-username", 0, 0, G_OPTION_ARG_STRING, &nla_username, "NLA username", "USER"},
+        {"nla-password", 0, 0, G_OPTION_ARG_STRING, &nla_password, "NLA password", "PASS"},
         {"enable-diff", 0, 0, G_OPTION_ARG_NONE, &enable_diff_flag, "Enable frame difference even if disabled in config", NULL},
         {"disable-diff", 0, 0, G_OPTION_ARG_NONE, &disable_diff_flag, "Disable frame difference regardless of config", NULL},
         {NULL}
@@ -223,6 +240,9 @@ grdc_application_parse_options(GrdcApplication *self, gint *argc, gchar ***argv,
         g_clear_pointer(&cert_path, g_free);
         g_clear_pointer(&key_path, g_free);
         g_clear_pointer(&config_path, g_free);
+        g_clear_pointer(&encoder_mode, g_free);
+        g_clear_pointer(&nla_username, g_free);
+        g_clear_pointer(&nla_password, g_free);
         return FALSE;
     }
 
@@ -237,6 +257,8 @@ grdc_application_parse_options(GrdcApplication *self, gint *argc, gchar ***argv,
         g_clear_pointer(&key_path, g_free);
         g_clear_pointer(&config_path, g_free);
         g_clear_pointer(&encoder_mode, g_free);
+        g_clear_pointer(&nla_username, g_free);
+        g_clear_pointer(&nla_password, g_free);
         return FALSE;
     }
 
@@ -249,6 +271,9 @@ grdc_application_parse_options(GrdcApplication *self, gint *argc, gchar ***argv,
             g_clear_pointer(&bind_address, g_free);
             g_clear_pointer(&cert_path, g_free);
             g_clear_pointer(&key_path, g_free);
+            g_clear_pointer(&encoder_mode, g_free);
+            g_clear_pointer(&nla_username, g_free);
+            g_clear_pointer(&nla_password, g_free);
             return FALSE;
         }
         g_message("Configuration loaded from %s", config_path);
@@ -273,6 +298,8 @@ grdc_application_parse_options(GrdcApplication *self, gint *argc, gchar ***argv,
                                port,
                                cert_path,
                                key_path,
+                               nla_username,
+                               nla_password,
                                capture_width,
                                capture_height,
                                encoder_mode,
@@ -284,6 +311,8 @@ grdc_application_parse_options(GrdcApplication *self, gint *argc, gchar ***argv,
         g_clear_pointer(&key_path, g_free);
         g_clear_pointer(&config_path, g_free);
         g_clear_pointer(&encoder_mode, g_free);
+        g_clear_pointer(&nla_username, g_free);
+        g_clear_pointer(&nla_password, g_free);
         return FALSE;
     }
 
@@ -292,6 +321,8 @@ grdc_application_parse_options(GrdcApplication *self, gint *argc, gchar ***argv,
     g_clear_pointer(&key_path, g_free);
     g_clear_pointer(&config_path, g_free);
     g_clear_pointer(&encoder_mode, g_free);
+    g_clear_pointer(&nla_username, g_free);
+    g_clear_pointer(&nla_password, g_free);
 
     return TRUE;
 }

@@ -12,6 +12,7 @@
 - `core/grdc_server_runtime`：聚合 Capture/Encoding/Input 子系统，提供 `prepare_stream()` / `stop()` 接口，并在内部启动编码线程，从抓屏队列取帧并通过 `GAsyncQueue` 将编码帧传递给会话层；`pull_encoded_frame()` 提供基于超时的阻塞拉取，停服时输出资源回收日志。
 - `core/grdc_config`：解析 INI/CLI 配置，集中管理绑定地址、TLS 证书、捕获尺寸等运行参数。
 - `security/grdc_tls_credentials`：加载并缓存 TLS 证书/私钥，供运行时向 FreeRDP Settings 注入。
+- `security/grdc_nla_sam`：基于用户名/密码生成临时 SAM 文件，写入 `FreeRDP_NtlmSamFile`，允许 CredSSP 在 NLA 期间读取 NT 哈希。
 
 ### 2. 采集层
 - `capture/grdc_capture_manager`：启动/停止屏幕捕获，维护帧队列。
@@ -40,6 +41,28 @@
 1. 应用启动后创建 `GrdcServerRuntime`，准备编码器与采集模块。
 2. `GrdcCaptureManager` 启动 `GrdcX11Capture`，持续推送 `GrdcFrame`；运行时编码线程消费该队列并将 `GrdcEncodedFrame` 写入异步队列。
 3. 会话层从编码队列拉取帧，经 `SurfaceFrameMarker`/`SurfaceBits` 推送给客户端，并在无帧时保持事件响应。
+
+## 安全链路（TLS + NLA）
+- `config/default.ini` 及 CLI 新增 `[auth]`/`--nla-{username,password}`，服务进程启动时必须提供 NLA 凭据，才能生成 SAM 文件。
+- `GrdcRdpListener` 在 `grdc_configure_peer_settings()` 阶段串联 TLS 证书与 SAM 文件：一方面走 `grdc_tls_credentials_apply()` 注入 PEM，另一方面使用 `grdc_nla_sam_file_new()` 生成一次性数据库路径并设置 `FreeRDP_NtlmSamFile`。
+- 监听器在设置展示参数后强制 `NlaSecurity=TRUE`、`TlsSecurity=FALSE`、`RdpSecurity=FALSE`，从而锁定 CredSSP，不再回退纯 TLS/RDP。
+- SAM 文件在 `PostConnect` 即 CredSSP 完成后立即删除，避免磁盘残留；失败路径由 peer context 析构兜底。
+
+```mermaid
+sequenceDiagram
+    participant CFG as GrdcConfig
+    participant APP as GrdcApplication
+    participant LSN as GrdcRdpListener
+    participant SAM as GrdcNlaSamFile
+    participant FRDP as FreeRDP Server
+    CFG->>APP: TLS paths + NLA username/password
+    APP->>LSN: Pass bind/port/runtime + credentials
+    LSN->>SAM: g_mkstemp + NTOWFv1A -> temp SAM
+    SAM-->>LSN: expose file path
+    LSN->>FRDP: RdpServerCertificate, NtlmSamFile, NlaSecurity=TRUE
+    FRDP-->>SAM: Read NT hash during CredSSP
+    LSN->>SAM: Delete file after PostConnect/cleanup
+```
 
 ## 设计原则落实
 - **SOLID**：各模块限定单一职责；监听器依赖抽象的 runtime；待迁移的编码/输入将通过接口剥离具体实现。
