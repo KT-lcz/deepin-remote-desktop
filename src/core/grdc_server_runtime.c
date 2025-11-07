@@ -137,12 +137,18 @@ grdc_server_runtime_stop(GrdcServerRuntime *self)
 {
     g_return_if_fail(GRDC_IS_SERVER_RUNTIME(self));
 
+    const gboolean had_stream = self->has_encoding_options;
     grdc_capture_manager_stop(self->capture);
     grdc_server_runtime_stop_encoder(self);
     grdc_encoding_manager_reset(self->encoder);
     grdc_input_dispatcher_flush(self->input);
     grdc_input_dispatcher_stop(self->input);
     self->has_encoding_options = FALSE;
+
+    if (had_stream)
+    {
+        g_message("Server runtime stopped and released capture/encoding resources");
+    }
 }
 
 gboolean

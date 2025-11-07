@@ -251,6 +251,7 @@ grdc_application_parse_options(GrdcApplication *self, gint *argc, gchar ***argv,
             g_clear_pointer(&key_path, g_free);
             return FALSE;
         }
+        g_message("Configuration loaded from %s", config_path);
     }
     else if (self->config == NULL)
     {
@@ -354,7 +355,9 @@ grdc_application_run(GrdcApplication *self, int argc, char **argv, GError **erro
     g_message("RDP service listening on %s:%u",
               grdc_config_get_bind_address(self->config),
               grdc_config_get_port(self->config));
-    g_message("Loaded TLS certificate: %s", grdc_config_get_certificate_path(self->config));
+    g_message("Loaded TLS credentials (cert=%s, key=%s)",
+              grdc_config_get_certificate_path(self->config),
+              grdc_config_get_private_key_path(self->config));
     g_main_loop_run(self->loop);
 
     g_message("Main loop terminated");

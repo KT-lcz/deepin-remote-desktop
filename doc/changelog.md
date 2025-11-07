@@ -1,5 +1,15 @@
 # 变更记录
 
+## 2025-11-06：日志与注释审视
+- **目的**：提升运行态可观察性并补齐核心线程流程的中文注释，方便后续排障。
+- **范围**：`core/grdc_application.c`、`core/grdc_server_runtime.c`、`transport/grdc_rdp_listener.c`、`session/grdc_rdp_session.c`、`security/grdc_tls_credentials.c`、`doc/architecture.md`、`.codex/plan/logging-annotation.md`。
+- **主要改动**：
+  1. 应用层在加载配置文件与 TLS 凭据时输出详细日志，明确证书与私钥路径。
+  2. 运行时停止、监听器启动以及 RDP 会话事件线程生命周期新增日志，关键路径可追踪。
+  3. TLS 凭据加载与事件线程循环补充中文注释，阐明错误传播与等待模型。
+  4. 架构文档同步描述新的日志行为，计划文档记录任务完成情况。
+- **影响**：停服、监听循环与事件线程问题可快速定位；运行配置来源清晰，后续分析启动失败时更易还原环境。
+
 ## 2025-11-06：移除质量档位与 RLGR 固定策略
 - **修改目的**：纠正 RLGR1/3 与画质档位的错误关联，避免质量配置误导用户；统一使用 RLGR3 并暂时下线“高/中/低”画质参数。
 - **修改范围**：`core/grdc_encoding_options.h`、`core/grdc_config.*`、`core/grdc_application.c`、`encoding/grdc_encoding_manager.c`、`encoding/grdc_rfx_encoder.*`、`config/default.ini`、`doc/architecture.md`、`.codex/plan/rlgr-cleanup.md`。

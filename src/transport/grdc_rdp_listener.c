@@ -459,6 +459,10 @@ grdc_rdp_listener_open(GrdcRdpListener *self, GError **error)
         return FALSE;
     }
 
+    g_message("Listener event loop armed for %s:%u (tick=16ms)",
+              self->bind_address,
+              self->port);
+
     return TRUE;
 }
 

@@ -57,6 +57,7 @@ grdc_tls_credentials_init(GrdcTlsCredentials *self)
     self->private_key = NULL;
 }
 
+/* 读取 PEM 证书与私钥，失败时通过 GError 传递细节，方便上层统一记录。 */
 static gboolean
 grdc_tls_credentials_load(GrdcTlsCredentials *self, const gchar *certificate_path, const gchar *private_key_path, GError **error)
 {

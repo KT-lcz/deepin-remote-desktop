@@ -180,6 +180,10 @@ grdc_rdp_session_start_event_thread(GrdcRdpSession *self)
 
     g_atomic_int_set(&self->connection_alive, 1);
     self->event_thread = g_thread_new("grdc-rdp-io", grdc_rdp_session_event_thread, g_object_ref(self));
+    if (self->event_thread != NULL)
+    {
+        g_message("Session %s started event thread", self->peer_address);
+    }
     return TRUE;
 }
 
@@ -196,6 +200,7 @@ grdc_rdp_session_stop_event_thread(GrdcRdpSession *self)
         }
         g_thread_join(self->event_thread);
         self->event_thread = NULL;
+        g_message("Session %s stopped event thread", self->peer_address);
     }
 
     if (self->stop_event != NULL)
@@ -324,6 +329,7 @@ grdc_rdp_session_event_thread(gpointer user_data)
         return NULL;
     }
 
+    /* 循环等待 stop 事件与 FreeRDP I/O 句柄，确保编码/输入线程协同推进。 */
     while (TRUE)
     {
         HANDLE handles[64];

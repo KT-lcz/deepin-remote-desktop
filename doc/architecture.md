@@ -8,8 +8,8 @@
 ## 模块分层
 
 ### 1. 核心层
-- `core/grdc_application`：负责命令行解析、GLib 主循环、信号处理与监听器启动，并在 CLI/配置合并后记录生效参数，确保 TLS 凭据只实例化一次（打包进 `libgrdc-core.a`）。
-- `core/grdc_server_runtime`：聚合 Capture/Encoding/Input 子系统，提供 `prepare_stream()` / `stop()` 接口，并在内部启动编码线程，从抓屏队列取帧并通过 `GAsyncQueue` 将编码帧传递给会话层；`pull_encoded_frame()` 提供基于超时的阻塞拉取。
+- `core/grdc_application`：负责命令行解析、GLib 主循环、信号处理与监听器启动，并在 CLI/配置合并后记录生效参数及配置来源，确保 TLS 凭据只实例化一次（打包进 `libgrdc-core.a`）。
+- `core/grdc_server_runtime`：聚合 Capture/Encoding/Input 子系统，提供 `prepare_stream()` / `stop()` 接口，并在内部启动编码线程，从抓屏队列取帧并通过 `GAsyncQueue` 将编码帧传递给会话层；`pull_encoded_frame()` 提供基于超时的阻塞拉取，停服时输出资源回收日志。
 - `core/grdc_config`：解析 INI/CLI 配置，集中管理绑定地址、TLS 证书、捕获尺寸等运行参数。
 - `security/grdc_tls_credentials`：加载并缓存 TLS 证书/私钥，供运行时向 FreeRDP Settings 注入。
 
@@ -28,8 +28,8 @@
 - `input/grdc_x11_input`：基于 XTest 的实际注入实现，负责键盘、鼠标、滚轮事件，并在启动时读取真实桌面分辨率、根据编码流尺寸动态缩放坐标。
 
 ### 5. 传输层
-- `transport/grdc_rdp_listener`：FreeRDP 监听生命周期、Peer 接入、会话轮询。
-- `session/grdc_rdp_session`：会话状态机，维护 peer + runtime 引用，通过 SurfaceBits 推送编码帧（对 Raw 帧按行分片，避免超限 payload），封装键鼠事件注入入口。
+- `transport/grdc_rdp_listener`：FreeRDP 监听生命周期、Peer 接入、会话轮询，监听器在成功绑定后输出 tick-loop 日志便于诊断。
+- `session/grdc_rdp_session`：会话状态机，维护 peer + runtime 引用，通过 SurfaceBits 推送编码帧（对 Raw 帧按行分片，避免超限 payload），封装键鼠事件注入入口，并对事件线程生命周期进行显式日志记录。
 
 ### 6. 通用工具
 - `utils/grdc_frame`：帧描述对象，封装像素数据/元信息。
