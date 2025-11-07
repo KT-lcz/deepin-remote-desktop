@@ -7,6 +7,7 @@
   1. `grdc_rdp_session_enforce_peer_desktop_size()` 读取客户端 Capability，若未声明 `DesktopResize` 且分辨率与服务器要求不一致则拒绝激活并断开连接，同时补充统一的几何日志。
   2. `grdc_rdp_session_activate()` 只有在强制写回成功后才标记为 activated，失败时进入 `desktop-resize-blocked` 状态并给出原因。
   3. 监听器不再强制把 `FreeRDP_DesktopResize` 写为 TRUE，确保 Capability 值真实反映客户端支持度；架构文档同步描述新的保护流程。
+  4. 新增 `Capabilities` 回调钩子，在握手阶段即检测 `DesktopResize` 能力，未满足立即拒绝连接并更新会话状态。
 - **影响**：不兼容动态分辨率的客户端会在激活前被拒绝并提示原因，避免反复重连；符合规范的客户端不受影响，仍会被强制同步到服务器实际桌面尺寸。
 
 ## 2025-11-07：接入 NLA 安全协议

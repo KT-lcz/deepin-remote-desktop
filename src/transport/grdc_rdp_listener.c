@@ -26,6 +26,7 @@ typedef struct
 static BOOL grdc_rdp_peer_keyboard_event(rdpInput *input, UINT16 flags, UINT8 code);
 static BOOL grdc_rdp_peer_unicode_event(rdpInput *input, UINT16 flags, UINT16 code);
 static BOOL grdc_rdp_peer_pointer_event(rdpInput *input, UINT16 flags, UINT16 x, UINT16 y);
+static BOOL grdc_peer_capabilities(freerdp_peer *client);
 
 struct _GrdcRdpListener
 {
@@ -209,6 +210,46 @@ grdc_peer_disconnected(freerdp_peer *client)
     {
         grdc_rdp_session_set_peer_state(ctx->session, "disconnected");
     }
+}
+
+static BOOL
+grdc_peer_capabilities(freerdp_peer *client)
+{
+    if (client == NULL || client->context == NULL)
+    {
+        return FALSE;
+    }
+
+    rdpContext *context = client->context;
+    rdpSettings *settings = context->settings;
+    if (settings == NULL)
+    {
+        return FALSE;
+    }
+
+    const guint32 client_width = freerdp_settings_get_uint32(settings, FreeRDP_DesktopWidth);
+    const guint32 client_height = freerdp_settings_get_uint32(settings, FreeRDP_DesktopHeight);
+    const gboolean desktop_resize = freerdp_settings_get_bool(settings, FreeRDP_DesktopResize);
+
+    GrdcRdpPeerContext *ctx = (GrdcRdpPeerContext *)client->context;
+    if (!desktop_resize)
+    {
+        if (ctx != NULL && ctx->session != NULL)
+        {
+            grdc_rdp_session_set_peer_state(ctx->session, "desktop-resize-unsupported");
+        }
+        GRDC_LOG_WARNING("Peer %s disabled DesktopResize capability (client %ux%u), rejecting connection",
+                         client->hostname,
+                         client_width,
+                         client_height);
+        return FALSE;
+    }
+
+    GRDC_LOG_MESSAGE("Peer %s capabilities accepted with DesktopResize enabled (%ux%u requested)",
+                     client->hostname,
+                     client_width,
+                     client_height);
+    return TRUE;
 }
 
 static GrdcInputDispatcher *
@@ -444,6 +485,7 @@ grdc_listener_peer_accepted(freerdp_listener *listener, freerdp_peer *client)
     client->PostConnect = grdc_peer_post_connect;
     client->Activate = grdc_peer_activate;
     client->Disconnect = grdc_peer_disconnected;
+    client->Capabilities = grdc_peer_capabilities;
 
     if (client->Initialize == NULL || !client->Initialize(client))
     {
