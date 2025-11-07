@@ -36,7 +36,7 @@ static gboolean grdc_rdp_session_send_surface_bits(GrdcRdpSession *self,
                                                    UINT32 negotiated_max_payload,
                                                    GError **error);
 static gpointer grdc_rdp_session_event_thread(gpointer user_data);
-static void grdc_rdp_session_enforce_peer_desktop_size(GrdcRdpSession *self);
+static gboolean grdc_rdp_session_enforce_peer_desktop_size(GrdcRdpSession *self);
 
 static void
 grdc_rdp_session_dispose(GObject *object)
@@ -143,9 +143,16 @@ BOOL
 grdc_rdp_session_activate(GrdcRdpSession *self)
 {
     g_return_val_if_fail(GRDC_IS_RDP_SESSION(self), FALSE);
+
+    if (!grdc_rdp_session_enforce_peer_desktop_size(self))
+    {
+        grdc_rdp_session_set_peer_state(self, "desktop-resize-blocked");
+        grdc_rdp_session_disconnect(self, "client does not support desktop resize");
+        return FALSE;
+    }
+
     grdc_rdp_session_set_peer_state(self, "activated");
     self->is_activated = TRUE;
-    grdc_rdp_session_enforce_peer_desktop_size(self);
     if (self->runtime != NULL)
     {
         grdc_server_runtime_request_keyframe(self->runtime);
@@ -379,78 +386,102 @@ grdc_rdp_session_event_thread(gpointer user_data)
     return NULL;
 }
 
-static void
+static gboolean
 grdc_rdp_session_enforce_peer_desktop_size(GrdcRdpSession *self)
 {
-    g_return_if_fail(GRDC_IS_RDP_SESSION(self));
+    g_return_val_if_fail(GRDC_IS_RDP_SESSION(self), TRUE);
 
     if (self->peer == NULL || self->peer->context == NULL || self->runtime == NULL)
     {
-        return;
+        return TRUE;
     }
 
     GrdcEncodingOptions encoding_opts;
     if (!grdc_server_runtime_get_encoding_options(self->runtime, &encoding_opts))
     {
-        return;
+        return TRUE;
     }
 
     rdpContext *context = self->peer->context;
     rdpSettings *settings = context->settings;
     if (settings == NULL)
     {
-        return;
+        return TRUE;
     }
 
     const guint32 desired_width = encoding_opts.width;
     const guint32 desired_height = encoding_opts.height;
+    const guint32 client_width = freerdp_settings_get_uint32(settings, FreeRDP_DesktopWidth);
+    const guint32 client_height = freerdp_settings_get_uint32(settings, FreeRDP_DesktopHeight);
+    const gboolean client_allows_resize = freerdp_settings_get_bool(settings, FreeRDP_DesktopResize);
+
+    GRDC_LOG_MESSAGE("Session %s peer geometry %ux%u, server requires %ux%u",
+              self->peer_address,
+              client_width,
+              client_height,
+              desired_width,
+              desired_height);
+
+    if (!client_allows_resize && (client_width != desired_width || client_height != desired_height))
+    {
+        GRDC_LOG_WARNING("Session %s client did not advertise DesktopResize, cannot override %ux%u with %ux%u",
+                  self->peer_address,
+                  client_width,
+                  client_height,
+                  desired_width,
+                  desired_height);
+        return FALSE;
+    }
+
     gboolean updated = FALSE;
 
-    if (freerdp_settings_get_uint32(settings, FreeRDP_DesktopWidth) != desired_width)
+    if (client_width != desired_width)
     {
         if (!freerdp_settings_set_uint32(settings, FreeRDP_DesktopWidth, desired_width))
         {
             GRDC_LOG_WARNING("Session %s could not update DesktopWidth to %u",
                       self->peer_address,
                       desired_width);
-            return;
+            return FALSE;
         }
         updated = TRUE;
     }
 
-    if (freerdp_settings_get_uint32(settings, FreeRDP_DesktopHeight) != desired_height)
+    if (client_height != desired_height)
     {
         if (!freerdp_settings_set_uint32(settings, FreeRDP_DesktopHeight, desired_height))
         {
             GRDC_LOG_WARNING("Session %s could not update DesktopHeight to %u",
                       self->peer_address,
                       desired_height);
-            return;
+            return FALSE;
         }
         updated = TRUE;
     }
 
     if (!updated)
     {
-        return;
+        return TRUE;
     }
 
     rdpUpdate *update = context->update;
     if (update == NULL || update->DesktopResize == NULL)
     {
-        return;
+        GRDC_LOG_WARNING("Session %s missing DesktopResize callback, cannot synchronize geometry", self->peer_address);
+        return FALSE;
     }
 
     if (!update->DesktopResize(context))
     {
         GRDC_LOG_WARNING("Session %s failed to notify DesktopResize", self->peer_address);
-        return;
+        return FALSE;
     }
 
     GRDC_LOG_MESSAGE("Session %s enforced desktop resolution to %ux%u",
               self->peer_address,
               desired_width,
               desired_height);
+    return TRUE;
 }
 
 static gboolean

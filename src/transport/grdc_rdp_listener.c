@@ -359,7 +359,6 @@ grdc_configure_peer_settings(GrdcRdpListener *self, freerdp_peer *client, GError
         !freerdp_settings_set_uint32(settings, FreeRDP_DesktopHeight, height) ||
         !freerdp_settings_set_uint32(settings, FreeRDP_ColorDepth, 32) ||
         !freerdp_settings_set_bool(settings, FreeRDP_ServerMode, TRUE) ||
-        !freerdp_settings_set_bool(settings, FreeRDP_DesktopResize, TRUE) ||
         !freerdp_settings_set_bool(settings, FreeRDP_SurfaceFrameMarkerEnabled, TRUE) ||
         !freerdp_settings_set_bool(settings, FreeRDP_FrameMarkerCommandEnabled, TRUE) ||
         !freerdp_settings_set_bool(settings, FreeRDP_FastPathOutput, TRUE) ||
