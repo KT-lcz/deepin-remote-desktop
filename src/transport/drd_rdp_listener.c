@@ -7,6 +7,7 @@
 #include <freerdp/settings.h>
 #include <freerdp/input.h>
 #include <winpr/wtypes.h>
+#include <winpr/wtsapi.h>
 
 #include "core/drd_server_runtime.h"
 #include "input/drd_input_dispatcher.h"
@@ -21,6 +22,7 @@ typedef struct
     DrdRdpSession *session;
     DrdServerRuntime *runtime;
     DrdNlaSamFile *nla_sam;
+    HANDLE vcm;
 } DrdRdpPeerContext;
 
 static BOOL drd_rdp_peer_keyboard_event(rdpInput *input, UINT16 flags, UINT8 code);
@@ -156,6 +158,7 @@ drd_peer_context_new(freerdp_peer *client, rdpContext *context)
     ctx->session = drd_rdp_session_new(client);
     ctx->runtime = NULL;
     ctx->nla_sam = NULL;
+    ctx->vcm = INVALID_HANDLE_VALUE;
     return ctx->session != NULL;
 }
 
@@ -176,6 +179,11 @@ drd_peer_context_free(freerdp_peer *client G_GNUC_UNUSED, rdpContext *context)
     }
 
     g_clear_pointer(&ctx->nla_sam, drd_nla_sam_file_free);
+    if (ctx->vcm != NULL && ctx->vcm != INVALID_HANDLE_VALUE)
+    {
+        WTSCloseServer(ctx->vcm);
+        ctx->vcm = INVALID_HANDLE_VALUE;
+    }
 }
 
 static BOOL
@@ -395,6 +403,7 @@ drd_configure_peer_settings(DrdRdpListener *self, freerdp_peer *client, GError *
 
     const guint32 width = encoding_opts.width;
     const guint32 height = encoding_opts.height;
+    const gboolean enable_graphics_pipeline = (encoding_opts.mode == DRD_ENCODING_MODE_RFX);
 
     if (!freerdp_settings_set_uint32(settings, FreeRDP_DesktopWidth, width) ||
         !freerdp_settings_set_uint32(settings, FreeRDP_DesktopHeight, height) ||
@@ -411,7 +420,9 @@ drd_configure_peer_settings(DrdRdpListener *self, freerdp_peer *client, GError *
         !freerdp_settings_set_bool(settings, FreeRDP_RemoteFxImageCodec, TRUE) ||
         !freerdp_settings_set_bool(settings, FreeRDP_NSCodec, TRUE) ||
         !freerdp_settings_set_bool(settings, FreeRDP_GfxH264, FALSE) ||
-        !freerdp_settings_set_bool(settings, FreeRDP_SupportGraphicsPipeline, FALSE) ||
+        !freerdp_settings_set_bool(settings,
+                                   FreeRDP_SupportGraphicsPipeline,
+                                   enable_graphics_pipeline) ||
         !freerdp_settings_set_bool(settings, FreeRDP_HasExtendedMouseEvent, TRUE) ||
         !freerdp_settings_set_bool(settings, FreeRDP_HasHorizontalWheel, TRUE) ||
         !freerdp_settings_set_bool(settings, FreeRDP_HasRelativeMouseEvent, FALSE) ||
@@ -499,6 +510,15 @@ drd_listener_peer_accepted(freerdp_listener *listener, freerdp_peer *client)
         DRD_LOG_WARNING("Peer %s context did not expose a session", client->hostname);
         return FALSE;
     }
+
+    ctx->vcm = WTSOpenServerA((LPSTR)client->context);
+    if (ctx->vcm == NULL || ctx->vcm == INVALID_HANDLE_VALUE)
+    {
+        DRD_LOG_WARNING("Peer %s failed to create virtual channel manager", client->hostname);
+        return FALSE;
+    }
+
+    drd_rdp_session_set_virtual_channel_manager(ctx->session, ctx->vcm);
 
     ctx->runtime = g_object_ref(self->runtime);
     drd_rdp_session_set_runtime(ctx->session, self->runtime);

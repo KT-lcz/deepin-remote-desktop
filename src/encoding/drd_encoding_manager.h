@@ -21,6 +21,7 @@ gboolean drd_encoding_manager_is_ready(DrdEncodingManager *self);
 gboolean drd_encoding_manager_encode(DrdEncodingManager *self,
                                       DrdFrame *input,
                                       gsize max_payload,
+                                      DrdFrameCodec desired_codec,
                                       DrdEncodedFrame **out_frame,
                                       GError **error);
 

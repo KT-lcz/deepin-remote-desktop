@@ -12,6 +12,7 @@ static gpointer drd_server_runtime_encoder_thread(gpointer user_data);
 static void drd_server_runtime_flush_encoded_queue(DrdServerRuntime *self);
 static DrdEncodedFrame *drd_server_runtime_wait_encoded(DrdServerRuntime *self,
                                                           gint64 timeout_us);
+static DrdFrameCodec drd_server_runtime_resolve_codec(DrdServerRuntime *self);
 
 struct _DrdServerRuntime
 {
@@ -26,6 +27,8 @@ struct _DrdServerRuntime
     GThread *encoder_thread;
     GAsyncQueue *encoded_queue;
     gint encoder_running;
+    gint transport_mode;
+    GMutex transport_mutex;
 };
 
 G_DEFINE_TYPE(DrdServerRuntime, drd_server_runtime, G_TYPE_OBJECT)
@@ -40,6 +43,7 @@ drd_server_runtime_dispose(GObject *object)
     g_clear_object(&self->input);
     g_clear_object(&self->tls);
     g_clear_pointer(&self->encoded_queue, g_async_queue_unref);
+    g_mutex_clear(&self->transport_mutex);
 
     G_OBJECT_CLASS(drd_server_runtime_parent_class)->dispose(object);
 }
@@ -62,6 +66,8 @@ drd_server_runtime_init(DrdServerRuntime *self)
     self->encoder_thread = NULL;
     self->encoded_queue = g_async_queue_new();
     g_atomic_int_set(&self->encoder_running, 0);
+    g_atomic_int_set(&self->transport_mode, DRD_FRAME_TRANSPORT_SURFACE_BITS);
+    g_mutex_init(&self->transport_mutex);
 }
 
 DrdServerRuntime *
@@ -101,6 +107,7 @@ drd_server_runtime_prepare_stream(DrdServerRuntime *self,
 
     self->encoding_options = *encoding_options;
     self->has_encoding_options = TRUE;
+    g_atomic_int_set(&self->transport_mode, DRD_FRAME_TRANSPORT_SURFACE_BITS);
 
     if (!drd_encoding_manager_prepare(self->encoder, encoding_options, error))
     {
@@ -180,11 +187,38 @@ drd_server_runtime_pull_encoded_frame(DrdServerRuntime *self,
     return TRUE;
 }
 
+void
+drd_server_runtime_set_transport(DrdServerRuntime *self, DrdFrameTransport transport)
+{
+    g_return_if_fail(DRD_IS_SERVER_RUNTIME(self));
+
+    g_mutex_lock(&self->transport_mutex);
+    DrdFrameTransport current =
+        (DrdFrameTransport)g_atomic_int_get(&self->transport_mode);
+    if (current == transport)
+    {
+        g_mutex_unlock(&self->transport_mutex);
+        return;
+    }
+
+    g_atomic_int_set(&self->transport_mode, transport);
+    drd_server_runtime_flush_encoded_queue(self);
+    drd_encoding_manager_force_keyframe(self->encoder);
+    g_mutex_unlock(&self->transport_mutex);
+}
+
+DrdFrameTransport
+drd_server_runtime_get_transport(DrdServerRuntime *self)
+{
+    g_return_val_if_fail(DRD_IS_SERVER_RUNTIME(self), DRD_FRAME_TRANSPORT_SURFACE_BITS);
+    return (DrdFrameTransport)g_atomic_int_get(&self->transport_mode);
+}
+
 DrdFrameCodec
 drd_server_runtime_get_codec(DrdServerRuntime *self)
 {
     g_return_val_if_fail(DRD_IS_SERVER_RUNTIME(self), DRD_FRAME_CODEC_RAW);
-    return drd_encoding_manager_get_codec(self->encoder);
+    return drd_server_runtime_resolve_codec(self);
 }
 
 gboolean
@@ -290,8 +324,14 @@ drd_server_runtime_encoder_thread(gpointer user_data)
             continue;
         }
 
+        DrdFrameCodec codec = drd_server_runtime_resolve_codec(self);
         DrdEncodedFrame *encoded = NULL;
-        if (!drd_encoding_manager_encode(self->encoder, frame, 0, &encoded, &error))
+        if (!drd_encoding_manager_encode(self->encoder,
+                                          frame,
+                                          0,
+                                          codec,
+                                          &encoded,
+                                          &error))
         {
             if (error != NULL)
             {
@@ -403,4 +443,28 @@ drd_server_runtime_wait_encoded(DrdServerRuntime *self, gint64 timeout_us)
             return encoded;
         }
     }
+}
+
+static DrdFrameCodec
+drd_server_runtime_resolve_codec(DrdServerRuntime *self)
+{
+    if (!self->has_encoding_options)
+    {
+        return DRD_FRAME_CODEC_RAW;
+    }
+
+    if (self->encoding_options.mode == DRD_ENCODING_MODE_RAW)
+    {
+        return DRD_FRAME_CODEC_RAW;
+    }
+
+    DrdFrameTransport transport =
+        (DrdFrameTransport)g_atomic_int_get(&self->transport_mode);
+
+    if (transport == DRD_FRAME_TRANSPORT_GRAPHICS_PIPELINE)
+    {
+        return DRD_FRAME_CODEC_RFX_PROGRESSIVE;
+    }
+
+    return DRD_FRAME_CODEC_RFX;
 }

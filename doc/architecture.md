@@ -31,6 +31,7 @@
 ### 5. 传输层
 - `transport/drd_rdp_listener`：FreeRDP 监听生命周期、Peer 接入、会话轮询，监听器在成功绑定后输出 tick-loop 日志便于诊断。
 - `session/drd_rdp_session`：会话状态机，维护 peer + runtime 引用，通过 SurfaceBits 推送编码帧（对 Raw 帧按行分片，避免超限 payload），封装键鼠事件注入入口，并对事件线程生命周期进行显式日志记录。
+- `session/drd_rdp_graphics_pipeline`：Rdpgfx server 适配器，负责与客户端交换 `CapsAdvertise/CapsConfirm`，在虚拟通道上执行 `ResetGraphics`/Surface 创建/帧提交，并根据 ACK 结果调节最大在途帧数；当 Progressive 管线就绪时驱动运行时切换编码模式。
 
 ### 6. 通用工具
 - `utils/drd_frame`：帧描述对象，封装像素数据/元信息。
@@ -40,7 +41,7 @@
 ## 数据流简述
 1. 应用启动后创建 `DrdServerRuntime`，准备编码器与采集模块。
 2. `DrdCaptureManager` 启动 `DrdX11Capture`，持续推送 `DrdFrame`；运行时编码线程消费该队列并将 `DrdEncodedFrame` 写入异步队列。
-3. 会话层从编码队列拉取帧，经 `SurfaceFrameMarker`/`SurfaceBits` 推送给客户端，并在无帧时保持事件响应。
+3. 会话层从编码队列拉取帧：若 Graphics Pipeline 协商成功，运行时将编码模式切换为 Progressive，`DrdRdpGraphicsPipeline` 通过 Rdpgfx DVC 发送帧并根据 ACK 节流；否则按传统 `SurfaceFrameMarker`/`SurfaceBits` 路径推送，保证旧客户端兼容。
 
 ## 安全链路（TLS + NLA）
 - `config/default.ini` 及 CLI 新增 `[auth]`/`--nla-{username,password}`，服务进程启动时必须提供 NLA 凭据，才能生成 SAM 文件。

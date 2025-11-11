@@ -30,6 +30,17 @@
   5. 所有 `g_message/g_warning/g_debug` 调用切换为 `GRDC_LOG_*` 宏，内部统一使用 `g_log_structured_standard` 自动附带 `__FILE__/__LINE__`，日志输出可直接定位源文件行号。
 - **影响**：服务端现在要求显式提供 NLA 凭据；凭据泄露范围限定在内存+一次性 SAM 文件，客户端需支持 NLA（CredSSP）才能接入。
 
+## 2025-11-08：接入 RDPGFX Progressive 管线
+- **目的**：借鉴 GNOME Remote Desktop 的 Graphics Pipeline 实现，优先使用 Rdpgfx Progressive 推流，在兼容旧客户端的同时为后续 GPU/AVC 路径奠基。
+- **范围**：`encoding/drd_rfx_encoder.*`、`encoding/drd_encoding_manager.*`、`core/drd_server_runtime.*`、`session/drd_rdp_session.*`、`session/drd_rdp_graphics_pipeline.*`（新增）、`transport/drd_rdp_listener.c`、`doc/architecture.md`、`doc/changelog.md`、`.codex/plan/rdpgfx-progressive.md`。
+- **主要改动**：
+  1. RFX 编码器支持 Progressive 输出（复用 FreeRDP progressive API），`DrdEncodingManager`/`DrdServerRuntime` 根据传输模式动态选择 RAW/RFX/Progressive，并在切换时刷新编码队列。
+  2. 新增 `DrdRdpGraphicsPipeline`，对 Rdpgfx server context、Caps/Reset/Surface/Frame 流程进行最小封装，限制在 3 帧在途以避免 ACK 堵塞。
+  3. `DrdRdpSession` 增加 Rdpgfx lifecycle：在虚拟通道建立后尝试打开 Graphics Pipeline，就绪时通知运行时输出 Progressive，若提交失败自动回退 SurfaceBits。
+  4. `DrdRdpListener` 为 RFX 模式启用 Graphics Pipeline 能力，并将 WTS Virtual Channel Manager 句柄传递给会话，确保 Rdpgfx 与后续 DVC（剪贴板/音频）共享通道。
+  5. 架构文档追加 Rdpgfx 模块描述与数据流说明，计划文档记录 Progressive 管线路线图。
+- **影响**：支持 Graphics Pipeline 的客户端将以 Progressive（RFX Progressive）获取帧，带来更高压缩比；不支持或通道初始化失败时自动退回 SurfaceBits，无需额外配置。运行时切换编码模式会清空帧队列并强制关键帧，短暂突发在日志中可见。
+
 ## 2025-11-06：日志与注释审视
 - **目的**：提升运行态可观察性并补齐核心线程流程的中文注释，方便后续排障。
 - **范围**：`core/grdc_application.c`、`core/grdc_server_runtime.c`、`transport/grdc_rdp_listener.c`、`session/grdc_rdp_session.c`、`security/grdc_tls_credentials.c`、`doc/architecture.md`、`.codex/plan/logging-annotation.md`。

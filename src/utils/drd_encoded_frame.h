@@ -8,6 +8,7 @@ typedef enum
 {
     DRD_FRAME_CODEC_RAW = 0,
     DRD_FRAME_CODEC_RFX,
+    DRD_FRAME_CODEC_RFX_PROGRESSIVE,
     DRD_FRAME_CODEC_H264
 } DrdFrameCodec;
 

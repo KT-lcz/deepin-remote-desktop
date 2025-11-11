@@ -165,6 +165,7 @@ gboolean
 drd_encoding_manager_encode(DrdEncodingManager *self,
                               DrdFrame *input,
                               gsize max_payload,
+                              DrdFrameCodec desired_codec,
                               DrdEncodedFrame **out_frame,
                               GError **error)
 {
@@ -181,27 +182,58 @@ drd_encoding_manager_encode(DrdEncodingManager *self,
         return FALSE;
     }
 
+    if (self->mode == DRD_ENCODING_MODE_RAW && desired_codec != DRD_FRAME_CODEC_RAW)
+    {
+        g_set_error_literal(error,
+                            G_IO_ERROR,
+                            G_IO_ERROR_FAILED,
+                            "Encoding manager configured for RAW output only");
+        return FALSE;
+    }
+
     gboolean ok = FALSE;
 
-    if (self->mode == DRD_ENCODING_MODE_RAW)
+    switch (desired_codec)
     {
-        ok = drd_raw_encoder_encode(self->raw_encoder, input, self->scratch_frame, error);
-    }
-    else
-    {
-        ok = drd_rfx_encoder_encode(self->rfx_encoder, input, self->scratch_frame, error);
-        if (ok && max_payload > 0)
-        {
-            gsize payload_len = 0;
-            drd_encoded_frame_get_data(self->scratch_frame, &payload_len);
-            if (payload_len > max_payload)
+        case DRD_FRAME_CODEC_RAW:
+            ok = drd_raw_encoder_encode(self->raw_encoder, input, self->scratch_frame, error);
+            break;
+        case DRD_FRAME_CODEC_RFX:
+            ok = drd_rfx_encoder_encode(self->rfx_encoder,
+                                        input,
+                                        self->scratch_frame,
+                                        DRD_RFX_ENCODER_KIND_SURFACE_BITS,
+                                        error);
+            if (ok && max_payload > 0)
             {
-                DRD_LOG_MESSAGE("RFX payload %zu exceeds peer limit %zu, falling back to raw frame",
-                          payload_len,
-                          max_payload);
-                ok = drd_raw_encoder_encode(self->raw_encoder, input, self->scratch_frame, error);
+                gsize payload_len = 0;
+                drd_encoded_frame_get_data(self->scratch_frame, &payload_len);
+                if (payload_len > max_payload)
+                {
+                    DRD_LOG_MESSAGE("RFX payload %zu exceeds peer limit %zu, falling back to raw frame",
+                              payload_len,
+                              max_payload);
+                    ok = drd_raw_encoder_encode(self->raw_encoder,
+                                                input,
+                                                self->scratch_frame,
+                                                error);
+                }
             }
-        }
+            break;
+        case DRD_FRAME_CODEC_RFX_PROGRESSIVE:
+            ok = drd_rfx_encoder_encode(self->rfx_encoder,
+                                        input,
+                                        self->scratch_frame,
+                                        DRD_RFX_ENCODER_KIND_PROGRESSIVE,
+                                        error);
+            break;
+        default:
+            g_set_error_literal(error,
+                                G_IO_ERROR,
+                                G_IO_ERROR_FAILED,
+                                "Unsupported codec requested");
+            ok = FALSE;
+            break;
     }
 
     if (!ok)

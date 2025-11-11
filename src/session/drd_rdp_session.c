@@ -9,9 +9,11 @@
 #include <string.h>
 
 #include <winpr/synch.h>
+#include <winpr/wtypes.h>
 
 #include "core/drd_server_runtime.h"
 #include "utils/drd_log.h"
+#include "session/drd_rdp_graphics_pipeline.h"
 
 struct _DrdRdpSession
 {
@@ -21,6 +23,9 @@ struct _DrdRdpSession
     gchar *peer_address;
     gchar *state;
     DrdServerRuntime *runtime;
+    HANDLE vcm;
+    DrdRdpGraphicsPipeline *graphics_pipeline;
+    gboolean graphics_pipeline_ready;
     guint32 frame_sequence;
     gboolean is_activated;
     GThread *event_thread;
@@ -35,6 +40,11 @@ static gboolean drd_rdp_session_send_surface_bits(DrdRdpSession *self,
                                                    guint32 frame_id,
                                                    UINT32 negotiated_max_payload,
                                                    GError **error);
+static gboolean drd_rdp_session_try_submit_graphics(DrdRdpSession *self,
+                                                    DrdEncodedFrame *frame);
+static void drd_rdp_session_maybe_init_graphics(DrdRdpSession *self);
+static void drd_rdp_session_disable_graphics_pipeline(DrdRdpSession *self,
+                                                      const gchar *reason);
 static gpointer drd_rdp_session_event_thread(gpointer user_data);
 static gboolean drd_rdp_session_enforce_peer_desktop_size(DrdRdpSession *self);
 
@@ -44,6 +54,7 @@ drd_rdp_session_dispose(GObject *object)
     DrdRdpSession *self = DRD_RDP_SESSION(object);
 
     drd_rdp_session_stop_event_thread(self);
+    drd_rdp_session_disable_graphics_pipeline(self, NULL);
 
     if (self->peer != NULL && self->peer->context != NULL)
     {
@@ -63,6 +74,7 @@ drd_rdp_session_finalize(GObject *object)
     drd_rdp_session_stop_event_thread(self);
     g_clear_pointer(&self->peer_address, g_free);
     g_clear_pointer(&self->state, g_free);
+    g_clear_object(&self->graphics_pipeline);
     G_OBJECT_CLASS(drd_rdp_session_parent_class)->finalize(object);
 }
 
@@ -81,6 +93,9 @@ drd_rdp_session_init(DrdRdpSession *self)
     self->peer_address = g_strdup("unknown");
     self->state = g_strdup("created");
     self->runtime = NULL;
+    self->vcm = INVALID_HANDLE_VALUE;
+    self->graphics_pipeline = NULL;
+    self->graphics_pipeline_ready = FALSE;
     self->frame_sequence = 1;
     self->is_activated = FALSE;
     self->event_thread = NULL;
@@ -129,6 +144,16 @@ drd_rdp_session_set_runtime(DrdRdpSession *self, DrdServerRuntime *runtime)
 
     g_clear_object(&self->runtime);
     self->runtime = runtime;
+
+    drd_rdp_session_maybe_init_graphics(self);
+}
+
+void
+drd_rdp_session_set_virtual_channel_manager(DrdRdpSession *self, HANDLE vcm)
+{
+    g_return_if_fail(DRD_IS_RDP_SESSION(self));
+    self->vcm = vcm;
+    drd_rdp_session_maybe_init_graphics(self);
 }
 
 BOOL
@@ -274,16 +299,22 @@ drd_rdp_session_pump(DrdRdpSession *self)
 
     g_autoptr(DrdEncodedFrame) owned_frame = encoded;
 
-    g_autoptr(GError) send_error = NULL;
-    if (!drd_rdp_session_send_surface_bits(self,
-                                            owned_frame,
-                                            self->frame_sequence,
-                                            negotiated_max_payload,
-                                            &send_error))
+    gboolean sent_via_graphics = drd_rdp_session_try_submit_graphics(self, owned_frame);
+    if (!sent_via_graphics)
     {
-        if (send_error != NULL)
+        g_autoptr(GError) send_error = NULL;
+        if (!drd_rdp_session_send_surface_bits(self,
+                                                owned_frame,
+                                                self->frame_sequence,
+                                                negotiated_max_payload,
+                                                &send_error))
         {
-            DRD_LOG_WARNING("Session %s failed to send frame: %s", self->peer_address, send_error->message);
+            if (send_error != NULL)
+            {
+                DRD_LOG_WARNING("Session %s failed to send frame: %s",
+                                self->peer_address,
+                                send_error->message);
+            }
         }
     }
 
@@ -307,6 +338,7 @@ drd_rdp_session_disconnect(DrdRdpSession *self, const gchar *reason)
     }
 
     drd_rdp_session_stop_event_thread(self);
+    drd_rdp_session_disable_graphics_pipeline(self, NULL);
 
     if (self->peer != NULL && self->peer->Disconnect != NULL)
     {
@@ -481,6 +513,123 @@ drd_rdp_session_enforce_peer_desktop_size(DrdRdpSession *self)
               self->peer_address,
               desired_width,
               desired_height);
+    return TRUE;
+}
+
+static void
+drd_rdp_session_maybe_init_graphics(DrdRdpSession *self)
+{
+    g_return_if_fail(DRD_IS_RDP_SESSION(self));
+
+    if (self->graphics_pipeline != NULL || self->peer == NULL ||
+        self->peer->context == NULL || self->runtime == NULL ||
+        self->vcm == NULL || self->vcm == INVALID_HANDLE_VALUE)
+    {
+        return;
+    }
+
+    DrdEncodingOptions encoding_opts;
+    if (!drd_server_runtime_get_encoding_options(self->runtime, &encoding_opts))
+    {
+        return;
+    }
+
+    if (encoding_opts.mode != DRD_ENCODING_MODE_RFX)
+    {
+        return;
+    }
+
+    DrdRdpGraphicsPipeline *pipeline =
+        drd_rdp_graphics_pipeline_new(self->peer,
+                                      self->vcm,
+                                      (guint16)encoding_opts.width,
+                                      (guint16)encoding_opts.height);
+    if (pipeline == NULL)
+    {
+        DRD_LOG_WARNING("Session %s failed to allocate graphics pipeline", self->peer_address);
+        return;
+    }
+
+    self->graphics_pipeline = pipeline;
+    self->graphics_pipeline_ready = FALSE;
+    DRD_LOG_MESSAGE("Session %s graphics pipeline created", self->peer_address);
+}
+
+static void
+drd_rdp_session_disable_graphics_pipeline(DrdRdpSession *self, const gchar *reason)
+{
+    if (self->graphics_pipeline == NULL)
+    {
+        return;
+    }
+
+    if (reason != NULL)
+    {
+        DRD_LOG_WARNING("Session %s disabling graphics pipeline: %s",
+                        self->peer_address,
+                        reason);
+    }
+
+    if (self->runtime != NULL)
+    {
+        drd_server_runtime_set_transport(self->runtime, DRD_FRAME_TRANSPORT_SURFACE_BITS);
+    }
+
+    self->graphics_pipeline_ready = FALSE;
+    g_clear_object(&self->graphics_pipeline);
+}
+
+static gboolean
+drd_rdp_session_try_submit_graphics(DrdRdpSession *self, DrdEncodedFrame *frame)
+{
+    if (self->runtime == NULL)
+    {
+        return FALSE;
+    }
+
+    drd_rdp_session_maybe_init_graphics(self);
+
+    if (self->graphics_pipeline == NULL)
+    {
+        return FALSE;
+    }
+
+    drd_rdp_graphics_pipeline_maybe_init(self->graphics_pipeline);
+
+    if (!self->graphics_pipeline_ready &&
+        drd_rdp_graphics_pipeline_is_ready(self->graphics_pipeline))
+    {
+        drd_server_runtime_set_transport(self->runtime,
+                                         DRD_FRAME_TRANSPORT_GRAPHICS_PIPELINE);
+        self->graphics_pipeline_ready = TRUE;
+        DRD_LOG_MESSAGE("Session %s graphics pipeline ready, switching to RFX progressive",
+                        self->peer_address);
+    }
+
+    if (!self->graphics_pipeline_ready)
+    {
+        return FALSE;
+    }
+
+    if (drd_encoded_frame_get_codec(frame) != DRD_FRAME_CODEC_RFX_PROGRESSIVE)
+    {
+        return FALSE;
+    }
+
+    if (!drd_rdp_graphics_pipeline_can_submit(self->graphics_pipeline))
+    {
+        return FALSE;
+    }
+
+    g_autoptr(GError) gfx_error = NULL;
+    if (!drd_rdp_graphics_pipeline_submit_frame(self->graphics_pipeline, frame, &gfx_error))
+    {
+        drd_rdp_session_disable_graphics_pipeline(self,
+                                                  gfx_error != NULL ? gfx_error->message
+                                                                    : "submission failure");
+        return FALSE;
+    }
+
     return TRUE;
 }
 

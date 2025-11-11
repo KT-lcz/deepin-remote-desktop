@@ -33,6 +33,7 @@ core_sources = files(
   'core/drd_server_runtime.c',
   'core/drd_config.c',
   'session/drd_rdp_session.c',
+  'session/drd_rdp_graphics_pipeline.c',
   'transport/drd_rdp_listener.c',
   'security/drd_tls_credentials.c',
   'security/drd_nla_sam.c',

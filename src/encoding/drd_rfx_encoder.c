@@ -2,6 +2,7 @@
 
 #include <freerdp/codec/rfx.h>
 #include <freerdp/codec/color.h>
+#include <freerdp/codec/progressive.h>
 #include <winpr/stream.h>
 
 #include <gio/gio.h>
@@ -12,6 +13,7 @@ struct _DrdRfxEncoder
     GObject parent_instance;
 
     RFX_CONTEXT *context;
+    PROGRESSIVE_CONTEXT *progressive;
     guint width;
     guint height;
     gboolean enable_diff;
@@ -59,6 +61,15 @@ drd_rfx_encoder_dispose(GObject *object)
     {
         rfx_context_free(self->context);
         self->context = NULL;
+    }
+    if (self->progressive != NULL)
+    {
+        progressive_context_reset(self->progressive);
+    }
+    if (self->progressive != NULL)
+    {
+        progressive_context_free(self->progressive);
+        self->progressive = NULL;
     }
 
     g_clear_pointer(&self->bottom_up_frame, g_byte_array_unref);
@@ -212,6 +223,80 @@ copy_frame_linear(DrdFrame *frame, GByteArray *buffer)
 }
 
 static gboolean
+drd_rfx_encoder_ensure_progressive(DrdRfxEncoder *self, GError **error)
+{
+    if (self->progressive == NULL)
+    {
+        self->progressive = progressive_context_new(TRUE);
+        if (self->progressive == NULL)
+        {
+            g_set_error_literal(error,
+                                G_IO_ERROR,
+                                G_IO_ERROR_FAILED,
+                                "Failed to allocate Progressive RFX context");
+            return FALSE;
+        }
+    }
+
+    if (!progressive_context_reset(self->progressive))
+    {
+        g_set_error_literal(error,
+                            G_IO_ERROR,
+                            G_IO_ERROR_FAILED,
+                            "Failed to reset Progressive RFX context");
+        return FALSE;
+    }
+
+    return TRUE;
+}
+
+static gboolean
+drd_rfx_encoder_write_stream(DrdRfxEncoder *self,
+                              DrdRfxEncoderKind kind,
+                              wStream *stream,
+                              RFX_MESSAGE *message,
+                              GError **error)
+{
+    Stream_SetPosition(stream, 0);
+
+    switch (kind)
+    {
+        case DRD_RFX_ENCODER_KIND_SURFACE_BITS:
+            if (!rfx_write_message(self->context, stream, message))
+            {
+                g_set_error_literal(error,
+                                    G_IO_ERROR,
+                                    G_IO_ERROR_FAILED,
+                                    "Failed to write RFX SurfaceBits message");
+                return FALSE;
+            }
+            return TRUE;
+        case DRD_RFX_ENCODER_KIND_PROGRESSIVE:
+            if (!drd_rfx_encoder_ensure_progressive(self, error))
+            {
+                return FALSE;
+            }
+            if (!progressive_rfx_write_message_progressive_simple(self->progressive,
+                                                                  stream,
+                                                                  message))
+            {
+                g_set_error_literal(error,
+                                    G_IO_ERROR,
+                                    G_IO_ERROR_FAILED,
+                                    "Failed to write Progressive RFX message");
+                return FALSE;
+            }
+            return TRUE;
+        default:
+            g_set_error_literal(error,
+                                G_IO_ERROR,
+                                G_IO_ERROR_FAILED,
+                                "Unsupported RFX encoder kind");
+            return FALSE;
+    }
+}
+
+static gboolean
 collect_dirty_rects(DrdRfxEncoder *self,
                     const guint8 *data,
                     const guint8 *previous,
@@ -270,6 +355,7 @@ gboolean
 drd_rfx_encoder_encode(DrdRfxEncoder *self,
                         DrdFrame *frame,
                         DrdEncodedFrame *output,
+                        DrdRfxEncoderKind kind,
                         GError **error)
 {
     g_return_val_if_fail(DRD_IS_RFX_ENCODER(self), FALSE);
@@ -300,6 +386,9 @@ drd_rfx_encoder_encode(DrdRfxEncoder *self,
     }
 
     guint64 timestamp = drd_frame_get_timestamp(frame);
+    DrdFrameCodec frame_codec =
+        (kind == DRD_RFX_ENCODER_KIND_PROGRESSIVE) ? DRD_FRAME_CODEC_RFX_PROGRESSIVE
+                                                   : DRD_FRAME_CODEC_RFX;
     if (!rfx_context_reset(self->context, self->width, self->height))
     {
         g_set_error_literal(error,
@@ -337,7 +426,7 @@ drd_rfx_encoder_encode(DrdRfxEncoder *self,
                                      drd_frame_get_stride(frame),
                                      FALSE,
                                      timestamp,
-                                     DRD_FRAME_CODEC_RFX);
+                                     frame_codec);
         drd_encoded_frame_set_quality(output, 0, 0, FALSE);
         return TRUE;
     }
@@ -369,17 +458,12 @@ drd_rfx_encoder_encode(DrdRfxEncoder *self,
         return FALSE;
     }
 
-    Stream_SetPosition(stream, 0);
-    gboolean ok = rfx_write_message(self->context, stream, message);
+    gboolean ok = drd_rfx_encoder_write_stream(self, kind, stream, message, error);
     rfx_message_free(self->context, message);
 
     if (!ok)
     {
         Stream_Free(stream, TRUE);
-        g_set_error_literal(error,
-                            G_IO_ERROR,
-                            G_IO_ERROR_FAILED,
-                            "Failed to write RFX message");
         return FALSE;
     }
 
@@ -392,7 +476,7 @@ drd_rfx_encoder_encode(DrdRfxEncoder *self,
                                  expected_stride,
                                  FALSE,
                                  timestamp,
-                                 DRD_FRAME_CODEC_RFX);
+                                 frame_codec);
     guint8 *payload = drd_encoded_frame_ensure_capacity(output, payload_size);
     memcpy(payload, payload_data, payload_size);
     drd_encoded_frame_set_quality(output, 0, 0, TRUE);
