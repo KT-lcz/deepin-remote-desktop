@@ -1,8 +1,36 @@
 #include "core/drd_application.h"
 
+#include <freerdp/channels/channels.h>
+#include <winpr/ssl.h>
+#include <winpr/wtsapi.h>
+#include <freerdp/primitives.h>
+static gboolean
+drd_initialize_winpr(void)
+{
+    if (!winpr_InitializeSSL(WINPR_SSL_INIT_DEFAULT))
+    {
+        g_printerr("WinPR SSL 初始化失败\n");
+        return FALSE;
+    }
+
+    const WtsApiFunctionTable *table = FreeRDP_InitWtsApi();
+    if (table == NULL || !WTSRegisterWtsApiFunctionTable(table))
+    {
+        g_printerr("注册 WinPR WTS API 失败\n");
+        return FALSE;
+    }
+
+    return TRUE;
+}
+
 int
 main(int argc, char **argv)
 {
+    if (!drd_initialize_winpr())
+    {
+        return 1;
+    }
+    primitives_get ();
     g_autoptr(DrdApplication) app = drd_application_new();
     g_autoptr(GError) error = NULL;
 

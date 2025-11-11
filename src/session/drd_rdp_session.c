@@ -4,6 +4,8 @@
 #include <freerdp/update.h>
 #include <freerdp/codec/bitmap.h>
 #include <freerdp/constants.h>
+#include <freerdp/channels/drdynvc.h>
+#include <freerdp/channels/wtsvc.h>
 
 #include <gio/gio.h>
 #include <string.h>
@@ -24,6 +26,7 @@ struct _DrdRdpSession
     gchar *state;
     DrdServerRuntime *runtime;
     HANDLE vcm;
+    GThread *vcm_thread;
     DrdRdpGraphicsPipeline *graphics_pipeline;
     gboolean graphics_pipeline_ready;
     guint32 frame_sequence;
@@ -40,6 +43,7 @@ static gboolean drd_rdp_session_send_surface_bits(DrdRdpSession *self,
                                                    guint32 frame_id,
                                                    UINT32 negotiated_max_payload,
                                                    GError **error);
+static gpointer drd_rdp_session_vcm_thread(gpointer user_data);
 static gboolean drd_rdp_session_try_submit_graphics(DrdRdpSession *self,
                                                     DrdEncodedFrame *frame);
 static void drd_rdp_session_maybe_init_graphics(DrdRdpSession *self);
@@ -55,6 +59,11 @@ drd_rdp_session_dispose(GObject *object)
 
     drd_rdp_session_stop_event_thread(self);
     drd_rdp_session_disable_graphics_pipeline(self, NULL);
+    if (self->vcm_thread != NULL)
+    {
+        g_thread_join(self->vcm_thread);
+        self->vcm_thread = NULL;
+    }
 
     if (self->peer != NULL && self->peer->context != NULL)
     {
@@ -93,6 +102,7 @@ drd_rdp_session_init(DrdRdpSession *self)
     self->peer_address = g_strdup("unknown");
     self->state = g_strdup("created");
     self->runtime = NULL;
+    self->vcm_thread = NULL;
     self->vcm = INVALID_HANDLE_VALUE;
     self->graphics_pipeline = NULL;
     self->graphics_pipeline_ready = FALSE;
@@ -191,16 +201,15 @@ drd_rdp_session_start_event_thread(DrdRdpSession *self)
 {
     g_return_val_if_fail(DRD_IS_RDP_SESSION(self), FALSE);
 
-    if (self->event_thread != NULL)
-    {
-        return TRUE;
-    }
-
     if (self->peer == NULL)
     {
         return FALSE;
     }
 
+    if (self->event_thread != NULL)
+    {
+        return TRUE;
+    }
     if (self->stop_event == NULL)
     {
         self->stop_event = CreateEvent(NULL, TRUE, FALSE, NULL);
@@ -217,6 +226,12 @@ drd_rdp_session_start_event_thread(DrdRdpSession *self)
     {
         DRD_LOG_MESSAGE("Session %s started event thread", self->peer_address);
     }
+
+    if (self->vcm != NULL && self->vcm != INVALID_HANDLE_VALUE && self->vcm_thread == NULL)
+    {
+        self->vcm_thread = g_thread_new("drd-rdp-vcm", drd_rdp_session_vcm_thread, g_object_ref(self));
+    }
+
     return TRUE;
 }
 
@@ -243,6 +258,12 @@ drd_rdp_session_stop_event_thread(DrdRdpSession *self)
     }
 
     g_atomic_int_set(&self->connection_alive, 0);
+
+    if (self->vcm_thread != NULL)
+    {
+        g_thread_join(self->vcm_thread);
+        self->vcm_thread = NULL;
+    }
 }
 
 BOOL
@@ -361,6 +382,13 @@ drd_rdp_session_event_thread(gpointer user_data)
 {
     DrdRdpSession *self = DRD_RDP_SESSION(user_data);
     freerdp_peer *peer = self->peer;
+    HANDLE vcm = self->vcm;
+    HANDLE vcm_event = NULL;
+
+    if (vcm != NULL && vcm != INVALID_HANDLE_VALUE)
+    {
+        vcm_event = WTSVirtualChannelManagerGetEventHandle(vcm);
+    }
 
     if (peer == NULL)
     {
@@ -381,6 +409,12 @@ drd_rdp_session_event_thread(gpointer user_data)
         }
 
         DWORD obtained = 0;
+
+        if (vcm_event != NULL)
+        {
+            handles[count++] = vcm_event;
+        }
+
         if (peer->GetEventHandles != NULL)
         {
             obtained = peer->GetEventHandles(peer, &handles[count], G_N_ELEMENTS(handles) - count);
@@ -411,6 +445,95 @@ drd_rdp_session_event_thread(gpointer user_data)
             DRD_LOG_MESSAGE("Session %s CheckFileDescriptor failed in event thread", self->peer_address);
             g_atomic_int_set(&self->connection_alive, 0);
             break;
+        }
+    }
+
+    g_object_unref(self);
+    return NULL;
+}
+
+static gpointer
+drd_rdp_session_vcm_thread(gpointer user_data)
+{
+    DrdRdpSession *self = DRD_RDP_SESSION(user_data);
+    freerdp_peer *peer = self->peer;
+    HANDLE vcm = self->vcm;
+    HANDLE channel_event = NULL;
+
+    if (vcm == NULL || vcm == INVALID_HANDLE_VALUE || peer == NULL)
+    {
+        g_object_unref(self);
+        return NULL;
+    }
+
+    channel_event = WTSVirtualChannelManagerGetEventHandle(vcm);
+
+    while (g_atomic_int_get(&self->connection_alive))
+    {
+        HANDLE handles[2];
+        DWORD count = 0;
+
+        if (self->stop_event != NULL)
+        {
+            handles[count++] = self->stop_event;
+        }
+        if (channel_event != NULL)
+        {
+            handles[count++] = channel_event;
+        }
+
+        DWORD status = WAIT_TIMEOUT;
+        if (count > 0)
+        {
+            status = WaitForMultipleObjects(count, handles, FALSE, 100);
+        }
+
+        if (status == WAIT_FAILED)
+        {
+            break;
+        }
+
+        if (self->stop_event != NULL && status == WAIT_OBJECT_0)
+        {
+            break;
+        }
+
+
+
+        if (!peer->connected)
+        {
+            continue;
+        }
+
+        if (!WTSVirtualChannelManagerIsChannelJoined(vcm, DRDYNVC_SVC_CHANNEL_NAME))
+        {
+            continue;
+        }
+
+        BYTE drdynvc_state = WTSVirtualChannelManagerGetDrdynvcState(vcm);
+        if (drdynvc_state == DRDYNVC_STATE_NONE)
+        {
+            if (channel_event != NULL)
+            {
+                SetEvent(channel_event);
+            }
+            continue;
+        }
+
+        if (drdynvc_state == DRDYNVC_STATE_READY &&
+            self->graphics_pipeline != NULL && !self->graphics_pipeline_ready)
+        {
+            drd_rdp_graphics_pipeline_maybe_init(self->graphics_pipeline);
+        }
+
+        if (channel_event != NULL &&
+            WaitForSingleObject(channel_event, 0) == WAIT_OBJECT_0)
+        {
+            if (!WTSVirtualChannelManagerCheckFileDescriptor(vcm))
+            {
+                DRD_LOG_MESSAGE("Session %s failed to check VCM descriptor", self->peer_address);
+                break;
+            }
         }
     }
 
@@ -594,7 +717,7 @@ drd_rdp_session_try_submit_graphics(DrdRdpSession *self, DrdEncodedFrame *frame)
         return FALSE;
     }
 
-    drd_rdp_graphics_pipeline_maybe_init(self->graphics_pipeline);
+    // drd_rdp_graphics_pipeline_maybe_init(self->graphics_pipeline);
 
     if (!self->graphics_pipeline_ready &&
         drd_rdp_graphics_pipeline_is_ready(self->graphics_pipeline))

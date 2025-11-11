@@ -6,6 +6,8 @@
 #include <freerdp/listener.h>
 #include <freerdp/settings.h>
 #include <freerdp/input.h>
+#include <freerdp/channels/drdynvc.h>
+#include <freerdp/channels/wtsvc.h>
 #include <winpr/wtypes.h>
 #include <winpr/wtsapi.h>
 
@@ -240,6 +242,19 @@ drd_peer_capabilities(freerdp_peer *client)
     const gboolean desktop_resize = freerdp_settings_get_bool(settings, FreeRDP_DesktopResize);
 
     DrdRdpPeerContext *ctx = (DrdRdpPeerContext *)client->context;
+    if (ctx == NULL || ctx->vcm == NULL || ctx->vcm == INVALID_HANDLE_VALUE)
+    {
+        DRD_LOG_WARNING("Peer %s missing virtual channel manager during capability exchange",
+                         client->hostname);
+        return FALSE;
+    }
+
+    if (!WTSVirtualChannelManagerIsChannelJoined(ctx->vcm, DRDYNVC_SVC_CHANNEL_NAME))
+    {
+        DRD_LOG_WARNING("Peer %s does not support DRDYNVC, rejecting connection", client->hostname);
+        return FALSE;
+    }
+
     if (!desktop_resize)
     {
         if (ctx != NULL && ctx->session != NULL)
