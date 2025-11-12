@@ -216,11 +216,22 @@ drd_rdp_graphics_pipeline_maybe_init(DrdRdpGraphicsPipeline *self)
 
     if (!self->channel_opened)
     {
-        if (!self->rdpgfx_context->Open ||
-            !self->rdpgfx_context->Open(self->rdpgfx_context)) // 卡着
+        RdpgfxServerContext *rdpgfx_context = self->rdpgfx_context;
+
+        g_mutex_unlock(&self->lock);
+
+        if (rdpgfx_context == NULL ||
+            rdpgfx_context->Open == NULL ||
+            !rdpgfx_context->Open(rdpgfx_context))
+        {
+            DRD_LOG_WARNING("Failed to open Rdpgfx channel");
+            return FALSE;
+        }
+        g_mutex_lock(&self->lock);
+
+        if (self->rdpgfx_context != rdpgfx_context)
         {
             g_mutex_unlock(&self->lock);
-            DRD_LOG_WARNING("Failed to open Rdpgfx channel");
             return FALSE;
         }
 
