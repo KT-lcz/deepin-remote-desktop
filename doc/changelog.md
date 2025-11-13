@@ -1,5 +1,47 @@
 # 变更记录
 
+## 2025-11-13
+- **目的**：对齐 `gnome-remote-desktop` 的 Progressive 帧发送约束，避免 Rdpgfx 在首帧未携带 Header 时输出方块/灰屏。
+- **范围**：
+  - `glib-rewrite/src/encoding/drd_rfx_encoder.c`：关键帧编码路径现在准确标记 `DrdEncodedFrame` 的 `is_keyframe` 状态，为下游判定提供依据。
+  - `glib-rewrite/src/session/drd_rdp_graphics_pipeline.{c,h}`：新增 `DRD_RDP_GRAPHICS_PIPELINE_ERROR_NEEDS_KEYFRAME`，在 `needs_keyframe` 置位且收到非关键帧时拒绝提交，并在提交失败后重置该标志，确保下一帧重新携带 Progressive Header；提交接口同步接收调用方提前读取的 `frame_is_keyframe`，防止编码线程重用对象造成判定竞态。
+  - `glib-rewrite/src/session/drd_rdp_session.c`：新增 renderer 线程，在会话激活后用专用线程串行执行 “拉帧→编码→发送”，接收到关键帧缺失错误时调用 `drd_server_runtime_request_keyframe()`，无需禁用 Rdpgfx 即可重新对齐。
+  - `glib-rewrite/src/core/drd_server_runtime.c`：移除异步编码线程与 `encoded_queue`，`drd_server_runtime_pull_encoded_frame()` 改为同步等待捕获帧并立即编码，供 renderer 线程消费。
+  - `doc/architecture.md`：记录关键帧守卫、RLGR1 Progressive、FrameAcknowledge 背压以及 renderer/捕获线程协作流程，便于团队理解与排查。
+- **影响**：首次或重置后的 Progressive 帧一定是带 Header 的关键帧，即使编码线程存在竞态也会被拦截，客户端不再出现灰屏；遇到竞态时仅触发一次重新编码，不会强制回退 SurfaceBits。
+
+## 2025-11-14
+- **目的**：补充最新的 RDPGFX 流水线文档，确保 `doc/architecture.md`/`doc/changelog.md` 能准确描述 RLGR1 Progressive、renderer 单线程、FrameAcknowledge 背压以及 capture → encode → send 的协作关系。
+- **范围**：
+  - `doc/architecture.md`：新增 “单线程编码与发送”“FrameAcknowledge 与 Rdpgfx 背压”“Renderer & Capture 线程协作” 等小节，引用 `doc/rdpgfx-pipeline.md` 的数据流，说明 `needs_keyframe`、`capacity_cond`、RLGR1 配置与 renderer 线程行为。
+  - `doc/changelog.md`：记录上述文档更新，明确 Progressive RFX 的默认 RLGR1、关键帧守卫及调试方法。
+- **影响**：开发者查阅文档即可了解当前实现的关键约束（ACK 背压、关键帧要求、renderer 生命周期），无需再回溯旧的 GNOME upstream 描述即可调试 `glib-rewrite`。
+
+## 2025-11-12
+- **目的**：整理 Rdpgfx Progressive 拥塞/花屏调查计划，明确分析上下文。
+- **范围**：新增 `.codex/plan/rdpgfx-progressive-congestion-analysis.md`，记录任务背景与分步计划，后续用以比对 `gnome-remote-desktop` 与 `glib-rewrite` 的图形管线差异。
+- **影响**：便于跟踪分析进度并向团队同步关键节点，减少重复摸索。
+
+### Rdpgfx 背压修复
+- **目的**：彻底解决 “dropping progressive frame due to Rdpgfx congestion” 导致的花屏问题，确保 Progressive 帧只有在客户端确认后才继续编码。
+- **范围**：
+  - `glib-rewrite/src/session/drd_rdp_graphics_pipeline.c`：新增 `capacity_cond` 条件变量与 `drd_rdp_graphics_pipeline_wait_for_capacity()`，在 FrameAcknowledge 触发后唤醒等待线程。
+  - `glib-rewrite/src/session/drd_rdp_renderer.{c,h}` + `drd_rdp_session.c`：引入专用 renderer 线程与帧队列，所有 Progressive 帧均在该线程串行提交；如 200 ms 内未获 ACK，会通过回调禁用管线并强制关键帧后回退 SurfaceBits。
+  - `glib-rewrite/src/session/drd_rdp_graphics_pipeline.c`：`ResetGraphics` 现在携带完整的 `MONITOR_DEF` 列表，确保客户端正确建立显示布局，避免因 monitorCount=0 导致的灰屏。
+  - `doc/architecture.md`：记录新的背压机制与交互时序。
+- **影响**：Rdpgfx 拥塞时不再直接丢帧，客户端与服务器保持同步视图，花屏现象消失，同时通过关键帧重置避免脏块继续引用失效帧。
+
+## 2025-11-11
+- **目的**：修复 `rdpgfx_context->Open()` 在 `glib-rewrite` 中阻塞的问题，并记录新的 RDPGFX 初始化约束。
+- **范围**：调整 `glib-rewrite/src/session/drd_rdp_graphics_pipeline.c` 中的锁策略，补充 `doc/architecture.md` 对 VCM 线程与 Rdpgfx 管线关系的说明。
+- **影响**：Rdpgfx 管道在握手阶段不再自锁，`ChannelIdAssigned`/`CapsAdvertise` 能顺利回调并建立 surface，提升 RFX Progressive 路径的可用性。
+
+### Progressive 花屏修复
+- **目的**：解决 Progressive RFX 画面花屏问题，确保编码输出符合 RDPEGFX 规范。
+- **范围**：在 `glib-rewrite/src/encoding/drd_rfx_encoder.c` 中新增手写 Progressive 帧封装函数，移除 `progressive_rfx_write_message_progressive_simple()` 依赖，并更新 `doc/architecture.md` 记录差异。
+- **影响**：客户端可以解析完整的 `SYNC/CONTEXT/REGION/TILE` 元数据，消除颜色错位，避免与 Windows RDP 客户端产生兼容性问题。
+- **进一步修复**：当 Rdpgfx 管线拥塞或提交失败时，不再回退到 SurfaceBits 复用同一 RFX Progressive payload；改为丢弃当前帧并在必要时禁用图形管线（`glib-rewrite/src/session/drd_rdp_session.c`）。这样可避免 Progressive 数据被 SurfaceBits 路径误解导致的 TLS 错误与客户端花屏。
+- **SurfaceFrameCommand 对齐**：`drd_rdp_graphics_pipeline_submit_frame()` 现在优先调用 FreeRDP 的 `SurfaceFrameCommand`，自动封装 `StartFrame/Surface/End` 并确保 FrameAcknowledge 正常触发；仅在旧库缺少该入口时回退到手动序列（`glib-rewrite/src/session/drd_rdp_graphics_pipeline.c`）。
 ## 2025-11-07：项目更名为 deepin-remote-desktop
 - **目的**：将 GLib 重构版本统一纳入 Deepin Remote Desktop 品牌，避免 “grdc” 历史命名造成混淆。
 - **范围**：`src/` 全量类型/函数/宏/文件、Meson 目标与可执行名、`doc/*.md`、`README.md`、`AGENTS.md` 及相关计划文档。

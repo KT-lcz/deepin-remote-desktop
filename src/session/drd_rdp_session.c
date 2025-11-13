@@ -34,6 +34,8 @@ struct _DrdRdpSession
     GThread *event_thread;
     HANDLE stop_event;
     gint connection_alive;
+    GThread *render_thread;
+    gint render_running;
 };
 
 G_DEFINE_TYPE(DrdRdpSession, drd_rdp_session, G_TYPE_OBJECT)
@@ -50,6 +52,11 @@ static void drd_rdp_session_maybe_init_graphics(DrdRdpSession *self);
 static void drd_rdp_session_disable_graphics_pipeline(DrdRdpSession *self,
                                                       const gchar *reason);
 static gboolean drd_rdp_session_enforce_peer_desktop_size(DrdRdpSession *self);
+static gboolean drd_rdp_session_wait_for_graphics_capacity(DrdRdpSession *self,
+                                                          gint64 timeout_us);
+static gboolean drd_rdp_session_start_render_thread(DrdRdpSession *self);
+static void drd_rdp_session_stop_render_thread(DrdRdpSession *self);
+static gpointer drd_rdp_session_render_thread(gpointer user_data);
 
 static void
 drd_rdp_session_dispose(GObject *object)
@@ -110,6 +117,8 @@ drd_rdp_session_init(DrdRdpSession *self)
     self->event_thread = NULL;
     self->stop_event = NULL;
     g_atomic_int_set(&self->connection_alive, 1);
+    self->render_thread = NULL;
+    g_atomic_int_set(&self->render_running, 0);
 }
 
 DrdRdpSession *
@@ -191,6 +200,10 @@ drd_rdp_session_activate(DrdRdpSession *self)
     {
         drd_server_runtime_request_keyframe(self->runtime);
     }
+    if (!drd_rdp_session_start_render_thread(self))
+    {
+        DRD_LOG_WARNING("Session %s failed to start renderer thread", self->peer_address);
+    }
     // drd_rdp_session_start_event_thread(self);
     return TRUE;
 }
@@ -234,10 +247,53 @@ drd_rdp_session_start_event_thread(DrdRdpSession *self)
     return TRUE;
 }
 
+static gboolean
+drd_rdp_session_start_render_thread(DrdRdpSession *self)
+{
+    g_return_val_if_fail(DRD_IS_RDP_SESSION(self), FALSE);
+
+    if (self->render_thread != NULL)
+    {
+        return TRUE;
+    }
+
+    if (self->runtime == NULL)
+    {
+        return FALSE;
+    }
+
+    g_atomic_int_set(&self->render_running, 1);
+    self->render_thread =
+        g_thread_new("drd-render-thread", drd_rdp_session_render_thread, g_object_ref(self));
+    if (self->render_thread == NULL)
+    {
+        g_atomic_int_set(&self->render_running, 0);
+        return FALSE;
+    }
+    return TRUE;
+}
+
+static void
+drd_rdp_session_stop_render_thread(DrdRdpSession *self)
+{
+    g_return_if_fail(DRD_IS_RDP_SESSION(self));
+
+    if (self->render_thread == NULL)
+    {
+        return;
+    }
+
+    g_atomic_int_set(&self->render_running, 0);
+    g_thread_join(self->render_thread);
+    self->render_thread = NULL;
+}
+
 void
 drd_rdp_session_stop_event_thread(DrdRdpSession *self)
 {
     g_return_if_fail(DRD_IS_RDP_SESSION(self));
+
+    drd_rdp_session_stop_render_thread(self);
 
     if (self->event_thread != NULL)
     {
@@ -280,6 +336,11 @@ drd_rdp_session_pump(DrdRdpSession *self)
         return FALSE;
     }
 
+    if (self->render_thread != NULL)
+    {
+        return TRUE;
+    }
+
     if (self->runtime == NULL)
     {
         return TRUE;
@@ -295,6 +356,15 @@ drd_rdp_session_pump(DrdRdpSession *self)
     {
         negotiated_max_payload = freerdp_settings_get_uint32(self->peer->context->settings,
                                                              FreeRDP_MultifragMaxRequestSize);
+    }
+
+    if (self->graphics_pipeline != NULL && self->graphics_pipeline_ready)
+    {
+        if (!drd_rdp_session_wait_for_graphics_capacity(self, -1))
+        {
+            drd_rdp_session_disable_graphics_pipeline(self,
+                                                      "Rdpgfx capacity wait aborted");
+        }
     }
 
     DrdEncodedFrame *encoded = NULL;
@@ -471,6 +541,7 @@ drd_rdp_session_vcm_thread(gpointer user_data)
         }
     }
 
+    g_atomic_int_set(&self->render_running, 0);
     g_object_unref(self);
     return NULL;
 }
@@ -573,6 +644,101 @@ drd_rdp_session_enforce_peer_desktop_size(DrdRdpSession *self)
     return TRUE;
 }
 
+static gpointer
+drd_rdp_session_render_thread(gpointer user_data)
+{
+    DrdRdpSession *self = DRD_RDP_SESSION(user_data);
+
+    while (g_atomic_int_get(&self->render_running))
+    {
+        if (!g_atomic_int_get(&self->connection_alive))
+        {
+            break;
+        }
+
+        if (!self->is_activated || self->runtime == NULL)
+        {
+            g_usleep(1000);
+            continue;
+        }
+
+        if (self->graphics_pipeline != NULL && self->graphics_pipeline_ready)
+        {
+            /*
+             * Rdpgfx 背压：若 outstanding_frames >= max_outstanding_frames，则
+             * drd_rdp_graphics_pipeline_wait_for_capacity() 会在 capacity_cond 上等待，
+             * 直到客户端发送 RDPGFX_FRAME_ACKNOWLEDGE 释放槽位，保证不会编码无限多
+             * Progressive 帧。
+             */
+            if (!drd_rdp_session_wait_for_graphics_capacity(self, -1))
+            {
+                drd_rdp_session_disable_graphics_pipeline(self, "Rdpgfx capacity wait aborted");
+            }
+        }
+
+        DrdEncodedFrame *encoded = NULL;
+        g_autoptr(GError) error = NULL;
+        if (!drd_server_runtime_pull_encoded_frame(self->runtime,
+                                                    16 * 1000,
+                                                    &encoded,
+                                                    &error))
+        {
+            if (error != NULL && error->domain == G_IO_ERROR && error->code == G_IO_ERROR_TIMED_OUT)
+            {
+                g_clear_error(&error);
+                continue;
+            }
+
+            if (error != NULL)
+            {
+                DRD_LOG_WARNING("Session %s failed to pull encoded frame: %s",
+                                self->peer_address,
+                                error->message);
+            }
+            continue;
+        }
+
+        g_autoptr(DrdEncodedFrame) owned_frame = encoded;
+
+        gboolean sent_via_graphics = drd_rdp_session_try_submit_graphics(self, owned_frame);
+        if (!sent_via_graphics)
+        {
+            guint32 negotiated_max_payload = 0;
+            if (self->peer != NULL && self->peer->context != NULL &&
+                self->peer->context->settings != NULL)
+            {
+                negotiated_max_payload =
+                    freerdp_settings_get_uint32(self->peer->context->settings,
+                                                FreeRDP_MultifragMaxRequestSize);
+            }
+
+            g_autoptr(GError) send_error = NULL;
+            if (!drd_rdp_session_send_surface_bits(self,
+                                                    owned_frame,
+                                                    self->frame_sequence,
+                                                    negotiated_max_payload,
+                                                    &send_error))
+            {
+                if (send_error != NULL)
+                {
+                    DRD_LOG_WARNING("Session %s failed to send frame: %s",
+                                    self->peer_address,
+                                    send_error->message);
+                }
+            }
+        }
+
+        self->frame_sequence++;
+        if (self->frame_sequence == 0)
+        {
+            self->frame_sequence = 1;
+        }
+    }
+
+    g_object_unref(self);
+    return NULL;
+}
+
 static void
 drd_rdp_session_maybe_init_graphics(DrdRdpSession *self)
 {
@@ -637,6 +803,19 @@ drd_rdp_session_disable_graphics_pipeline(DrdRdpSession *self, const gchar *reas
 }
 
 static gboolean
+drd_rdp_session_wait_for_graphics_capacity(DrdRdpSession *self,
+                                           gint64 timeout_us)
+{
+    if (self->graphics_pipeline == NULL || !self->graphics_pipeline_ready)
+    {
+        return FALSE;
+    }
+
+    return drd_rdp_graphics_pipeline_wait_for_capacity(self->graphics_pipeline,
+                                                       timeout_us);
+}
+
+static gboolean
 drd_rdp_session_try_submit_graphics(DrdRdpSession *self, DrdEncodedFrame *frame)
 {
     if (self->runtime == NULL)
@@ -675,16 +854,47 @@ drd_rdp_session_try_submit_graphics(DrdRdpSession *self, DrdEncodedFrame *frame)
 
     if (!drd_rdp_graphics_pipeline_can_submit(self->graphics_pipeline))
     {
-        return FALSE;
+        if (!drd_rdp_session_wait_for_graphics_capacity(self, -1) ||
+            !drd_rdp_graphics_pipeline_can_submit(self->graphics_pipeline))
+        {
+            DRD_LOG_WARNING("Session %s Rdpgfx congestion persists, disabling graphics pipeline",
+                            self->peer_address);
+            drd_rdp_session_disable_graphics_pipeline(self, "Rdpgfx congestion");
+            return TRUE;
+        }
     }
 
+    /*
+     * Progressive 关键帧 = 覆盖完整画面且包含 SYNC/CONTEXT 等头部的帧，客户端无需
+     * 依赖旧数据即可渲染。只有在关键帧成功提交后，后续增量帧才安全，因此我们要
+     * 在编码线程覆盖 payload 前抢先读取 is_keyframe，并传给管线判断。
+     */
+    gboolean frame_is_keyframe = drd_encoded_frame_is_keyframe(frame);
     g_autoptr(GError) gfx_error = NULL;
-    if (!drd_rdp_graphics_pipeline_submit_frame(self->graphics_pipeline, frame, &gfx_error))
+    if (!drd_rdp_graphics_pipeline_submit_frame(self->graphics_pipeline,
+                                                frame,
+                                                frame_is_keyframe,
+                                                &gfx_error))
     {
-        drd_rdp_session_disable_graphics_pipeline(self,
-                                                  gfx_error != NULL ? gfx_error->message
-                                                                    : "submission failure");
-        return FALSE;
+        if (gfx_error != NULL &&
+            g_error_matches(gfx_error,
+                            DRD_RDP_GRAPHICS_PIPELINE_ERROR,
+                            DRD_RDP_GRAPHICS_PIPELINE_ERROR_NEEDS_KEYFRAME))
+        {
+            DRD_LOG_MESSAGE("Session %s Rdpgfx requires progressive keyframe, requesting re-encode",
+                            self->peer_address);
+            drd_server_runtime_request_keyframe(self->runtime);
+            return TRUE;
+        }
+
+        if (gfx_error != NULL)
+        {
+            DRD_LOG_WARNING("Session %s Rdpgfx submission failed: %s",
+                            self->peer_address,
+                            gfx_error->message);
+        }
+        drd_rdp_session_disable_graphics_pipeline(self, "Rdpgfx submission failure");
+        return TRUE;
     }
 
     return TRUE;

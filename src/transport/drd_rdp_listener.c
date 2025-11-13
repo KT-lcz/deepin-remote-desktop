@@ -562,10 +562,11 @@ drd_listener_peer_accepted(freerdp_listener *listener, freerdp_peer *client)
     DRD_LOG_MESSAGE("Accepted connection from %s", client->hostname);
     return TRUE;
 }
-
+// listener 事件循环
 static gboolean
 drd_rdp_listener_iterate(gpointer user_data)
 {
+
     DrdRdpListener *self = user_data;
     if (self->listener == NULL)
     {
@@ -579,20 +580,6 @@ drd_rdp_listener_iterate(gpointer user_data)
             DRD_LOG_WARNING("Listener CheckFileDescriptor failed");
         }
     }
-
-    guint index = 0;
-    while (index < self->sessions->len)
-    {
-        DrdRdpSession *session = g_ptr_array_index(self->sessions, index);
-        if (!drd_rdp_session_pump(session))
-        {
-            drd_rdp_session_set_peer_state(session, "closed");
-            g_ptr_array_remove_index(self->sessions, index);
-            continue;
-        }
-        index++;
-    }
-
     return G_SOURCE_CONTINUE;
 }
 

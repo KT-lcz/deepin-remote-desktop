@@ -2,7 +2,6 @@
 
 #include <freerdp/codec/rfx.h>
 #include <freerdp/codec/color.h>
-#include <freerdp/codec/progressive.h>
 #include <winpr/stream.h>
 
 #include <gio/gio.h>
@@ -13,7 +12,6 @@ struct _DrdRfxEncoder
     GObject parent_instance;
 
     RFX_CONTEXT *context;
-    PROGRESSIVE_CONTEXT *progressive;
     guint width;
     guint height;
     gboolean enable_diff;
@@ -23,6 +21,7 @@ struct _DrdRfxEncoder
     guint tiles_x;
     guint tiles_y;
     gboolean force_keyframe;
+    gboolean progressive_header_sent;
 };
 
 G_DEFINE_TYPE(DrdRfxEncoder, drd_rfx_encoder, G_TYPE_OBJECT)
@@ -62,15 +61,6 @@ drd_rfx_encoder_dispose(GObject *object)
         rfx_context_free(self->context);
         self->context = NULL;
     }
-    if (self->progressive != NULL)
-    {
-        progressive_context_reset(self->progressive);
-    }
-    if (self->progressive != NULL)
-    {
-        progressive_context_free(self->progressive);
-        self->progressive = NULL;
-    }
 
     g_clear_pointer(&self->bottom_up_frame, g_byte_array_unref);
     g_clear_pointer(&self->previous_frame, g_byte_array_unref);
@@ -98,6 +88,7 @@ drd_rfx_encoder_init(DrdRfxEncoder *self)
     self->tile_hashes = g_array_new(FALSE, TRUE, sizeof(guint64));
     self->tiles_x = 0;
     self->tiles_y = 0;
+    self->progressive_header_sent = FALSE;
 }
 
 DrdRfxEncoder *
@@ -157,12 +148,13 @@ drd_rfx_encoder_configure(DrdRfxEncoder *self,
         return FALSE;
     }
 
-    rfx_context_set_mode(self->context, RLGR3);
+    rfx_context_set_mode(self->context, RLGR1);
 
     self->width = width;
     self->height = height;
     self->enable_diff = enable_diff;
     self->force_keyframe = TRUE;
+    self->progressive_header_sent = FALSE;
 
     g_byte_array_set_size(self->bottom_up_frame, (gsize)width * height * 4u);
     memset(self->bottom_up_frame->data, 0, self->bottom_up_frame->len);
@@ -199,6 +191,7 @@ drd_rfx_encoder_reset(DrdRfxEncoder *self)
     self->tiles_x = 0;
     self->tiles_y = 0;
     self->force_keyframe = TRUE;
+    self->progressive_header_sent = FALSE;
 }
 
 static const guint8 *
@@ -222,31 +215,185 @@ copy_frame_linear(DrdFrame *frame, GByteArray *buffer)
     return dst;
 }
 
-static gboolean
-drd_rfx_encoder_ensure_progressive(DrdRfxEncoder *self, GError **error)
+static inline void
+drd_stream_write_uint32(wStream *stream, UINT32 value)
 {
-    if (self->progressive == NULL)
+    Stream_Write_UINT32_unchecked(stream, value);
+}
+
+static inline void
+drd_stream_write_uint16(wStream *stream, UINT16 value)
+{
+    Stream_Write_UINT16_unchecked(stream, value);
+}
+
+static inline void
+drd_stream_write_uint8(wStream *stream, UINT8 value)
+{
+    Stream_Write_UINT8_unchecked(stream, value);
+}
+
+static gboolean
+drd_rfx_encoder_write_progressive_message(RFX_MESSAGE *rfx_message,
+                                          wStream *stream,
+                                          gboolean needs_progressive_header,
+                                          GError **error)
+{
+    const RFX_RECT *rfx_rects = NULL;
+    UINT16 n_rfx_rects = 0;
+    const UINT32 *quant_vals = NULL;
+    UINT16 n_quant_vals = 0;
+    const RFX_TILE **rfx_tiles = NULL;
+    UINT16 n_rfx_tiles = 0;
+    UINT32 block_len = 0;
+    UINT32 tiles_data_size = 0;
+    const UINT32 *qv = NULL;
+    const RFX_TILE *rfx_tile = NULL;
+    UINT16 i = 0;
+
+    rfx_rects = rfx_message_get_rects(rfx_message, &n_rfx_rects);
+    quant_vals = rfx_message_get_quants(rfx_message, &n_quant_vals);
+    rfx_tiles = rfx_message_get_tiles(rfx_message, &n_rfx_tiles);
+
+    if (needs_progressive_header)
     {
-        self->progressive = progressive_context_new(TRUE);
-        if (self->progressive == NULL)
+        block_len = 12;
+        if (!Stream_EnsureRemainingCapacity(stream, block_len))
         {
             g_set_error_literal(error,
                                 G_IO_ERROR,
                                 G_IO_ERROR_FAILED,
-                                "Failed to allocate Progressive RFX context");
+                                "Failed to write RFX_PROGRESSIVE_SYNC block");
             return FALSE;
         }
+
+        drd_stream_write_uint16(stream, 0xCCC0);
+        drd_stream_write_uint32(stream, block_len);
+        drd_stream_write_uint32(stream, 0xCACCACCA);
+        drd_stream_write_uint16(stream, 0x0100);
+
+        block_len = 10;
+        if (!Stream_EnsureRemainingCapacity(stream, block_len))
+        {
+            g_set_error_literal(error,
+                                G_IO_ERROR,
+                                G_IO_ERROR_FAILED,
+                                "Failed to write RFX_PROGRESSIVE_CONTEXT block");
+            return FALSE;
+        }
+
+        drd_stream_write_uint16(stream, 0xCCC3);
+        drd_stream_write_uint32(stream, block_len);
+        drd_stream_write_uint8(stream, 0);   /* ctxId */
+        drd_stream_write_uint16(stream, 0x0040);
+        drd_stream_write_uint8(stream, 0);   /* flags */
     }
 
-    if (!progressive_context_reset(self->progressive))
+    block_len = 12;
+    if (!Stream_EnsureRemainingCapacity(stream, block_len))
     {
         g_set_error_literal(error,
                             G_IO_ERROR,
                             G_IO_ERROR_FAILED,
-                            "Failed to reset Progressive RFX context");
+                            "Failed to write RFX_PROGRESSIVE_FRAME_BEGIN block");
         return FALSE;
     }
 
+    drd_stream_write_uint16(stream, 0xCCC1);
+    drd_stream_write_uint32(stream, block_len);
+    drd_stream_write_uint32(stream, rfx_message_get_frame_idx(rfx_message));
+    drd_stream_write_uint16(stream, 1); /* regionCount */
+
+    tiles_data_size = n_rfx_tiles * 22;
+    for (i = 0; i < n_rfx_tiles; ++i)
+    {
+        rfx_tile = rfx_tiles[i];
+        tiles_data_size += rfx_tile->YLen + rfx_tile->CbLen + rfx_tile->CrLen;
+    }
+
+    block_len = 18;
+    block_len += n_rfx_rects * 8;
+    block_len += n_quant_vals * 5;
+    block_len += tiles_data_size;
+
+    if (!Stream_EnsureRemainingCapacity(stream, block_len))
+    {
+        g_set_error_literal(error,
+                            G_IO_ERROR,
+                            G_IO_ERROR_FAILED,
+                            "Failed to write RFX_PROGRESSIVE_REGION block");
+        return FALSE;
+    }
+
+    drd_stream_write_uint16(stream, 0xCCC4);
+    drd_stream_write_uint32(stream, block_len);
+    drd_stream_write_uint8(stream, 0x40);          /* tileSize */
+    drd_stream_write_uint16(stream, n_rfx_rects);
+    drd_stream_write_uint8(stream, n_quant_vals);
+    drd_stream_write_uint8(stream, 0);             /* numProgQuant */
+    drd_stream_write_uint8(stream, 0);             /* flags */
+    drd_stream_write_uint16(stream, n_rfx_tiles);
+    drd_stream_write_uint32(stream, tiles_data_size);
+
+    for (i = 0; i < n_rfx_rects; ++i)
+    {
+        drd_stream_write_uint16(stream, rfx_rects[i].x);
+        drd_stream_write_uint16(stream, rfx_rects[i].y);
+        drd_stream_write_uint16(stream, rfx_rects[i].width);
+        drd_stream_write_uint16(stream, rfx_rects[i].height);
+    }
+
+    for (i = 0, qv = quant_vals; i < n_quant_vals; ++i, qv += 10)
+    {
+        drd_stream_write_uint8(stream, qv[0] + (qv[2] << 4));
+        drd_stream_write_uint8(stream, qv[1] + (qv[3] << 4));
+        drd_stream_write_uint8(stream, qv[5] + (qv[4] << 4));
+        drd_stream_write_uint8(stream, qv[6] + (qv[8] << 4));
+        drd_stream_write_uint8(stream, qv[7] + (qv[9] << 4));
+    }
+
+    for (i = 0; i < n_rfx_tiles; ++i)
+    {
+        rfx_tile = rfx_tiles[i];
+        block_len = 22 + rfx_tile->YLen + rfx_tile->CbLen + rfx_tile->CrLen;
+        if (!Stream_EnsureRemainingCapacity(stream, block_len))
+        {
+            g_set_error_literal(error,
+                                G_IO_ERROR,
+                                G_IO_ERROR_FAILED,
+                                "Failed to write RFX_PROGRESSIVE_TILE block");
+            return FALSE;
+        }
+
+        drd_stream_write_uint16(stream, 0xCCC5);
+        drd_stream_write_uint32(stream, block_len);
+        drd_stream_write_uint8(stream, rfx_tile->quantIdxY);
+        drd_stream_write_uint8(stream, rfx_tile->quantIdxCb);
+        drd_stream_write_uint8(stream, rfx_tile->quantIdxCr);
+        drd_stream_write_uint16(stream, rfx_tile->xIdx);
+        drd_stream_write_uint16(stream, rfx_tile->yIdx);
+        drd_stream_write_uint8(stream, 0); /* flags */
+        drd_stream_write_uint16(stream, rfx_tile->YLen);
+        drd_stream_write_uint16(stream, rfx_tile->CbLen);
+        drd_stream_write_uint16(stream, rfx_tile->CrLen);
+        drd_stream_write_uint16(stream, 0); /* tailLen */
+        Stream_Write(stream, rfx_tile->YData, rfx_tile->YLen);
+        Stream_Write(stream, rfx_tile->CbData, rfx_tile->CbLen);
+        Stream_Write(stream, rfx_tile->CrData, rfx_tile->CrLen);
+    }
+
+    block_len = 6;
+    if (!Stream_EnsureRemainingCapacity(stream, block_len))
+    {
+        g_set_error_literal(error,
+                            G_IO_ERROR,
+                            G_IO_ERROR_FAILED,
+                            "Failed to write RFX_PROGRESSIVE_FRAME_END block");
+        return FALSE;
+    }
+
+    drd_stream_write_uint16(stream, 0xCCC2);
+    drd_stream_write_uint32(stream, block_len);
     return TRUE;
 }
 
@@ -272,21 +419,18 @@ drd_rfx_encoder_write_stream(DrdRfxEncoder *self,
             }
             return TRUE;
         case DRD_RFX_ENCODER_KIND_PROGRESSIVE:
-            if (!drd_rfx_encoder_ensure_progressive(self, error))
+        {
+            gboolean include_header = !self->progressive_header_sent;
+            if (!drd_rfx_encoder_write_progressive_message(message,
+                                                           stream,
+                                                           include_header,
+                                                           error))
             {
                 return FALSE;
             }
-            if (!progressive_rfx_write_message_progressive_simple(self->progressive,
-                                                                  stream,
-                                                                  message))
-            {
-                g_set_error_literal(error,
-                                    G_IO_ERROR,
-                                    G_IO_ERROR_FAILED,
-                                    "Failed to write Progressive RFX message");
-                return FALSE;
-            }
+            self->progressive_header_sent = TRUE;
             return TRUE;
+        }
         default:
             g_set_error_literal(error,
                                 G_IO_ERROR,
@@ -409,7 +553,9 @@ drd_rfx_encoder_encode(DrdRfxEncoder *self,
                                         ? self->previous_frame->data
                                         : NULL;
 
-    if (self->force_keyframe || !self->enable_diff)
+    const gboolean keyframe_encode = self->force_keyframe || !self->enable_diff;
+
+    if (keyframe_encode)
     {
         for (guint idx = 0; idx < self->tile_hashes->len; ++idx)
         {
@@ -479,7 +625,7 @@ drd_rfx_encoder_encode(DrdRfxEncoder *self,
                                  frame_codec);
     guint8 *payload = drd_encoded_frame_ensure_capacity(output, payload_size);
     memcpy(payload, payload_data, payload_size);
-    drd_encoded_frame_set_quality(output, 0, 0, TRUE);
+    drd_encoded_frame_set_quality(output, 0, 0, keyframe_encode);
 
     Stream_Free(stream, TRUE);
 
@@ -498,4 +644,5 @@ drd_rfx_encoder_force_keyframe(DrdRfxEncoder *self)
 {
     g_return_if_fail(DRD_IS_RFX_ENCODER(self));
     self->force_keyframe = TRUE;
+    self->progressive_header_sent = FALSE;
 }

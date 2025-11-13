@@ -7,11 +7,21 @@
 
 #include "utils/drd_encoded_frame.h"
 
+#define DRD_RDP_GRAPHICS_PIPELINE_ERROR (drd_rdp_graphics_pipeline_error_quark())
+
+typedef enum
+{
+    DRD_RDP_GRAPHICS_PIPELINE_ERROR_FAILED,
+    DRD_RDP_GRAPHICS_PIPELINE_ERROR_NEEDS_KEYFRAME
+} DrdRdpGraphicsPipelineError;
+
+GQuark drd_rdp_graphics_pipeline_error_quark(void);
+
 G_BEGIN_DECLS
 
 #define DRD_TYPE_RDP_GRAPHICS_PIPELINE (drd_rdp_graphics_pipeline_get_type())
 G_DECLARE_FINAL_TYPE(DrdRdpGraphicsPipeline,
-                     drd_rdp_graphics_pipeline,
+                      drd_rdp_graphics_pipeline,
                      DRD,
                      RDP_GRAPHICS_PIPELINE,
                      GObject)
@@ -24,8 +34,11 @@ DrdRdpGraphicsPipeline *drd_rdp_graphics_pipeline_new(freerdp_peer *peer,
 gboolean drd_rdp_graphics_pipeline_maybe_init(DrdRdpGraphicsPipeline *self);
 gboolean drd_rdp_graphics_pipeline_is_ready(DrdRdpGraphicsPipeline *self);
 gboolean drd_rdp_graphics_pipeline_can_submit(DrdRdpGraphicsPipeline *self);
+gboolean drd_rdp_graphics_pipeline_wait_for_capacity(DrdRdpGraphicsPipeline *self,
+                                                     gint64 timeout_us);
 gboolean drd_rdp_graphics_pipeline_submit_frame(DrdRdpGraphicsPipeline *self,
                                                 DrdEncodedFrame *frame,
+                                                gboolean frame_is_keyframe,
                                                 GError **error);
 
 G_END_DECLS
