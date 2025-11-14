@@ -2,6 +2,7 @@
 
 #include <X11/Xlib.h>
 #include <X11/extensions/XTest.h>
+#include <X11/keysym.h>
 
 #include <freerdp/input.h>
 #include <freerdp/locale/keyboard.h>
@@ -10,6 +11,8 @@
 #include <gio/gio.h>
 #include <math.h>
 #include <string.h>
+
+#include "utils/drd_log.h"
 
 struct _DrdX11Input
 {
@@ -30,6 +33,9 @@ G_DEFINE_TYPE(DrdX11Input, drd_x11_input, G_TYPE_OBJECT)
 
 static gboolean drd_x11_input_open_display(DrdX11Input *self, GError **error);
 static void drd_x11_input_close_display(DrdX11Input *self);
+static KeyCode drd_x11_input_lookup_special_keycode(DrdX11Input *self,
+                                                    guint8 scancode,
+                                                    gboolean extended);
 
 /* 对象销毁时停止后台线程并释放互斥锁。 */
 static void
@@ -235,12 +241,20 @@ drd_x11_input_inject_keyboard(DrdX11Input *self, guint16 flags, guint8 scancode,
     const gboolean release = (flags & KBD_FLAGS_RELEASE) != 0;
     const gboolean extended = (flags & (KBD_FLAGS_EXTENDED | KBD_FLAGS_EXTENDED1)) != 0;
     const UINT32 rdp_scancode = MAKE_RDP_SCANCODE(scancode, extended);
-    const UINT32 base_scancode = RDP_SCANCODE_CODE(rdp_scancode);
-    const UINT32 x11_keycode = freerdp_keyboard_get_x11_keycode_from_rdp_scancode(
+    const guint8 base_scancode = (guint8)RDP_SCANCODE_CODE(rdp_scancode);
+    UINT32 x11_keycode = freerdp_keyboard_get_x11_keycode_from_rdp_scancode(
         base_scancode, extended ? TRUE : FALSE);
 
     if (x11_keycode == 0)
     {
+        x11_keycode = drd_x11_input_lookup_special_keycode(self, base_scancode, extended);
+    }
+
+    if (x11_keycode == 0)
+    {
+        DRD_LOG_DEBUG("Could not translate RDP scancode 0x%02X (extended=%s)",
+                      base_scancode,
+                      extended ? "true" : "false");
         g_mutex_unlock(&self->lock);
         return TRUE;
     }
@@ -377,4 +391,40 @@ drd_x11_input_inject_pointer(DrdX11Input *self,
     XFlush(self->display);
     g_mutex_unlock(&self->lock);
     return TRUE;
+}
+static KeyCode
+drd_x11_input_lookup_special_keycode(DrdX11Input *self, guint8 scancode, gboolean extended)
+{
+    if (self->display == NULL)
+    {
+        return 0;
+    }
+
+    KeySym keysym = NoSymbol;
+
+    switch (scancode)
+    {
+        case RDP_SCANCODE_CODE(RDP_SCANCODE_LMENU):
+            keysym = extended ? XK_Alt_R : XK_Alt_L;
+            break;
+        case RDP_SCANCODE_CODE(RDP_SCANCODE_LCONTROL):
+            keysym = extended ? XK_Control_R : XK_Control_L;
+            break;
+        case RDP_SCANCODE_CODE(RDP_SCANCODE_LSHIFT):
+            keysym = extended ? XK_Shift_R : XK_Shift_L;
+            break;
+        case RDP_SCANCODE_CODE(RDP_SCANCODE_LWIN):
+            keysym = extended ? XK_Super_R : XK_Super_L;
+            break;
+        default:
+            break;
+    }
+
+    if (keysym == NoSymbol)
+    {
+        return 0;
+    }
+
+    KeyCode keycode = XKeysymToKeycode(self->display, keysym);
+    return keycode;
 }

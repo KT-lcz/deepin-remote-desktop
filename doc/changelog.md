@@ -42,10 +42,10 @@
 - **影响**：FreeRDP 回调会在任何断线路径上释放 `g_ptr_array` 中的会话引用，监听器能立即接受新客户端，避免 BIO 重试耗尽及 `PeerAccepted` 失败；同时文档对调度逻辑有清晰记录，方便后续维护。
 
 ### 扩展扫描码输入修复
-- **目的**：修复客户端方向键等扩展扫描码在服务端被视为 >256 而报错 `freerdp_keyboard_get_x11_keycode_from_rdp_scancode` 的问题。
+- **目的**：修复客户端方向键等扩展扫描码在服务端被视为 >256 而报错 `freerdp_keyboard_get_x11_keycode_from_rdp_scancode` 的问题，并补上 Alt/AltGr 等修饰键的映射兜底。
 - **范围**：
-  - `glib-rewrite/src/input/drd_x11_input.c`：为键盘注入路径新增 `<freerdp/scancode.h>` 依赖，并在调用 `freerdp_keyboard_get_x11_keycode_from_rdp_scancode()` 时仅传递 8-bit scan code，独立携带 `extended` 标记，避免 0xE0 前缀直接累加后超界。
-  - `doc/architecture.md`：输入层章节记录扩展扫描码处理方式。
+  - `glib-rewrite/src/input/drd_x11_input.c`：为键盘注入路径新增 `<freerdp/scancode.h>` 依赖，并在调用 `freerdp_keyboard_get_x11_keycode_from_rdp_scancode()` 时仅传递 8-bit scan code，独立携带 `extended` 标记，避免 0xE0 前缀直接累加后超界；当 FreeRDP 旧映射返回 0（如 Alt/AltGr），自动回退到基于 `XKeysymToKeycode()` 的键值查找，确保修饰键也能注入。
+  - `doc/architecture.md`：输入层章节记录扩展扫描码处理方式及 Alt 兜底逻辑。
   - `.codex/plan/keyboard-scancode.md`：创建并完成对应计划，便于后续追溯。
 - **影响**：方向键、Ins/Del 等扩展键可正常注入 X11，FreeRDP 日志不再出现 “ScanCode XXX exceeds allowed value range [0,256]”。
 
