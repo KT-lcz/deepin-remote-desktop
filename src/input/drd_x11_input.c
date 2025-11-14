@@ -5,6 +5,7 @@
 
 #include <freerdp/input.h>
 #include <freerdp/locale/keyboard.h>
+#include <freerdp/scancode.h>
 
 #include <gio/gio.h>
 #include <math.h>
@@ -234,8 +235,9 @@ drd_x11_input_inject_keyboard(DrdX11Input *self, guint16 flags, guint8 scancode,
     const gboolean release = (flags & KBD_FLAGS_RELEASE) != 0;
     const gboolean extended = (flags & (KBD_FLAGS_EXTENDED | KBD_FLAGS_EXTENDED1)) != 0;
     const UINT32 rdp_scancode = MAKE_RDP_SCANCODE(scancode, extended);
-    const UINT32 x11_keycode =
-        freerdp_keyboard_get_x11_keycode_from_rdp_scancode(rdp_scancode, extended ? TRUE : FALSE);
+    const UINT32 base_scancode = RDP_SCANCODE_CODE(rdp_scancode);
+    const UINT32 x11_keycode = freerdp_keyboard_get_x11_keycode_from_rdp_scancode(
+        base_scancode, extended ? TRUE : FALSE);
 
     if (x11_keycode == 0)
     {

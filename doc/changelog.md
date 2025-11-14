@@ -41,6 +41,14 @@
   - `doc/architecture.md`：新增 “会话生命周期与重连” 小节及状态图，描述监听器如何串联 FreeRDP 回调来维护单会话限制。
 - **影响**：FreeRDP 回调会在任何断线路径上释放 `g_ptr_array` 中的会话引用，监听器能立即接受新客户端，避免 BIO 重试耗尽及 `PeerAccepted` 失败；同时文档对调度逻辑有清晰记录，方便后续维护。
 
+### 扩展扫描码输入修复
+- **目的**：修复客户端方向键等扩展扫描码在服务端被视为 >256 而报错 `freerdp_keyboard_get_x11_keycode_from_rdp_scancode` 的问题。
+- **范围**：
+  - `glib-rewrite/src/input/drd_x11_input.c`：为键盘注入路径新增 `<freerdp/scancode.h>` 依赖，并在调用 `freerdp_keyboard_get_x11_keycode_from_rdp_scancode()` 时仅传递 8-bit scan code，独立携带 `extended` 标记，避免 0xE0 前缀直接累加后超界。
+  - `doc/architecture.md`：输入层章节记录扩展扫描码处理方式。
+  - `.codex/plan/keyboard-scancode.md`：创建并完成对应计划，便于后续追溯。
+- **影响**：方向键、Ins/Del 等扩展键可正常注入 X11，FreeRDP 日志不再出现 “ScanCode XXX exceeds allowed value range [0,256]”。
+
 ## 2025-11-12
 - **目的**：整理 Rdpgfx Progressive 拥塞/花屏调查计划，明确分析上下文。
 - **范围**：新增 `.codex/plan/rdpgfx-progressive-congestion-analysis.md`，记录任务背景与分步计划，后续用以比对 `gnome-remote-desktop` 与 `glib-rewrite` 的图形管线差异。
