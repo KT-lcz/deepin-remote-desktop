@@ -1,0 +1,267 @@
+#include "core/drd_server_runtime.h"
+
+#include <gio/gio.h>
+
+#include "utils/drd_log.h"
+
+static DrdFrameCodec drd_server_runtime_resolve_codec(DrdServerRuntime *self);
+
+struct _DrdServerRuntime
+{
+    GObject parent_instance;
+
+    DrdCaptureManager *capture;
+    DrdEncodingManager *encoder;
+    DrdInputDispatcher *input;
+    DrdTlsCredentials *tls;
+    DrdEncodingOptions encoding_options;
+    gboolean has_encoding_options;
+    gint transport_mode;
+    GMutex transport_mutex;
+};
+
+G_DEFINE_TYPE(DrdServerRuntime, drd_server_runtime, G_TYPE_OBJECT)
+
+static void
+drd_server_runtime_dispose(GObject *object)
+{
+    DrdServerRuntime *self = DRD_SERVER_RUNTIME(object);
+    drd_server_runtime_stop(self);
+    g_clear_object(&self->capture);
+    g_clear_object(&self->encoder);
+    g_clear_object(&self->input);
+    g_clear_object(&self->tls);
+    g_mutex_clear(&self->transport_mutex);
+
+    G_OBJECT_CLASS(drd_server_runtime_parent_class)->dispose(object);
+}
+
+static void
+drd_server_runtime_class_init(DrdServerRuntimeClass *klass)
+{
+    GObjectClass *object_class = G_OBJECT_CLASS(klass);
+    object_class->dispose = drd_server_runtime_dispose;
+}
+
+static void
+drd_server_runtime_init(DrdServerRuntime *self)
+{
+    self->capture = drd_capture_manager_new();
+    self->encoder = drd_encoding_manager_new();
+    self->input = drd_input_dispatcher_new();
+    self->tls = NULL;
+    self->has_encoding_options = FALSE;
+    g_atomic_int_set(&self->transport_mode, DRD_FRAME_TRANSPORT_SURFACE_BITS);
+    g_mutex_init(&self->transport_mutex);
+}
+
+DrdServerRuntime *
+drd_server_runtime_new(void)
+{
+    return g_object_new(DRD_TYPE_SERVER_RUNTIME, NULL);
+}
+
+DrdCaptureManager *
+drd_server_runtime_get_capture(DrdServerRuntime *self)
+{
+    g_return_val_if_fail(DRD_IS_SERVER_RUNTIME(self), NULL);
+    return self->capture;
+}
+
+DrdEncodingManager *
+drd_server_runtime_get_encoder(DrdServerRuntime *self)
+{
+    g_return_val_if_fail(DRD_IS_SERVER_RUNTIME(self), NULL);
+    return self->encoder;
+}
+
+DrdInputDispatcher *
+drd_server_runtime_get_input(DrdServerRuntime *self)
+{
+    g_return_val_if_fail(DRD_IS_SERVER_RUNTIME(self), NULL);
+    return self->input;
+}
+
+gboolean
+drd_server_runtime_prepare_stream(DrdServerRuntime *self,
+                                   const DrdEncodingOptions *encoding_options,
+                                   GError **error)
+{
+    g_return_val_if_fail(DRD_IS_SERVER_RUNTIME(self), FALSE);
+    g_return_val_if_fail(encoding_options != NULL, FALSE);
+
+    self->encoding_options = *encoding_options;
+    self->has_encoding_options = TRUE;
+    g_atomic_int_set(&self->transport_mode, DRD_FRAME_TRANSPORT_SURFACE_BITS);
+
+    if (!drd_encoding_manager_prepare(self->encoder, encoding_options, error))
+    {
+        return FALSE;
+    }
+
+    if (!drd_input_dispatcher_start(self->input,
+                                     encoding_options->width,
+                                     encoding_options->height,
+                                     error))
+    {
+        drd_encoding_manager_reset(self->encoder);
+        return FALSE;
+    }
+
+    if (!drd_capture_manager_start(self->capture,
+                                    encoding_options->width,
+                                    encoding_options->height,
+                                    error))
+    {
+        drd_input_dispatcher_stop(self->input);
+        drd_encoding_manager_reset(self->encoder);
+        return FALSE;
+    }
+
+    DRD_LOG_MESSAGE("Server runtime prepared stream with geometry %ux%u",
+              encoding_options->width,
+              encoding_options->height);
+    return TRUE;
+}
+
+void
+drd_server_runtime_stop(DrdServerRuntime *self)
+{
+    g_return_if_fail(DRD_IS_SERVER_RUNTIME(self));
+
+    const gboolean had_stream = self->has_encoding_options;
+    drd_capture_manager_stop(self->capture);
+    drd_encoding_manager_reset(self->encoder);
+    drd_input_dispatcher_flush(self->input);
+    drd_input_dispatcher_stop(self->input);
+    self->has_encoding_options = FALSE;
+
+    if (had_stream)
+    {
+        DRD_LOG_MESSAGE("Server runtime stopped and released capture/encoding resources");
+    }
+}
+
+gboolean
+drd_server_runtime_pull_encoded_frame(DrdServerRuntime *self,
+                                       gint64 timeout_us,
+                                       DrdEncodedFrame **out_frame,
+                                       GError **error)
+{
+    g_return_val_if_fail(DRD_IS_SERVER_RUNTIME(self), FALSE);
+    g_return_val_if_fail(out_frame != NULL, FALSE);
+    g_return_val_if_fail(self->capture != NULL, FALSE);
+
+    g_autoptr(DrdFrame) frame = NULL;
+    if (!drd_capture_manager_wait_frame(self->capture, timeout_us, &frame, error))
+    {
+        return FALSE;
+    }
+
+    DrdFrameCodec codec = drd_server_runtime_resolve_codec(self);
+    return drd_encoding_manager_encode(self->encoder,
+                                        frame,
+                                        0,
+                                        codec,
+                                        out_frame,
+                                        error);
+}
+
+void
+drd_server_runtime_set_transport(DrdServerRuntime *self, DrdFrameTransport transport)
+{
+    g_return_if_fail(DRD_IS_SERVER_RUNTIME(self));
+
+    g_mutex_lock(&self->transport_mutex);
+    DrdFrameTransport current =
+        (DrdFrameTransport)g_atomic_int_get(&self->transport_mode);
+    if (current == transport)
+    {
+        g_mutex_unlock(&self->transport_mutex);
+        return;
+    }
+
+    g_atomic_int_set(&self->transport_mode, transport);
+    drd_encoding_manager_force_keyframe(self->encoder);
+    g_mutex_unlock(&self->transport_mutex);
+}
+
+DrdFrameTransport
+drd_server_runtime_get_transport(DrdServerRuntime *self)
+{
+    g_return_val_if_fail(DRD_IS_SERVER_RUNTIME(self), DRD_FRAME_TRANSPORT_SURFACE_BITS);
+    return (DrdFrameTransport)g_atomic_int_get(&self->transport_mode);
+}
+
+DrdFrameCodec
+drd_server_runtime_get_codec(DrdServerRuntime *self)
+{
+    g_return_val_if_fail(DRD_IS_SERVER_RUNTIME(self), DRD_FRAME_CODEC_RAW);
+    return drd_server_runtime_resolve_codec(self);
+}
+
+gboolean
+drd_server_runtime_get_encoding_options(DrdServerRuntime *self,
+                                         DrdEncodingOptions *out_options)
+{
+    g_return_val_if_fail(DRD_IS_SERVER_RUNTIME(self), FALSE);
+    g_return_val_if_fail(out_options != NULL, FALSE);
+
+    if (!self->has_encoding_options)
+    {
+        return FALSE;
+    }
+
+    *out_options = self->encoding_options;
+    return TRUE;
+}
+
+void
+drd_server_runtime_set_tls_credentials(DrdServerRuntime *self, DrdTlsCredentials *credentials)
+{
+    g_return_if_fail(DRD_IS_SERVER_RUNTIME(self));
+    if (credentials != NULL)
+    {
+        g_object_ref(credentials);
+    }
+    g_clear_object(&self->tls);
+    self->tls = credentials;
+}
+
+DrdTlsCredentials *
+drd_server_runtime_get_tls_credentials(DrdServerRuntime *self)
+{
+    g_return_val_if_fail(DRD_IS_SERVER_RUNTIME(self), NULL);
+    return self->tls;
+}
+
+void
+drd_server_runtime_request_keyframe(DrdServerRuntime *self)
+{
+    g_return_if_fail(DRD_IS_SERVER_RUNTIME(self));
+    drd_encoding_manager_force_keyframe(self->encoder);
+}
+
+static DrdFrameCodec
+drd_server_runtime_resolve_codec(DrdServerRuntime *self)
+{
+    if (!self->has_encoding_options)
+    {
+        return DRD_FRAME_CODEC_RAW;
+    }
+
+    if (self->encoding_options.mode == DRD_ENCODING_MODE_RAW)
+    {
+        return DRD_FRAME_CODEC_RAW;
+    }
+
+    DrdFrameTransport transport =
+        (DrdFrameTransport)g_atomic_int_get(&self->transport_mode);
+
+    if (transport == DRD_FRAME_TRANSPORT_GRAPHICS_PIPELINE)
+    {
+        return DRD_FRAME_CODEC_RFX_PROGRESSIVE;
+    }
+
+    return DRD_FRAME_CODEC_RFX;
+}
