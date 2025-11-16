@@ -4,9 +4,11 @@
 #include <stdio.h>
 #include <freerdp/listener.h>
 #include <winpr/wtypes.h>
+#include <winpr/sspi.h>
 #include <glib-object.h>
 
 typedef struct _DrdServerRuntime DrdServerRuntime;
+typedef struct _DrdLocalSession DrdLocalSession;
 
 #include "utils/drd_encoded_frame.h"
 
@@ -24,11 +26,17 @@ void drd_rdp_session_set_virtual_channel_manager(DrdRdpSession *self, HANDLE vcm
 void drd_rdp_session_set_closed_callback(DrdRdpSession *self,
                                          DrdRdpSessionClosedFunc callback,
                                          gpointer user_data);
+void drd_rdp_session_set_passive_mode(DrdRdpSession *self, gboolean passive);
+void drd_rdp_session_attach_local_session(DrdRdpSession *self, DrdLocalSession *session);
 BOOL drd_rdp_session_post_connect(DrdRdpSession *self);
 BOOL drd_rdp_session_activate(DrdRdpSession *self);
 BOOL drd_rdp_session_pump(DrdRdpSession *self);
 void drd_rdp_session_disconnect(DrdRdpSession *self, const gchar *reason);
 gboolean drd_rdp_session_start_event_thread(DrdRdpSession *self);
 void drd_rdp_session_stop_event_thread(DrdRdpSession *self);
+void drd_rdp_session_enable_delegate_auth(DrdRdpSession *self, gboolean enabled, const gchar *pam_service);
+BOOL drd_rdp_session_handle_logon(DrdRdpSession *self,
+                                  const SEC_WINNT_AUTH_IDENTITY *identity,
+                                  BOOL automatic);
 
 G_END_DECLS

@@ -2,6 +2,9 @@
 
 #include <gio/gio.h>
 
+#define DRD_PAM_SERVICE_DEFAULT "deepin-remote-desktop"
+#define DRD_PAM_SERVICE_SYSTEM "deepin-remote-desktop-system"
+
 struct _DrdConfig
 {
     GObject parent_instance;
@@ -13,6 +16,11 @@ struct _DrdConfig
     gchar *nla_username;
     gchar *nla_password;
     gchar *base_dir;
+    DrdNlaMode nla_mode;
+    gboolean system_mode;
+    gchar *pam_service;
+    gboolean pam_service_overridden;
+    gboolean rdp_sso_enabled;
     DrdEncodingOptions encoding;
 };
 
@@ -20,6 +28,8 @@ G_DEFINE_TYPE(DrdConfig, drd_config, G_TYPE_OBJECT)
 
 static gboolean drd_config_parse_bool(const gchar *value, gboolean *out_value, GError **error);
 static gboolean drd_config_set_mode_from_string(DrdConfig *self, const gchar *value, GError **error);
+static gboolean drd_config_set_nla_mode_from_string(DrdConfig *self, const gchar *value, GError **error);
+static void drd_config_refresh_pam_service(DrdConfig *self);
 
 /* 释放配置对象中持有的动态字符串。 */
 static void
@@ -32,6 +42,7 @@ drd_config_dispose(GObject *object)
     g_clear_pointer(&self->nla_username, g_free);
     g_clear_pointer(&self->nla_password, g_free);
     g_clear_pointer(&self->base_dir, g_free);
+    g_clear_pointer(&self->pam_service, g_free);
     G_OBJECT_CLASS(drd_config_parent_class)->dispose(object);
 }
 
@@ -56,6 +67,12 @@ drd_config_init(DrdConfig *self)
     self->base_dir = g_get_current_dir();
     self->nla_username = NULL;
     self->nla_password = NULL;
+    self->nla_mode = DRD_NLA_MODE_STATIC;
+    self->system_mode = FALSE;
+    self->pam_service_overridden = FALSE;
+    self->pam_service = NULL;
+    self->rdp_sso_enabled = FALSE;
+    drd_config_refresh_pam_service(self);
 }
 
 /* 构造新的配置实例。 */
@@ -117,6 +134,64 @@ drd_config_set_mode_from_string(DrdConfig *self, const gchar *value, GError **er
                 "Unknown encoder mode '%s' (expected raw or rfx)",
                 value);
     return FALSE;
+}
+
+static gboolean
+drd_config_set_nla_mode_from_string(DrdConfig *self, const gchar *value, GError **error)
+{
+    g_return_val_if_fail(DRD_IS_CONFIG(self), FALSE);
+
+    if (value == NULL)
+    {
+        return FALSE;
+    }
+    if (g_ascii_strcasecmp(value, "static") == 0)
+    {
+        self->nla_mode = DRD_NLA_MODE_STATIC;
+        return TRUE;
+    }
+    if (g_ascii_strcasecmp(value, "delegate") == 0)
+    {
+        self->nla_mode = DRD_NLA_MODE_DELEGATE;
+        return TRUE;
+    }
+
+    g_set_error(error,
+                G_IO_ERROR,
+                G_IO_ERROR_INVALID_ARGUMENT,
+                "Unknown NLA mode '%s' (expected static or delegate)",
+                value);
+    return FALSE;
+}
+
+static void
+drd_config_refresh_pam_service(DrdConfig *self)
+{
+    g_return_if_fail(DRD_IS_CONFIG(self));
+
+    if (self->pam_service_overridden)
+    {
+        return;
+    }
+
+    g_clear_pointer(&self->pam_service, g_free);
+    const gchar *default_service =
+        self->system_mode ? DRD_PAM_SERVICE_SYSTEM : DRD_PAM_SERVICE_DEFAULT;
+    self->pam_service = g_strdup(default_service);
+}
+
+static void
+drd_config_override_pam_service(DrdConfig *self, const gchar *value)
+{
+    g_return_if_fail(DRD_IS_CONFIG(self));
+
+    if (value == NULL || *value == '\0')
+    {
+        return;
+    }
+    g_clear_pointer(&self->pam_service, g_free);
+    self->pam_service = g_strdup(value);
+    self->pam_service_overridden = TRUE;
 }
 
 /* 把相对路径转换为绝对路径，便于后续加载证书等资源。 */
@@ -233,6 +308,44 @@ drd_config_load_from_key_file(DrdConfig *self, GKeyFile *keyfile, GError **error
         self->nla_password = g_key_file_get_string(keyfile, "auth", "password", NULL);
     }
 
+    if (g_key_file_has_key(keyfile, "auth", "mode", NULL))
+    {
+        g_autofree gchar *mode = g_key_file_get_string(keyfile, "auth", "mode", NULL);
+        if (!drd_config_set_nla_mode_from_string(self, mode, error))
+        {
+            return FALSE;
+        }
+    }
+
+    if (g_key_file_has_key(keyfile, "auth", "pam_service", NULL))
+    {
+        g_autofree gchar *pam_service = g_key_file_get_string(keyfile, "auth", "pam_service", NULL);
+        drd_config_override_pam_service(self, pam_service);
+    }
+
+    if (g_key_file_has_key(keyfile, "service", "system", NULL))
+    {
+        g_autofree gchar *system_value = g_key_file_get_string(keyfile, "service", "system", NULL);
+        gboolean system_mode = FALSE;
+        if (!drd_config_parse_bool(system_value, &system_mode, error))
+        {
+            return FALSE;
+        }
+        self->system_mode = system_mode;
+        drd_config_refresh_pam_service(self);
+    }
+
+    if (g_key_file_has_key(keyfile, "service", "rdp_sso", NULL))
+    {
+        g_autofree gchar *rdp_sso_str = g_key_file_get_string(keyfile, "service", "rdp_sso", NULL);
+        gboolean rdp_sso = FALSE;
+        if (!drd_config_parse_bool(rdp_sso_str, &rdp_sso, error))
+        {
+            return FALSE;
+        }
+        self->rdp_sso_enabled = rdp_sso;
+    }
+
     return TRUE;
 }
 
@@ -305,6 +418,9 @@ drd_config_merge_cli(DrdConfig *self,
                       const gchar *key_path,
                       const gchar *nla_username,
                       const gchar *nla_password,
+                      const gchar *nla_mode,
+                      gboolean system_mode_cli,
+                      gboolean rdp_sso_cli,
                       gint width,
                       gint height,
                       const gchar *encoder_mode,
@@ -351,6 +467,25 @@ drd_config_merge_cli(DrdConfig *self,
         drd_config_set_string(&self->nla_password, nla_password);
     }
 
+    if (nla_mode != NULL)
+    {
+        if (!drd_config_set_nla_mode_from_string(self, nla_mode, error))
+        {
+            return FALSE;
+        }
+    }
+
+    if (system_mode_cli)
+    {
+        self->system_mode = TRUE;
+        drd_config_refresh_pam_service(self);
+    }
+
+    if (rdp_sso_cli)
+    {
+        self->rdp_sso_enabled = TRUE;
+    }
+
     if (width > 0)
     {
         self->encoding.width = (guint)width;
@@ -383,13 +518,45 @@ drd_config_merge_cli(DrdConfig *self,
         return FALSE;
     }
 
-    if (self->nla_username == NULL || *self->nla_username == '\0' ||
-        self->nla_password == NULL || *self->nla_password == '\0')
+    if (self->rdp_sso_enabled && !self->system_mode)
     {
         g_set_error_literal(error,
                             G_OPTION_ERROR,
                             G_OPTION_ERROR_BAD_VALUE,
-                            "NLA username and password must be specified via config or CLI");
+                            "RDP single sign-on requires --system");
+        return FALSE;
+    }
+
+    if (!self->rdp_sso_enabled && self->nla_mode == DRD_NLA_MODE_STATIC)
+    {
+        if (self->nla_username == NULL || *self->nla_username == '\0' ||
+            self->nla_password == NULL || *self->nla_password == '\0')
+        {
+            g_set_error_literal(error,
+                                G_OPTION_ERROR,
+                                G_OPTION_ERROR_BAD_VALUE,
+                                "NLA username and password must be specified via config or CLI");
+            return FALSE;
+        }
+    }
+    else if (!self->rdp_sso_enabled)
+    {
+        if (!self->system_mode)
+        {
+            g_set_error_literal(error,
+                                G_OPTION_ERROR,
+                                G_OPTION_ERROR_BAD_VALUE,
+                                "NLA delegate mode requires --system and root privileges");
+            return FALSE;
+        }
+    }
+
+    if (self->pam_service == NULL || *self->pam_service == '\0')
+    {
+        g_set_error_literal(error,
+                            G_OPTION_ERROR,
+                            G_OPTION_ERROR_BAD_VALUE,
+                            "PAM service name is not configured");
         return FALSE;
     }
 
@@ -440,6 +607,34 @@ drd_config_get_nla_password(DrdConfig *self)
 {
     g_return_val_if_fail(DRD_IS_CONFIG(self), NULL);
     return self->nla_password;
+}
+
+DrdNlaMode
+drd_config_get_nla_mode(DrdConfig *self)
+{
+    g_return_val_if_fail(DRD_IS_CONFIG(self), DRD_NLA_MODE_STATIC);
+    return self->nla_mode;
+}
+
+gboolean
+drd_config_get_system_mode(DrdConfig *self)
+{
+    g_return_val_if_fail(DRD_IS_CONFIG(self), FALSE);
+    return self->system_mode;
+}
+
+const gchar *
+drd_config_get_pam_service(DrdConfig *self)
+{
+    g_return_val_if_fail(DRD_IS_CONFIG(self), NULL);
+    return self->pam_service;
+}
+
+gboolean
+drd_config_get_rdp_sso_enabled(DrdConfig *self)
+{
+    g_return_val_if_fail(DRD_IS_CONFIG(self), FALSE);
+    return self->rdp_sso_enabled;
 }
 
 /* 获取采集宽度。 */

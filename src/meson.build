@@ -12,7 +12,8 @@ deps = [
   xext_dep,
   xdamage_dep,
   xfixes_dep,
-  xtst_dep
+  xtst_dep,
+  pam_dep
 ]
 
 media_sources = files(
@@ -36,6 +37,7 @@ core_sources = files(
   'session/drd_rdp_graphics_pipeline.c',
   'transport/drd_rdp_listener.c',
   'security/drd_tls_credentials.c',
+  'security/drd_local_session.c',
   'security/drd_nla_sam.c',
   'utils/drd_log.c'
 )

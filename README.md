@@ -13,6 +13,8 @@ meson compile -C build         # 生成 deepin-remote-desktop 可执行文件
 ./build/src/deepin-remote-desktop --config ./config/default.ini
 ```
 `default.ini` 内置自签名证书 (`certs/server.*`) 及 RemoteFX 配置，可直接用于本地测试。
+- 非交互式嵌入模式可维持默认 `static` 安全策略；若需“一次输入 → CredSSP + PAM 登录”，请在 root/systemd 环境下传入 `--system --nla-mode delegate` 并在配置文件中设置对应的 PAM service（默认 `deepin-remote-desktop-system`），详见 `config/deepin-remote-desktop.service`。
+- `--system` 模式仅执行 TLS/NLA 握手与 PAM 会话创建，不会启动 X11 捕获、编码或渲染线程，用于在系统服务里预先创建桌面会话；可选开启 `[service] rdp_sso=true`（或 CLI `--enable-rdp-sso`）让客户端通过 TLS-only RDP 安全层提交凭据，由服务端直接走 PAM 校验。
 
 ## 样式与工具
 - C17 + GLib/GObject，4 空格缩进，类型 `PascalCase`（如 `DrdRdpSession`），函数与变量 `snake_case`。

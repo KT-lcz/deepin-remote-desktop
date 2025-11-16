@@ -1,0 +1,19 @@
+[Unit]
+Description=Deepin Remote Desktop (system delegate mode)
+After=network.target graphical.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/deepin-remote-desktop --system --config /etc/deepin-remote-desktop.ini
+User=root
+Group=root
+Restart=on-failure
+RestartSec=2s
+AmbientCapabilities=CAP_SYS_ADMIN
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ProtectHome=true
+
+[Install]
+WantedBy=multi-user.target

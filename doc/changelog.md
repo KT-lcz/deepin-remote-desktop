@@ -111,6 +111,16 @@
   5. 所有 `g_message/g_warning/g_debug` 调用切换为 `GRDC_LOG_*` 宏，内部统一使用 `g_log_structured_standard` 自动附带 `__FILE__/__LINE__`，日志输出可直接定位源文件行号。
 - **影响**：服务端现在要求显式提供 NLA 凭据；凭据泄露范围限定在内存+一次性 SAM 文件，客户端需支持 NLA（CredSSP）才能接入。
 
+# 2025-11-16：CredSSP 凭据委派与 system 模式
+- **范围**：`core/drd_config.*`、`core/drd_application.c`、`transport/drd_rdp_listener.*`、`session/drd_rdp_session.*`、`security/drd_local_session.*`（新增）、`config/default.ini`、`config/deepin-remote-desktop.service`、`doc/architecture.md`、`.codex/plan/rdp-security-overview.md`。
+- **主要改动**：
+  1. 配置层新增 `nla-mode`（static/delegate）、`--system` 开关与 PAM service 管理，delegate 模式自动启用 CredSSP 凭据委派且要求 root/systemd 托管。
+  2. `DrdRdpListener`/`DrdRdpSession` 挂载 FreeRDP `Logon` 回调，使用新模块 `drd_local_session` 与 PAM 建立 per-user 会话，失败时直接拒绝连接。
+  3. static 模式继续使用一次性 SAM 文件；delegate 模式关闭 `FreeRDP_NtlmSamFile`，在 `PostConnect` 后擦除凭据并在断开时调用 `pam_close_session`。
+  4. CLI/INI 提供 `--nla-mode`、`--system` 以及 `--enable-rdp-sso`/`[service] rdp_sso`，配置日志输出 NLA 模式信息；`config/deepin-remote-desktop.service` 演示 systemd unit，在 system 模式下可选择保留 CredSSP（默认）或退回 TLS-only RDP 单点登录（直接读取 Client Info + PAM），且都跳过 X11 捕获/编码。
+  5. 文档更新安全链路、模块分层与 system 模式说明，新增 CredSSP → PAM 序列图并记录计划完成情况。
+- **影响**：RDP 客户端在 `delegate` 模式下可直接使用输入的用户名/密码完成网络鉴权 + PAM 登录，实现“一次输入”体验。`--system` 由 systemd/root 托管，普通非 root 无法误启特权进程。
+
 ## 2025-11-08：接入 RDPGFX Progressive 管线
 - **目的**：借鉴 GNOME Remote Desktop 的 Graphics Pipeline 实现，优先使用 Rdpgfx Progressive 推流，在兼容旧客户端的同时为后续 GPU/AVC 路径奠基。
 - **范围**：`encoding/drd_rfx_encoder.*`、`encoding/drd_encoding_manager.*`、`core/drd_server_runtime.*`、`session/drd_rdp_session.*`、`session/drd_rdp_graphics_pipeline.*`（新增）、`transport/drd_rdp_listener.c`、`doc/architecture.md`、`doc/changelog.md`、`.codex/plan/rdpgfx-progressive.md`。

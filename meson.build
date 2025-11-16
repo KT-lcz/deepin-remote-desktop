@@ -13,6 +13,12 @@ add_project_arguments([
   '-Wno-deprecated-declarations'
 ], language: 'c')
 
+cc = meson.get_compiler('c')
+pam_dep = dependency('pam', required: false)
+if not pam_dep.found()
+  pam_dep = cc.find_library('pam', required: true)
+endif
+
 glib_dep = dependency('glib-2.0', version: '>=2.64')
 gio_dep = dependency('gio-2.0')
 gio_unix_dep = dependency('gio-unix-2.0')
