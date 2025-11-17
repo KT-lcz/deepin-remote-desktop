@@ -8,9 +8,12 @@
 ## 构建与运行
 在 `glib-rewrite/` 内执行：
 ```bash
+sudo apt install meson libpipewire-0.3-dev libsystemd-dev libpolkit-gobject-1-dev libglib2.0-dev freerdp3-dev libx11-dev libxext-dev libxdamage-dev libxfixes-dev libxtst-dev libpam0g-dev
+``` 
+```bash
 meson setup build              # 首次配置
 meson compile -C build         # 生成 deepin-remote-desktop 可执行文件
-./build/src/deepin-remote-desktop --config ./config/default.ini
+./build/src/deepin-remote-desktop --config ./config/default-user.ini
 ```
 `default.ini` 内置自签名证书 (`certs/server.*`) 及 RemoteFX 配置，可直接用于本地测试。
 - 非交互式嵌入模式可维持默认 `static` 安全策略；若需“一次输入 → CredSSP + PAM 登录”，请在 root/systemd 环境下传入 `--system --nla-mode delegate` 并在配置文件中设置对应的 PAM service（默认 `deepin-remote-desktop-system`），详见 `config/deepin-remote-desktop.service`。
