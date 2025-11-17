@@ -63,10 +63,8 @@ drd_application_log_effective_config(DrdApplication *self)
               drd_application_mode_to_string(encoding_opts->mode),
               encoding_opts->enable_frame_diff ? "enabled" : "disabled");
 
-    const gchar *nla_mode = drd_config_get_nla_mode(self->config) == DRD_NLA_MODE_DELEGATE ? "delegate"
-                                                                                           : "static";
-    DRD_LOG_MESSAGE("Effective NLA mode %s, system=%s, PAM service=%s",
-              nla_mode,
+    DRD_LOG_MESSAGE("Effective NLA %s, system=%s, PAM service=%s",
+              drd_config_is_nla_enabled(self->config) ? "enabled" : "disabled",
               drd_config_get_system_mode(self->config) ? "true" : "false",
               drd_config_get_pam_service(self->config));
 }
@@ -158,51 +156,36 @@ drd_application_start_listener(DrdApplication *self, GError **error)
 
     const gchar *nla_username = drd_config_get_nla_username(self->config);
     const gchar *nla_password = drd_config_get_nla_password(self->config);
-    const DrdNlaMode nla_mode = drd_config_get_nla_mode(self->config);
+    const gboolean nla_enabled = drd_config_is_nla_enabled(self->config);
     const gchar *pam_service = drd_config_get_pam_service(self->config);
     const gboolean system_mode = drd_config_get_system_mode(self->config);
-    const gboolean rdp_sso_enabled = drd_config_get_rdp_sso_enabled(self->config);
-    if (!rdp_sso_enabled)
+    if (nla_enabled)
     {
-        if (nla_mode == DRD_NLA_MODE_STATIC)
+        if (nla_username == NULL || nla_password == NULL)
         {
-            if (nla_username == NULL || nla_password == NULL)
-            {
-                g_set_error_literal(error,
-                                    G_IO_ERROR,
-                                    G_IO_ERROR_INVALID_ARGUMENT,
-                                    "NLA username/password missing after config merge");
-                return FALSE;
-            }
-        }
-        else
-        {
-            if (!system_mode)
-            {
-                g_set_error_literal(error,
-                                    G_IO_ERROR,
-                                    G_IO_ERROR_INVALID_ARGUMENT,
-                                    "NLA delegate mode requires --system and root privileges");
-                return FALSE;
-            }
-            if (pam_service == NULL)
-            {
-                g_set_error_literal(error,
-                                    G_IO_ERROR,
-                                    G_IO_ERROR_INVALID_ARGUMENT,
-                                    "PAM service missing for delegate mode");
-                return FALSE;
-            }
+            g_set_error_literal(error,
+                                G_IO_ERROR,
+                                G_IO_ERROR_INVALID_ARGUMENT,
+                                "NLA username/password missing after config merge");
+            return FALSE;
         }
     }
     else
     {
+        if (!system_mode)
+        {
+            g_set_error_literal(error,
+                                G_IO_ERROR,
+                                G_IO_ERROR_INVALID_ARGUMENT,
+                                "Disabling NLA requires --system");
+            return FALSE;
+        }
         if (pam_service == NULL)
         {
             g_set_error_literal(error,
                                 G_IO_ERROR,
                                 G_IO_ERROR_INVALID_ARGUMENT,
-                                "PAM service missing for RDP SSO");
+                                "PAM service missing for TLS authentication");
             return FALSE;
         }
     }
@@ -243,12 +226,11 @@ drd_application_start_listener(DrdApplication *self, GError **error)
                                           drd_config_get_port(self->config),
                                           self->runtime,
                                           encoding_opts,
-                                          nla_mode,
+                                          nla_enabled,
                                           nla_username,
                                           nla_password,
                                           pam_service,
-                                          system_mode,
-                                          rdp_sso_enabled);
+                                          system_mode);
     if (self->listener == NULL)
     {
         g_set_error_literal(error,
@@ -285,9 +267,9 @@ drd_application_parse_options(DrdApplication *self, gint *argc, gchar ***argv, G
     gboolean disable_diff_flag = FALSE;
     gchar *nla_username = NULL;
     gchar *nla_password = NULL;
-    gchar *nla_mode = NULL;
+    gboolean enable_nla_flag = FALSE;
+    gboolean disable_nla_flag = FALSE;
     gboolean system_mode_flag = FALSE;
-    gboolean rdp_sso_flag = FALSE;
 
     GOptionEntry entries[] = {
         {"bind-address", 'b', 0, G_OPTION_ARG_STRING, &bind_address, "Bind address (default 0.0.0.0)", "ADDR"},
@@ -300,9 +282,9 @@ drd_application_parse_options(DrdApplication *self, gint *argc, gchar ***argv, G
         {"encoder", 0, 0, G_OPTION_ARG_STRING, &encoder_mode, "Encoder mode (raw|rfx)", "MODE"},
         {"nla-username", 0, 0, G_OPTION_ARG_STRING, &nla_username, "NLA username for static mode", "USER"},
         {"nla-password", 0, 0, G_OPTION_ARG_STRING, &nla_password, "NLA password for static mode", "PASS"},
-        {"nla-mode", 0, 0, G_OPTION_ARG_STRING, &nla_mode, "NLA mode (static|delegate)", "MODE"},
-        {"system", 0, 0, G_OPTION_ARG_NONE, &system_mode_flag, "Run in system mode (root, PAM delegate)", NULL},
-        {"enable-rdp-sso", 0, 0, G_OPTION_ARG_NONE, &rdp_sso_flag, "Enable TLS-only RDP single sign-on (system mode only)", NULL},
+        {"enable-nla", 0, 0, G_OPTION_ARG_NONE, &enable_nla_flag, "Force enable NLA regardless of config", NULL},
+        {"disable-nla", 0, 0, G_OPTION_ARG_NONE, &disable_nla_flag, "Disable NLA and use TLS+PAM single sign-on (system mode only)", NULL},
+        {"system", 0, 0, G_OPTION_ARG_NONE, &system_mode_flag, "Run in system mode (root, TLS/PAM login)", NULL},
         {"enable-diff", 0, 0, G_OPTION_ARG_NONE, &enable_diff_flag, "Enable frame difference even if disabled in config", NULL},
         {"disable-diff", 0, 0, G_OPTION_ARG_NONE, &disable_diff_flag, "Disable frame difference regardless of config", NULL},
         {NULL}
@@ -320,7 +302,6 @@ drd_application_parse_options(DrdApplication *self, gint *argc, gchar ***argv, G
         g_clear_pointer(&encoder_mode, g_free);
         g_clear_pointer(&nla_username, g_free);
         g_clear_pointer(&nla_password, g_free);
-        g_clear_pointer(&nla_mode, g_free);
         return FALSE;
     }
 
@@ -337,7 +318,22 @@ drd_application_parse_options(DrdApplication *self, gint *argc, gchar ***argv, G
         g_clear_pointer(&encoder_mode, g_free);
         g_clear_pointer(&nla_username, g_free);
         g_clear_pointer(&nla_password, g_free);
-        g_clear_pointer(&nla_mode, g_free);
+        return FALSE;
+    }
+
+    if (enable_nla_flag && disable_nla_flag)
+    {
+        g_set_error_literal(error,
+                            G_OPTION_ERROR,
+                            G_OPTION_ERROR_BAD_VALUE,
+                            "--enable-nla and --disable-nla cannot be used together");
+        g_clear_pointer(&bind_address, g_free);
+        g_clear_pointer(&cert_path, g_free);
+        g_clear_pointer(&key_path, g_free);
+        g_clear_pointer(&config_path, g_free);
+        g_clear_pointer(&encoder_mode, g_free);
+        g_clear_pointer(&nla_username, g_free);
+        g_clear_pointer(&nla_password, g_free);
         return FALSE;
     }
 
@@ -379,9 +375,9 @@ drd_application_parse_options(DrdApplication *self, gint *argc, gchar ***argv, G
                                key_path,
                                nla_username,
                                nla_password,
-                               nla_mode,
+                               enable_nla_flag,
+                               disable_nla_flag,
                                system_mode_flag,
-                               rdp_sso_flag,
                                capture_width,
                                capture_height,
                                encoder_mode,
@@ -395,7 +391,6 @@ drd_application_parse_options(DrdApplication *self, gint *argc, gchar ***argv, G
         g_clear_pointer(&encoder_mode, g_free);
         g_clear_pointer(&nla_username, g_free);
         g_clear_pointer(&nla_password, g_free);
-        g_clear_pointer(&nla_mode, g_free);
         return FALSE;
     }
 
@@ -412,7 +407,6 @@ drd_application_parse_options(DrdApplication *self, gint *argc, gchar ***argv, G
         g_clear_pointer(&encoder_mode, g_free);
         g_clear_pointer(&nla_username, g_free);
         g_clear_pointer(&nla_password, g_free);
-        g_clear_pointer(&nla_mode, g_free);
         return FALSE;
     }
 
@@ -423,7 +417,6 @@ drd_application_parse_options(DrdApplication *self, gint *argc, gchar ***argv, G
     g_clear_pointer(&encoder_mode, g_free);
     g_clear_pointer(&nla_username, g_free);
     g_clear_pointer(&nla_password, g_free);
-    g_clear_pointer(&nla_mode, g_free);
 
     return TRUE;
 }

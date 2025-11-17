@@ -1,5 +1,15 @@
 # 变更记录
 
+## 2025-11-18：认证流程收敛
+- **目的**：仅保留“NLA 开启 / NLA 关闭 + PAM 单点登录”两条路径，移除 delegate 相关代码和配置。
+- **范围**：`core/drd_config.*`、`core/drd_application.c`、`transport/drd_rdp_listener.*`、`session/drd_rdp_session.*`、`config/*.ini`、`config/deepin-remote-desktop.service`、`README.md`、`doc/architecture.md`、`.codex/plan/rdp-security-overview.md`。
+- **主要改动**：
+  1. 新增 `[auth] enable_nla` / `--enable-nla` / `--disable-nla`，默认开启 CredSSP，关闭时自动切换至 TLS+PAM；`[service] rdp_sso` 仅作为兼容别名。
+  2. 删除 delegate 模式、FreeRDP `Logon` 回调及 `drd_rdp_session_handle_logon()`，监听器仅在 `enable_nla=false` 时读取 Client Info 凭据并调用 PAM。
+  3. 简化 RDP 监听/会话结构，去除委派状态与凭据擦除辅助函数，TLS 路径改为日志脱敏并直接挂接到 `drd_local_session`。
+  4. 示例配置与 service unit 统一描述 NLA on/off 两种模式，文档/README/计划文件同步更新。
+- **影响**：NLA 关闭时不再需要在配置里重复写用户名/密码，客户端凭据直接进入 PAM 并开启对应用户会话；delegate 场景彻底下线，部署和运维只需关注是否启用 NLA。
+
 ## 2025-11-16
 - **目的**：将项目目标更新为“Linux 上的现代 RDP 服务端”，补充功能蓝图与缺口，确保文档与现状对齐。
 - **范围**：

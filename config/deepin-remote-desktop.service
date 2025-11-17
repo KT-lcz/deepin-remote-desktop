@@ -1,5 +1,5 @@
 [Unit]
-Description=Deepin Remote Desktop (system delegate mode)
+Description=Deepin Remote Desktop (TLS/PAM mode : Single sign-on and remote login)
 After=network.target graphical.target
 
 [Service]

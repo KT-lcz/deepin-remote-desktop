@@ -16,11 +16,10 @@ struct _DrdConfig
     gchar *nla_username;
     gchar *nla_password;
     gchar *base_dir;
-    DrdNlaMode nla_mode;
+    gboolean nla_enabled;
     gboolean system_mode;
     gchar *pam_service;
     gboolean pam_service_overridden;
-    gboolean rdp_sso_enabled;
     DrdEncodingOptions encoding;
 };
 
@@ -28,7 +27,6 @@ G_DEFINE_TYPE(DrdConfig, drd_config, G_TYPE_OBJECT)
 
 static gboolean drd_config_parse_bool(const gchar *value, gboolean *out_value, GError **error);
 static gboolean drd_config_set_mode_from_string(DrdConfig *self, const gchar *value, GError **error);
-static gboolean drd_config_set_nla_mode_from_string(DrdConfig *self, const gchar *value, GError **error);
 static void drd_config_refresh_pam_service(DrdConfig *self);
 
 /* 释放配置对象中持有的动态字符串。 */
@@ -67,11 +65,10 @@ drd_config_init(DrdConfig *self)
     self->base_dir = g_get_current_dir();
     self->nla_username = NULL;
     self->nla_password = NULL;
-    self->nla_mode = DRD_NLA_MODE_STATIC;
+    self->nla_enabled = TRUE;
     self->system_mode = FALSE;
     self->pam_service_overridden = FALSE;
     self->pam_service = NULL;
-    self->rdp_sso_enabled = FALSE;
     drd_config_refresh_pam_service(self);
 }
 
@@ -136,34 +133,6 @@ drd_config_set_mode_from_string(DrdConfig *self, const gchar *value, GError **er
     return FALSE;
 }
 
-static gboolean
-drd_config_set_nla_mode_from_string(DrdConfig *self, const gchar *value, GError **error)
-{
-    g_return_val_if_fail(DRD_IS_CONFIG(self), FALSE);
-
-    if (value == NULL)
-    {
-        return FALSE;
-    }
-    if (g_ascii_strcasecmp(value, "static") == 0)
-    {
-        self->nla_mode = DRD_NLA_MODE_STATIC;
-        return TRUE;
-    }
-    if (g_ascii_strcasecmp(value, "delegate") == 0)
-    {
-        self->nla_mode = DRD_NLA_MODE_DELEGATE;
-        return TRUE;
-    }
-
-    g_set_error(error,
-                G_IO_ERROR,
-                G_IO_ERROR_INVALID_ARGUMENT,
-                "Unknown NLA mode '%s' (expected static or delegate)",
-                value);
-    return FALSE;
-}
-
 static void
 drd_config_refresh_pam_service(DrdConfig *self)
 {
@@ -219,6 +188,8 @@ drd_config_resolve_path(DrdConfig *self, const gchar *value)
 static gboolean
 drd_config_load_from_key_file(DrdConfig *self, GKeyFile *keyfile, GError **error)
 {
+    gboolean nla_auth_override = FALSE;
+
     if (g_key_file_has_key(keyfile, "server", "bind_address", NULL))
     {
         g_clear_pointer(&self->bind_address, g_free);
@@ -311,10 +282,41 @@ drd_config_load_from_key_file(DrdConfig *self, GKeyFile *keyfile, GError **error
     if (g_key_file_has_key(keyfile, "auth", "mode", NULL))
     {
         g_autofree gchar *mode = g_key_file_get_string(keyfile, "auth", "mode", NULL);
-        if (!drd_config_set_nla_mode_from_string(self, mode, error))
+        if (mode != NULL && g_ascii_strcasecmp(mode, "static") == 0)
+        {
+            self->nla_enabled = TRUE;
+        }
+        else
+        {
+            g_set_error(error,
+                        G_IO_ERROR,
+                        G_IO_ERROR_INVALID_ARGUMENT,
+                        "NLA delegate mode has been removed; disable NLA via [auth] enable_nla=false");
+            return FALSE;
+        }
+    }
+
+    if (g_key_file_has_key(keyfile, "auth", "enable_nla", NULL))
+    {
+        g_autofree gchar *nla_value = g_key_file_get_string(keyfile, "auth", "enable_nla", NULL);
+        gboolean enable_nla = TRUE;
+        if (!drd_config_parse_bool(nla_value, &enable_nla, error))
         {
             return FALSE;
         }
+        self->nla_enabled = enable_nla;
+        nla_auth_override = TRUE;
+    }
+    else if (g_key_file_has_key(keyfile, "auth", "nla", NULL))
+    {
+        g_autofree gchar *nla_value = g_key_file_get_string(keyfile, "auth", "nla", NULL);
+        gboolean enable_nla = TRUE;
+        if (!drd_config_parse_bool(nla_value, &enable_nla, error))
+        {
+            return FALSE;
+        }
+        self->nla_enabled = enable_nla;
+        nla_auth_override = TRUE;
     }
 
     if (g_key_file_has_key(keyfile, "auth", "pam_service", NULL))
@@ -335,7 +337,7 @@ drd_config_load_from_key_file(DrdConfig *self, GKeyFile *keyfile, GError **error
         drd_config_refresh_pam_service(self);
     }
 
-    if (g_key_file_has_key(keyfile, "service", "rdp_sso", NULL))
+    if (!nla_auth_override && g_key_file_has_key(keyfile, "service", "rdp_sso", NULL))
     {
         g_autofree gchar *rdp_sso_str = g_key_file_get_string(keyfile, "service", "rdp_sso", NULL);
         gboolean rdp_sso = FALSE;
@@ -343,7 +345,7 @@ drd_config_load_from_key_file(DrdConfig *self, GKeyFile *keyfile, GError **error
         {
             return FALSE;
         }
-        self->rdp_sso_enabled = rdp_sso;
+        self->nla_enabled = !rdp_sso;
     }
 
     return TRUE;
@@ -418,9 +420,9 @@ drd_config_merge_cli(DrdConfig *self,
                       const gchar *key_path,
                       const gchar *nla_username,
                       const gchar *nla_password,
-                      const gchar *nla_mode,
+                      gboolean cli_enable_nla,
+                      gboolean cli_disable_nla,
                       gboolean system_mode_cli,
-                      gboolean rdp_sso_cli,
                       gint width,
                       gint height,
                       const gchar *encoder_mode,
@@ -467,23 +469,27 @@ drd_config_merge_cli(DrdConfig *self,
         drd_config_set_string(&self->nla_password, nla_password);
     }
 
-    if (nla_mode != NULL)
+    if (cli_enable_nla && cli_disable_nla)
     {
-        if (!drd_config_set_nla_mode_from_string(self, nla_mode, error))
-        {
-            return FALSE;
-        }
+        g_set_error_literal(error,
+                            G_OPTION_ERROR,
+                            G_OPTION_ERROR_BAD_VALUE,
+                            "Cannot enable and disable NLA at the same time");
+        return FALSE;
+    }
+    if (cli_enable_nla)
+    {
+        self->nla_enabled = TRUE;
+    }
+    else if (cli_disable_nla)
+    {
+        self->nla_enabled = FALSE;
     }
 
     if (system_mode_cli)
     {
         self->system_mode = TRUE;
         drd_config_refresh_pam_service(self);
-    }
-
-    if (rdp_sso_cli)
-    {
-        self->rdp_sso_enabled = TRUE;
     }
 
     if (width > 0)
@@ -518,16 +524,16 @@ drd_config_merge_cli(DrdConfig *self,
         return FALSE;
     }
 
-    if (self->rdp_sso_enabled && !self->system_mode)
+    if (!self->nla_enabled && !self->system_mode)
     {
         g_set_error_literal(error,
                             G_OPTION_ERROR,
                             G_OPTION_ERROR_BAD_VALUE,
-                            "RDP single sign-on requires --system");
+                            "Disabling NLA requires --system");
         return FALSE;
     }
 
-    if (!self->rdp_sso_enabled && self->nla_mode == DRD_NLA_MODE_STATIC)
+    if (self->nla_enabled)
     {
         if (self->nla_username == NULL || *self->nla_username == '\0' ||
             self->nla_password == NULL || *self->nla_password == '\0')
@@ -536,17 +542,6 @@ drd_config_merge_cli(DrdConfig *self,
                                 G_OPTION_ERROR,
                                 G_OPTION_ERROR_BAD_VALUE,
                                 "NLA username and password must be specified via config or CLI");
-            return FALSE;
-        }
-    }
-    else if (!self->rdp_sso_enabled)
-    {
-        if (!self->system_mode)
-        {
-            g_set_error_literal(error,
-                                G_OPTION_ERROR,
-                                G_OPTION_ERROR_BAD_VALUE,
-                                "NLA delegate mode requires --system and root privileges");
             return FALSE;
         }
     }
@@ -609,11 +604,11 @@ drd_config_get_nla_password(DrdConfig *self)
     return self->nla_password;
 }
 
-DrdNlaMode
-drd_config_get_nla_mode(DrdConfig *self)
+gboolean
+drd_config_is_nla_enabled(DrdConfig *self)
 {
-    g_return_val_if_fail(DRD_IS_CONFIG(self), DRD_NLA_MODE_STATIC);
-    return self->nla_mode;
+    g_return_val_if_fail(DRD_IS_CONFIG(self), TRUE);
+    return self->nla_enabled;
 }
 
 gboolean
@@ -628,13 +623,6 @@ drd_config_get_pam_service(DrdConfig *self)
 {
     g_return_val_if_fail(DRD_IS_CONFIG(self), NULL);
     return self->pam_service;
-}
-
-gboolean
-drd_config_get_rdp_sso_enabled(DrdConfig *self)
-{
-    g_return_val_if_fail(DRD_IS_CONFIG(self), FALSE);
-    return self->rdp_sso_enabled;
 }
 
 /* 获取采集宽度。 */

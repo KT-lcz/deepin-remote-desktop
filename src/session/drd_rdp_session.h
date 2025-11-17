@@ -4,7 +4,6 @@
 #include <stdio.h>
 #include <freerdp/listener.h>
 #include <winpr/wtypes.h>
-#include <winpr/sspi.h>
 #include <glib-object.h>
 
 typedef struct _DrdServerRuntime DrdServerRuntime;
@@ -34,9 +33,5 @@ BOOL drd_rdp_session_pump(DrdRdpSession *self);
 void drd_rdp_session_disconnect(DrdRdpSession *self, const gchar *reason);
 gboolean drd_rdp_session_start_event_thread(DrdRdpSession *self);
 void drd_rdp_session_stop_event_thread(DrdRdpSession *self);
-void drd_rdp_session_enable_delegate_auth(DrdRdpSession *self, gboolean enabled, const gchar *pam_service);
-BOOL drd_rdp_session_handle_logon(DrdRdpSession *self,
-                                  const SEC_WINNT_AUTH_IDENTITY *identity,
-                                  BOOL automatic);
 
 G_END_DECLS

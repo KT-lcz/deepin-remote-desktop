@@ -40,8 +40,6 @@ struct _DrdRdpSession
     DrdRdpSessionClosedFunc closed_cb;
     gpointer closed_cb_data;
     gint closed_cb_invoked;
-    gboolean delegate_auth;
-    gchar *pam_service;
     DrdLocalSession *local_session;
     gboolean passive_mode;
 };
@@ -66,8 +64,6 @@ static gboolean drd_rdp_session_start_render_thread(DrdRdpSession *self);
 static void drd_rdp_session_stop_render_thread(DrdRdpSession *self);
 static gpointer drd_rdp_session_render_thread(gpointer user_data);
 static void drd_rdp_session_notify_closed(DrdRdpSession *self);
-static gchar *drd_rdp_session_identity_to_utf8(const void *buffer, UINT32 length, ULONG flags);
-static void drd_rdp_session_scrub_identity_password(const SEC_WINNT_AUTH_IDENTITY *identity);
 
 static void
 drd_rdp_session_dispose(GObject *object)
@@ -102,7 +98,6 @@ drd_rdp_session_finalize(GObject *object)
     g_clear_pointer(&self->peer_address, g_free);
     g_clear_pointer(&self->state, g_free);
     g_clear_object(&self->graphics_pipeline);
-    g_clear_pointer(&self->pam_service, g_free);
     G_OBJECT_CLASS(drd_rdp_session_parent_class)->finalize(object);
 }
 
@@ -135,8 +130,6 @@ drd_rdp_session_init(DrdRdpSession *self)
     self->closed_cb = NULL;
     self->closed_cb_data = NULL;
     g_atomic_int_set(&self->closed_cb_invoked, 0);
-    self->delegate_auth = FALSE;
-    self->pam_service = NULL;
     self->local_session = NULL;
     self->passive_mode = FALSE;
 }
@@ -237,134 +230,11 @@ drd_rdp_session_attach_local_session(DrdRdpSession *self, DrdLocalSession *sessi
     self->local_session = session;
 }
 
-void
-drd_rdp_session_enable_delegate_auth(DrdRdpSession *self, gboolean enabled, const gchar *pam_service)
-{
-    g_return_if_fail(DRD_IS_RDP_SESSION(self));
-
-    self->delegate_auth = enabled;
-    g_clear_pointer(&self->pam_service, g_free);
-    if (pam_service != NULL)
-    {
-        self->pam_service = g_strdup(pam_service);
-    }
-
-}
-
-static gchar *
-drd_rdp_session_identity_to_utf8(const void *buffer, UINT32 length, ULONG flags)
-{
-    if (buffer == NULL || length == 0)
-    {
-        return NULL;
-    }
-
-    if (flags & SEC_WINNT_AUTH_IDENTITY_UNICODE)
-    {
-        return g_utf16_to_utf8((const gunichar2 *)buffer, length, NULL, NULL, NULL);
-    }
-
-    return g_strndup((const gchar *)buffer, length);
-}
-
-static void
-drd_rdp_session_scrub_identity_password(const SEC_WINNT_AUTH_IDENTITY *identity)
-{
-    if (identity == NULL || identity->Password == NULL || identity->PasswordLength == 0)
-    {
-        return;
-    }
-
-    if (identity->Flags & SEC_WINNT_AUTH_IDENTITY_UNICODE)
-    {
-        size_t bytes = identity->PasswordLength * sizeof(gunichar2);
-        memset(identity->Password, 0, bytes);
-    }
-    else
-    {
-        memset(identity->Password, 0, identity->PasswordLength);
-    }
-}
-
 BOOL
 drd_rdp_session_post_connect(DrdRdpSession *self)
 {
     g_return_val_if_fail(DRD_IS_RDP_SESSION(self), FALSE);
     drd_rdp_session_set_peer_state(self, "post-connect");
-    return TRUE;
-}
-
-BOOL
-drd_rdp_session_handle_logon(DrdRdpSession *self,
-                             const SEC_WINNT_AUTH_IDENTITY *identity,
-                             BOOL automatic)
-{
-    g_return_val_if_fail(DRD_IS_RDP_SESSION(self), FALSE);
-
-    if (!self->delegate_auth)
-    {
-        return TRUE;
-    }
-
-    if (identity == NULL)
-    {
-        DRD_LOG_WARNING("Session %s missing SEC_WINNT_AUTH_IDENTITY in delegate mode", self->peer_address);
-        return FALSE;
-    }
-
-    g_autofree gchar *username =
-        drd_rdp_session_identity_to_utf8(identity->User, identity->UserLength, identity->Flags);
-    g_autofree gchar *domain =
-        drd_rdp_session_identity_to_utf8(identity->Domain, identity->DomainLength, identity->Flags);
-    gchar *password = drd_rdp_session_identity_to_utf8(identity->Password,
-                                                       identity->PasswordLength,
-                                                       identity->Flags);
-
-    if (username == NULL || password == NULL || *password == '\0')
-    {
-        DRD_LOG_WARNING("Session %s received empty delegated credentials", self->peer_address);
-        g_clear_pointer(&password, g_free);
-        return FALSE;
-    }
-
-    drd_rdp_session_scrub_identity_password(identity);
-
-    g_autoptr(GError) auth_error = NULL;
-    DrdLocalSession *local_session = drd_local_session_new(self->pam_service != NULL ? self->pam_service
-                                                                                    : "deepin-remote-desktop",
-                                                           username,
-                                                           domain,
-                                                           password,
-                                                           self->peer_address,
-                                                           &auth_error);
-    if (password != NULL)
-    {
-        memset(password, 0, strlen(password));
-        g_free(password);
-    }
-
-    if (local_session == NULL)
-    {
-        if (auth_error != NULL)
-        {
-            DRD_LOG_WARNING("Session %s PAM authentication failed: %s",
-                            self->peer_address,
-                            auth_error->message);
-        }
-        else
-        {
-            DRD_LOG_WARNING("Session %s PAM authentication failed without details", self->peer_address);
-        }
-        return FALSE;
-    }
-
-    g_clear_pointer(&self->local_session, drd_local_session_close);
-    self->local_session = local_session;
-    DRD_LOG_MESSAGE("Session %s delegated credentials accepted for user %s (domain=%s, automatic=%s)",
-                    self->peer_address,
-                    username,
-                    domain != NULL ? domain : "(none)",
-                    automatic ? "true" : "false");
     return TRUE;
 }
 

@@ -17,10 +17,10 @@
 ### 1. 核心层
 - `core/drd_application`：负责命令行解析、GLib 主循环、信号处理与监听器启动，并在 CLI/配置合并后记录生效参数及配置来源，确保 TLS 凭据只实例化一次（打包进 `libdrd-core.a`）。
 - `core/drd_server_runtime`：聚合 Capture/Encoding/Input 子系统，`prepare_stream()` 配置三者后缓存 `DrdEncodingOptions`，`pull_encoded_frame()` 每次直接从 `DrdCaptureManager` 拉取最新帧并同步调用 `DrdEncodingManager` 编码，`set_transport()` 用于在 SurfaceBits 与 Rdpgfx 之间切换并强制关键帧；内部不再维护独立线程或 `GAsyncQueue`。
-- `core/drd_config`：解析 INI/CLI 配置，集中管理绑定地址、TLS 证书、捕获尺寸及 `nla-mode`/`pam_service` 等安全参数。
+- `core/drd_config`：解析 INI/CLI 配置，集中管理绑定地址、TLS 证书、捕获尺寸及 `enable_nla`/`pam_service` 等安全参数。
 - `security/drd_tls_credentials`：加载并缓存 TLS 证书/私钥，供运行时向 FreeRDP Settings 注入。
 - `security/drd_nla_sam`：基于用户名/密码生成临时 SAM 文件，写入 `FreeRDP_NtlmSamFile`，允许 CredSSP 在 NLA 期间读取 NT 哈希。
-- `security/drd_local_session`：仅在 `delegate` 模式下运行，使用 PAM 完成 `pam_authenticate/pam_open_session`，生成可供 capture/input 复用的本地用户上下文，并负责凭据擦除与 `pam_close_session`。
+- `security/drd_local_session`：在关闭 NLA（TLS+PAM 单点登录）时运行，使用 PAM 完成 `pam_authenticate/pam_open_session`，生成可供 capture/input 复用的本地用户上下文，并负责凭据擦除与 `pam_close_session`。
 
 ### 2. 采集层
 - `capture/drd_capture_manager`：启动/停止屏幕捕获，维护帧队列。
@@ -81,10 +81,9 @@ flowchart LR
 ```
 
 ## 安全链路（TLS + NLA）
-- `[auth] mode` 支持 `static` 与 `delegate` 两种路径，也可通过 `--nla-mode` 切换；默认 `static` 兼容单账号嵌入式场景。
-- **static**：沿用原有 SAM 文件策略，`DrdRdpListener` 读取 `[auth] username/password` 并调用 `drd_nla_sam_file_new()` 写入一次性数据库，FreeRDP 仅接受提前配置的帐密；CredSSP 完成后 SAM 立刻删除。
-- **delegate**：要求 `--system`（root）启动；监听器仅注入 TLS 证书与 `NlaSecurity=TRUE`，CredSSP 成功后通过 `peer->Logon` 将 `SEC_WINNT_AUTH_IDENTITY` 下发至 `DrdRdpSession`，`security/drd_local_session` 用 PAM（默认 `deepin-remote-desktop[-system]` 服务）完成 `pam_authenticate/pam_open_session`，实现“一次输入 → 网络鉴权 + 本地会话”。
-- 两种模式都强制禁用纯 TLS/RDP 降级（`TlsSecurity=FALSE`、`RdpSecurity=FALSE`），确保 CredSSP 始终在 TLS 隧道内运行。
+- `[auth] enable_nla=true`（默认）：沿用 SAM 文件策略，`DrdRdpListener` 读取 `[auth] username/password` 并调用 `drd_nla_sam_file_new()` 写入一次性数据库，FreeRDP 仅接受提前配置的帐密；CredSSP 完成后 SAM 立刻删除。
+- `[auth] enable_nla=false` + `--system`：禁用 NLA，监听器在 TLS-only 模式下读取 Client Info 的用户名/密码并交给 `security/drd_local_session` 走 PAM，完成“客户端凭据 → PAM 会话”的一次输入体验。
+- 无论哪种模式，都强制关闭纯 RDP Security（`RdpSecurity=FALSE`），要么使用 CredSSP（NLA），要么使用 TLS-only + PAM，避免降级导致凭据泄露。
 
 ```mermaid
 sequenceDiagram
@@ -123,9 +122,9 @@ sequenceDiagram
 - **DRY**：帧结构、队列作为共享组件供捕获/编码/传输复用。
 
 ## System 模式与 systemd 托管
-- `--system` 仅允许 root 启动（建议通过 systemd 管理），自动开启 `delegate` 模式并默认使用 `deepin-remote-desktop-system` PAM service。
+- `--system` 仅允许 root 启动（建议通过 systemd 管理），在 `[auth] enable_nla=false` 时默认使用 `deepin-remote-desktop-system` PAM service，且不启动采集/编码线程。
 - PAM 会话由 `security/drd_local_session` 负责创建/关闭，服务退出或连接断开时调用 `pam_close_session + pam_setcred(PAM_DELETE_CRED)` 擦除凭据。
-- 在该模式下不会初始化 X11 捕获/编码/输入线程，会话激活后仅保留 TLS/NLA 握手与 PAM 登录流程，不再尝试推流；若 `[service] rdp_sso=true` 或 CLI `--enable-rdp-sso`，会降级为 TLS-only RDP Security Layer，直接读取 Client Info 中的用户名/密码并交给 PAM，实现“无 NLA 的单点登录”。
+- 在该模式下不会初始化 X11 捕获/编码/输入线程，会话激活后仅保留 TLS/NLA 握手与 PAM 登录流程，不再尝试推流；当 `[auth] enable_nla=false`（或 CLI `--disable-nla`）时，监听器降级为 TLS-only RDP Security Layer，直接读取 Client Info 中的用户名/密码并交给 PAM，实现“无 NLA 的单点登录”。
 - `config/deepin-remote-desktop.service` 提供最小化的 unit 示例：`ExecStart=/usr/bin/deepin-remote-desktop --system --config /etc/deepin-remote-desktop.ini`，并启用 `NoNewPrivileges/ProtectSystem/PrivateTmp` 等加固选项。
 - 部署步骤：`cp config/deepin-remote-desktop.service /etc/systemd/system/` → 根据环境调整路径 → `systemctl enable --now deepin-remote-desktop`，systemd 负责重启和日志采集。
 
@@ -256,4 +255,3 @@ stateDiagram-v2
 - **虚拟设备**：文件/打印机/智能卡/USB 重定向均为空白，需要依次接入 rdpdr 子通道。
 - **服务化**：systemd/DBus handover、健康探针、Session 并发与策略控制尚未完成。
 - **平台适配**：Wayland 捕获与输入、加密密钥安全存储（如内核密钥环/硬件密钥）仍需规划。
-

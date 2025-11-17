@@ -10,6 +10,6 @@
 - [x] 输出“一次输入→双重登录”实施方案并完成落地（CredSSP 委派、PAM 集成、systemd 管理及 `--system` 模式）。
 
 ## 进度
-- 已完成：整理协议栈、设计并交付 CredSSP 委派 + PAM + system 模式实现，包含 CLI/配置、监听器、会话和文档更新。
-- 进行中：等待用户验证 `--system` 部署及多用户登录流程，新增 `[service] rdp_sso` + `--enable-rdp-sso` 允许在 TLS-only 场景下直接获取凭据并走 PAM。
+- 已完成：整理协议栈并交付两种受支持的登录路径——默认启用 NLA（固定账号 SAM 文件）以及在 `--system` 下关闭 NLA、走 TLS+PAM 单点登录（`[auth] enable_nla=false`/`--disable-nla`）。
+- 进行中：等待用户验证 system 部署及多用户登录流程，按需扩展 PAM service 管理。
 - 遗留项：依据反馈继续扩展 PAM 配置/用户隔离能力。

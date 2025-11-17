@@ -10,7 +10,6 @@
 #include <freerdp/channels/wtsvc.h>
 #include <winpr/wtypes.h>
 #include <winpr/wtsapi.h>
-#include <winpr/sspi.h>
 
 #include "core/drd_server_runtime.h"
 #include "input/drd_input_dispatcher.h"
@@ -34,11 +33,10 @@ static BOOL drd_rdp_peer_keyboard_event(rdpInput *input, UINT16 flags, UINT8 cod
 static BOOL drd_rdp_peer_unicode_event(rdpInput *input, UINT16 flags, UINT16 code);
 static BOOL drd_rdp_peer_pointer_event(rdpInput *input, UINT16 flags, UINT16 x, UINT16 y);
 static BOOL drd_peer_capabilities(freerdp_peer *client);
-static BOOL drd_peer_logon(freerdp_peer *client, const SEC_WINNT_AUTH_IDENTITY *identity, BOOL automatic);
 static gboolean drd_rdp_listener_has_active_session(DrdRdpListener *self);
 static gboolean drd_rdp_listener_session_closed(DrdRdpListener *self, DrdRdpSession *session);
 static void drd_rdp_listener_on_session_closed(DrdRdpSession *session, gpointer user_data);
-static gboolean drd_rdp_listener_authenticate_rdp_sso(DrdRdpPeerContext *ctx, freerdp_peer *client);
+static gboolean drd_rdp_listener_authenticate_tls_login(DrdRdpPeerContext *ctx, freerdp_peer *client);
 
 struct _DrdRdpListener
 {
@@ -53,11 +51,10 @@ struct _DrdRdpListener
     gchar *nla_username;
     gchar *nla_password;
     gchar *nla_hash;
-    DrdNlaMode nla_mode;
+    gboolean nla_enabled;
     gchar *pam_service;
     gboolean system_mode;
     DrdEncodingOptions encoding_options;
-    gboolean rdp_sso_enabled;
 };
 
 G_DEFINE_TYPE(DrdRdpListener, drd_rdp_listener, G_TYPE_OBJECT)
@@ -66,7 +63,7 @@ static void drd_rdp_listener_stop_internal(DrdRdpListener *self);
 
 static gboolean drd_rdp_listener_ensure_nla_hash(DrdRdpListener *self, GError **error)
 {
-    if (self->nla_mode != DRD_NLA_MODE_STATIC)
+    if (!self->nla_enabled)
     {
         return TRUE;
     }
@@ -191,16 +188,15 @@ drd_rdp_listener_new(const gchar *bind_address,
                      guint16 port,
                      DrdServerRuntime *runtime,
                      const DrdEncodingOptions *encoding_options,
-                     DrdNlaMode nla_mode,
+                     gboolean nla_enabled,
                      const gchar *nla_username,
                      const gchar *nla_password,
                      const gchar *pam_service,
-                     gboolean system_mode,
-                     gboolean rdp_sso_enabled)
+                     gboolean system_mode)
 {
     g_return_val_if_fail(DRD_IS_SERVER_RUNTIME(runtime), NULL);
     g_return_val_if_fail(pam_service != NULL && *pam_service != '\0', NULL);
-    if (nla_mode == DRD_NLA_MODE_STATIC)
+    if (nla_enabled)
     {
         g_return_val_if_fail(nla_username != NULL && *nla_username != '\0', NULL);
         g_return_val_if_fail(nla_password != NULL && *nla_password != '\0', NULL);
@@ -210,9 +206,9 @@ drd_rdp_listener_new(const gchar *bind_address,
     self->bind_address = g_strdup(bind_address != NULL ? bind_address : "0.0.0.0");
     self->port = port;
     self->runtime = g_object_ref(runtime);
-    self->nla_mode = nla_mode;
-    self->nla_username = nla_mode == DRD_NLA_MODE_STATIC ? g_strdup(nla_username) : NULL;
-    self->nla_password = nla_mode == DRD_NLA_MODE_STATIC ? g_strdup(nla_password) : NULL;
+    self->nla_enabled = nla_enabled;
+    self->nla_username = nla_enabled ? g_strdup(nla_username) : NULL;
+    self->nla_password = nla_enabled ? g_strdup(nla_password) : NULL;
     self->nla_hash = NULL;
     self->pam_service = g_strdup(pam_service);
     self->system_mode = system_mode;
@@ -224,7 +220,6 @@ drd_rdp_listener_new(const gchar *bind_address,
     {
         memset(&self->encoding_options, 0, sizeof(self->encoding_options));
     }
-    self->rdp_sso_enabled = rdp_sso_enabled;
     return self;
 }
 
@@ -291,9 +286,9 @@ drd_peer_post_connect(freerdp_peer *client)
         return FALSE;
     }
 
-    if (ctx->listener != NULL && ctx->listener->rdp_sso_enabled)
+    if (ctx->listener != NULL && !ctx->listener->nla_enabled)
     {
-        if (!drd_rdp_listener_authenticate_rdp_sso(ctx, client))
+        if (!drd_rdp_listener_authenticate_tls_login(ctx, client))
         {
             drd_rdp_session_disconnect(ctx->session, "tls-rdp-sso-auth-failed");
             return FALSE;
@@ -311,17 +306,6 @@ drd_peer_activate(freerdp_peer *client)
         return FALSE;
     }
     return drd_rdp_session_activate(ctx->session);
-}
-
-static BOOL
-drd_peer_logon(freerdp_peer *client, const SEC_WINNT_AUTH_IDENTITY *identity, BOOL automatic)
-{
-    DrdRdpPeerContext *ctx = (DrdRdpPeerContext *)client->context;
-    if (ctx == NULL || ctx->session == NULL)
-    {
-        return FALSE;
-    }
-    return drd_rdp_session_handle_logon(ctx->session, identity, automatic);
 }
 
 static void
@@ -494,7 +478,7 @@ drd_configure_peer_settings(DrdRdpListener *self, freerdp_peer *client, GError *
         return FALSE;
     }
 
-    if (!self->rdp_sso_enabled && self->nla_mode == DRD_NLA_MODE_STATIC)
+    if (self->nla_enabled)
     {
         if (self->nla_username == NULL ||
             !drd_rdp_listener_ensure_nla_hash(self, error))
@@ -520,11 +504,11 @@ drd_configure_peer_settings(DrdRdpListener *self, freerdp_peer *client, GError *
             g_set_error_literal(error,
                                 G_IO_ERROR,
                                 G_IO_ERROR_FAILED,
-                                "Failed to configure SAM database for NLA");
+                                        "Failed to configure SAM database for NLA");
             return FALSE;
         }
     }
-    else if (!self->rdp_sso_enabled)
+    else
     {
         g_clear_pointer(&ctx->nla_sam, drd_nla_sam_file_free);
         if (!freerdp_settings_set_string(settings, FreeRDP_NtlmSamFile, NULL))
@@ -532,10 +516,10 @@ drd_configure_peer_settings(DrdRdpListener *self, freerdp_peer *client, GError *
             g_set_error_literal(error,
                                 G_IO_ERROR,
                                 G_IO_ERROR_FAILED,
-                                "Failed to disable SAM database for delegate mode");
+                                "Failed to disable SAM database for TLS login");
             return FALSE;
         }
-        DRD_LOG_MESSAGE("Peer %s will delegate credentials via PAM service %s",
+        DRD_LOG_MESSAGE("Peer %s will authenticate via TLS/PAM service %s",
                         client->hostname,
                         self->pam_service != NULL ? self->pam_service : "unknown");
     }
@@ -588,7 +572,7 @@ drd_configure_peer_settings(DrdRdpListener *self, freerdp_peer *client, GError *
         return FALSE;
     }
 
-    if (self->rdp_sso_enabled)
+    if (!self->nla_enabled)
     {
         if (!freerdp_settings_set_bool(settings, FreeRDP_TlsSecurity, TRUE) ||
             !freerdp_settings_set_bool(settings, FreeRDP_NlaSecurity, FALSE) ||
@@ -661,9 +645,6 @@ drd_listener_peer_accepted(freerdp_listener *listener, freerdp_peer *peer)
     peer->Activate = drd_peer_activate;
     peer->Disconnect = drd_peer_disconnected;
     peer->Capabilities = drd_peer_capabilities;
-    peer->Logon = (!self->rdp_sso_enabled && self->nla_mode == DRD_NLA_MODE_DELEGATE)
-                      ? drd_peer_logon
-                      : NULL;
 
     if (peer->Initialize == NULL || !peer->Initialize(peer))
     {
@@ -678,14 +659,6 @@ drd_listener_peer_accepted(freerdp_listener *listener, freerdp_peer *peer)
         return FALSE;
     }
 
-    if (self->nla_mode == DRD_NLA_MODE_DELEGATE && !self->rdp_sso_enabled)
-    {
-        drd_rdp_session_enable_delegate_auth(ctx->session, TRUE, self->pam_service);
-    }
-    else
-    {
-        drd_rdp_session_enable_delegate_auth(ctx->session, FALSE, NULL);
-    }
     // RDPEGFX Graphics Pipeline的关键，虚拟通道
     ctx->vcm = WTSOpenServerA((LPSTR)peer->context);
     if (ctx->vcm == NULL || ctx->vcm == INVALID_HANDLE_VALUE)
@@ -849,7 +822,7 @@ drd_rdp_listener_stop(DrdRdpListener *self)
     drd_rdp_listener_stop_internal(self);
 }
 static gboolean
-drd_rdp_listener_authenticate_rdp_sso(DrdRdpPeerContext *ctx, freerdp_peer *client)
+drd_rdp_listener_authenticate_tls_login(DrdRdpPeerContext *ctx, freerdp_peer *client)
 {
     if (ctx == NULL || ctx->session == NULL || ctx->listener == NULL || client == NULL ||
         client->context == NULL || client->context->settings == NULL)
@@ -861,10 +834,9 @@ drd_rdp_listener_authenticate_rdp_sso(DrdRdpPeerContext *ctx, freerdp_peer *clie
     const char *username = freerdp_settings_get_string(settings, FreeRDP_Username);
     const char *password = freerdp_settings_get_string(settings, FreeRDP_Password);
     const char *domain = freerdp_settings_get_string(settings, FreeRDP_Domain);
-    DRD_LOG_MESSAGE("username: %s;password:%s",username,password);
     if (username == NULL || *username == '\0' || password == NULL || *password == '\0')
     {
-        DRD_LOG_WARNING("Peer %s missing credentials in TLS RDP SSO client info", client->hostname);
+        DRD_LOG_WARNING("Peer %s missing credentials in TLS client info", client->hostname);
         return FALSE;
     }
 
@@ -886,19 +858,19 @@ drd_rdp_listener_authenticate_rdp_sso(DrdRdpPeerContext *ctx, freerdp_peer *clie
     {
         if (auth_error != NULL)
         {
-            DRD_LOG_WARNING("Peer %s TLS RDP SSO PAM failure for %s: %s",
+            DRD_LOG_WARNING("Peer %s TLS/PAM single sign-on failure for %s: %s",
                             client->hostname,
                             username,
                             auth_error->message);
         }
         else
         {
-            DRD_LOG_WARNING("Peer %s TLS RDP SSO PAM failure for %s", client->hostname, username);
+            DRD_LOG_WARNING("Peer %s TLS/PAM single sign-on failure for %s", client->hostname, username);
         }
         return FALSE;
     }
 
     drd_rdp_session_attach_local_session(ctx->session, local_session);
-    DRD_LOG_MESSAGE("Peer %s TLS RDP SSO accepted for %s", client->hostname, username);
+    DRD_LOG_MESSAGE("Peer %s TLS/PAM single sign-on accepted for %s", client->hostname, username);
     return TRUE;
 }
