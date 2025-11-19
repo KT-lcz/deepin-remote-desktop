@@ -57,17 +57,49 @@ sequenceDiagram
     L->>S: return TRUE（连接完全托管给 FreeRDP）
 ```
 
-### 6. 通用工具
+### 6. 运行模式与 System/Handover
+- **`DrdRuntimeMode` 三态**：
+  1. `user`：默认模式，单进程负责采集/编码/监听，直接通过 `DrdRdpListener` 服务客户端。
+  2. `system`：仅在 root/systemd 下使用，`DrdApplication` 跳过采集/编码，实例化 `DrdSystemDaemon`。system daemon 在 GLib `incoming` 勾子中先透过 `DrdRoutingTokenInfo` 窥探 `Cookie: msts=<routing-token>`，把 socket + token 包装成 `DrdRemoteClient`，注册成 `org.deepin.RemoteDesktop.Rdp.Handover` skeleton 并挂到 `/org/deepin/RemoteDesktop/Rdp/Handovers/<session>`；同时在 system bus 导出 `Rdp.Dispatcher`，供 handover 进程通过 `RequestHandover` 领取待处理对象。
+  3. `handover`：登陆会话进程，新建 `DrdHandoverDaemon`，先向 dispatcher 请求 handover 对象，再调用 `StartHandover` 获取一次性用户名/密码和 system 端 TLS 证书，监听 `RedirectClient`/`TakeClientReady`/`RestartHandover` 信号，并通过 `TakeClient` 拿到已经握手的 fd，交由本地 `DrdRdpListener` 继续进行 CredSSP / 会话激活。当前实现专注于 socket 与 DBus 框架，PAM 单点登录仍保持原状——lightdm/desktop 侧 SSO 能力就绪后，再在 `GetSystemCredentials`/handover proxy 里注入真实凭据。
+- **Routing Token 提供者**：`transport/drd_rdp_routing_token.[ch]` 借助 `MSG_PEEK` + `wStream` 解包 TPKT → x224 → rdpNegReq，提取 `Cookie: msts=` 并记录客户端是否请求 `RDSTLS`。system 守护用它生成 `DrdRemoteClient`，随后在 `RedirectClient` 信号中把 token + 临时凭据传给 handover。真实的“routing token 重定向”即是后续依据该 token 向原客户端发送 Server Redirection PDU，使客户端按 Windows RDP 协议自动跳转到目标 handover 进程。
+- **运行时序**：
+
+```mermaid
+sequenceDiagram
+    participant Client
+    participant System as System Listener
+    participant Dispatcher as Rdp.Dispatcher
+    participant Handover
+    participant Local as Handover Listener
+
+    Client->>System: TCP/TLS + MSTS Cookie
+    System->>System: drd_routing_token_peek()
+    System->>Dispatcher: 导出 /Rdp/Handovers/sessionX
+    Handover->>Dispatcher: RequestHandover()
+    Dispatcher-->>Handover: 返回 object path
+    Handover->>System: StartHandover(username,password)
+    System-->>Handover: cert/key + RedirectClient(token,…)
+    Handover->>Client: Server Redirection PDU（携带 routing token）
+    Handover->>System: TakeClientReady()
+    Handover->>System: TakeClient()
+    System-->>Handover: Unix FD（活跃连接）
+    Handover->>Local: adopt fd → 继续 CredSSP/会话激活
+```
+
+> 当前阶段刻意跳过 PAM 单点登录：system/handover 仍沿用“客户端输入凭据 → CredSSP/NLA”链路，待 lightdm/DSR 暴露统一 API 后再在 `drd_system_daemon_on_get_system_credentials()` 中返回真实凭据，以支持桌面级 SSO。
+
+### 7. 通用工具
 - `utils/drd_frame`：帧描述对象，封装像素数据/元信息。
 - `utils/drd_frame_queue`：线程安全的单帧阻塞队列。
 - `utils/drd_encoded_frame`：编码后帧的统一表示，携带 payload 与元数据。
 
-### 7. 虚拟通道与多媒体（规划）
+### 8. 虚拟通道与多媒体（规划）
 - `channel/rdpdr` 系列：文件重定向、打印机、智能卡等；当前仅保留接口规划，未接入实现。
 - `channel/rdpsnd`：音频下行与麦克风回传，预计基于 PulseAudio/PipeWire 适配，后续补充同步策略。
 - `channel/clipboard/ime`：剪贴板、Unicode/IME、输入法透传，需结合现有输入层与 GLib 主循环统一调度。
 
-### 8. 服务化与治理（规划）
+### 9. 服务化与治理（规划）
 - systemd/DBus 入口：为桌面环境或守护进程模式提供 handover，确保会话断线后自动恢复监听。
 - 观测与策略：指标/trace/日志打点、PAM/LDAP 集成、会话配额与带宽策略；当前仅有基础日志，需逐步补齐。
 

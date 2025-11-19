@@ -17,7 +17,7 @@ struct _DrdConfig
     gchar *nla_password;
     gchar *base_dir;
     gboolean nla_enabled;
-    gboolean system_mode;
+    DrdRuntimeMode runtime_mode;
     gchar *pam_service;
     gboolean pam_service_overridden;
     DrdEncodingOptions encoding;
@@ -27,6 +27,10 @@ G_DEFINE_TYPE(DrdConfig, drd_config, G_TYPE_OBJECT)
 
 static gboolean drd_config_parse_bool(const gchar *value, gboolean *out_value, GError **error);
 static gboolean drd_config_set_mode_from_string(DrdConfig *self, const gchar *value, GError **error);
+static gboolean drd_config_parse_runtime_mode(const gchar *value,
+                                              DrdRuntimeMode *out_mode,
+                                              GError **error);
+static void drd_config_set_runtime_mode_internal(DrdConfig *self, DrdRuntimeMode mode);
 static void drd_config_refresh_pam_service(DrdConfig *self);
 
 /* 释放配置对象中持有的动态字符串。 */
@@ -66,7 +70,7 @@ drd_config_init(DrdConfig *self)
     self->nla_username = NULL;
     self->nla_password = NULL;
     self->nla_enabled = TRUE;
-    self->system_mode = FALSE;
+    self->runtime_mode = DRD_RUNTIME_MODE_USER;
     self->pam_service_overridden = FALSE;
     self->pam_service = NULL;
     drd_config_refresh_pam_service(self);
@@ -107,6 +111,54 @@ drd_config_parse_bool(const gchar *value, gboolean *out_value, GError **error)
     return FALSE;
 }
 
+static gboolean
+drd_config_parse_runtime_mode(const gchar *value,
+                              DrdRuntimeMode *out_mode,
+                              GError **error)
+{
+    if (value == NULL)
+    {
+        return FALSE;
+    }
+
+    if (g_ascii_strcasecmp(value, "user") == 0)
+    {
+        *out_mode = DRD_RUNTIME_MODE_USER;
+        return TRUE;
+    }
+    if (g_ascii_strcasecmp(value, "system") == 0)
+    {
+        *out_mode = DRD_RUNTIME_MODE_SYSTEM;
+        return TRUE;
+    }
+    if (g_ascii_strcasecmp(value, "handover") == 0)
+    {
+        *out_mode = DRD_RUNTIME_MODE_HANDOVER;
+        return TRUE;
+    }
+
+    g_set_error(error,
+                G_IO_ERROR,
+                G_IO_ERROR_INVALID_ARGUMENT,
+                "Invalid runtime mode '%s' (expected user, system or handover)",
+                value);
+    return FALSE;
+}
+
+static void
+drd_config_set_runtime_mode_internal(DrdConfig *self, DrdRuntimeMode mode)
+{
+    g_return_if_fail(DRD_IS_CONFIG(self));
+
+    if (self->runtime_mode == mode)
+    {
+        return;
+    }
+
+    self->runtime_mode = mode;
+    drd_config_refresh_pam_service(self);
+}
+
 /* 根据名称切换编码模式。 */
 static gboolean
 drd_config_set_mode_from_string(DrdConfig *self, const gchar *value, GError **error)
@@ -144,9 +196,14 @@ drd_config_refresh_pam_service(DrdConfig *self)
     }
 
     g_clear_pointer(&self->pam_service, g_free);
-    const gchar *default_service =
-        self->system_mode ? DRD_PAM_SERVICE_SYSTEM : DRD_PAM_SERVICE_DEFAULT;
-    self->pam_service = g_strdup(default_service);
+    if (self->runtime_mode == DRD_RUNTIME_MODE_SYSTEM)
+    {
+        self->pam_service = g_strdup(DRD_PAM_SERVICE_SYSTEM);
+    }
+    else
+    {
+        self->pam_service = g_strdup(DRD_PAM_SERVICE_DEFAULT);
+    }
 }
 
 static void
@@ -325,7 +382,18 @@ drd_config_load_from_key_file(DrdConfig *self, GKeyFile *keyfile, GError **error
         drd_config_override_pam_service(self, pam_service);
     }
 
-    if (g_key_file_has_key(keyfile, "service", "system", NULL))
+    if (g_key_file_has_key(keyfile, "service", "runtime_mode", NULL))
+    {
+        g_autofree gchar *runtime_mode =
+            g_key_file_get_string(keyfile, "service", "runtime_mode", NULL);
+        DrdRuntimeMode parsed_mode = DRD_RUNTIME_MODE_USER;
+        if (!drd_config_parse_runtime_mode(runtime_mode, &parsed_mode, error))
+        {
+            return FALSE;
+        }
+        drd_config_set_runtime_mode_internal(self, parsed_mode);
+    }
+    else if (g_key_file_has_key(keyfile, "service", "system", NULL))
     {
         g_autofree gchar *system_value = g_key_file_get_string(keyfile, "service", "system", NULL);
         gboolean system_mode = FALSE;
@@ -333,8 +401,9 @@ drd_config_load_from_key_file(DrdConfig *self, GKeyFile *keyfile, GError **error
         {
             return FALSE;
         }
-        self->system_mode = system_mode;
-        drd_config_refresh_pam_service(self);
+        drd_config_set_runtime_mode_internal(self,
+                                             system_mode ? DRD_RUNTIME_MODE_SYSTEM
+                                                         : DRD_RUNTIME_MODE_USER);
     }
 
     if (!nla_auth_override && g_key_file_has_key(keyfile, "service", "rdp_sso", NULL))
@@ -423,6 +492,7 @@ drd_config_merge_cli(DrdConfig *self,
                       gboolean cli_enable_nla,
                       gboolean cli_disable_nla,
                       gboolean system_mode_cli,
+                      const gchar *runtime_mode_name,
                       gint width,
                       gint height,
                       const gchar *encoder_mode,
@@ -486,10 +556,22 @@ drd_config_merge_cli(DrdConfig *self,
         self->nla_enabled = FALSE;
     }
 
-    if (system_mode_cli)
+    if (runtime_mode_name != NULL || system_mode_cli)
     {
-        self->system_mode = TRUE;
-        drd_config_refresh_pam_service(self);
+        DrdRuntimeMode cli_mode = self->runtime_mode;
+        if (runtime_mode_name != NULL)
+        {
+            if (!drd_config_parse_runtime_mode(runtime_mode_name, &cli_mode, error))
+            {
+                return FALSE;
+            }
+        }
+        else if (system_mode_cli)
+        {
+            cli_mode = DRD_RUNTIME_MODE_SYSTEM;
+        }
+
+        drd_config_set_runtime_mode_internal(self, cli_mode);
     }
 
     if (width > 0)
@@ -524,7 +606,7 @@ drd_config_merge_cli(DrdConfig *self,
         return FALSE;
     }
 
-    if (!self->nla_enabled && !self->system_mode)
+    if (!self->nla_enabled && self->runtime_mode != DRD_RUNTIME_MODE_SYSTEM)
     {
         g_set_error_literal(error,
                             G_OPTION_ERROR,
@@ -615,7 +697,14 @@ gboolean
 drd_config_get_system_mode(DrdConfig *self)
 {
     g_return_val_if_fail(DRD_IS_CONFIG(self), FALSE);
-    return self->system_mode;
+    return drd_config_get_runtime_mode(self) == DRD_RUNTIME_MODE_SYSTEM;
+}
+
+DrdRuntimeMode
+drd_config_get_runtime_mode(DrdConfig *self)
+{
+    g_return_val_if_fail(DRD_IS_CONFIG(self), DRD_RUNTIME_MODE_USER);
+    return self->runtime_mode;
 }
 
 const gchar *

@@ -10,6 +10,8 @@
 #include "security/drd_tls_credentials.h"
 #include "core/drd_config.h"
 #include "core/drd_server_runtime.h"
+#include "system/drd_system_daemon.h"
+#include "system/drd_handover_daemon.h"
 #include "utils/drd_log.h"
 
 struct _DrdApplication
@@ -23,6 +25,7 @@ struct _DrdApplication
     guint sigterm_id;
     DrdServerRuntime *runtime;
     DrdTlsCredentials *tls_credentials;
+    GObject *mode_controller;
 };
 
 G_DEFINE_TYPE(DrdApplication, drd_application, G_TYPE_OBJECT)
@@ -41,6 +44,31 @@ drd_application_mode_to_string(DrdEncodingMode mode)
             return "unknown";
     }
 }
+
+static const gchar *
+drd_application_runtime_mode_to_string(DrdRuntimeMode mode)
+{
+    switch (mode)
+    {
+        case DRD_RUNTIME_MODE_SYSTEM:
+            return "system";
+        case DRD_RUNTIME_MODE_HANDOVER:
+            return "handover";
+        case DRD_RUNTIME_MODE_USER:
+        default:
+            return "user";
+    }
+}
+
+typedef struct
+{
+    const DrdEncodingOptions *encoding_opts;
+    gboolean nla_enabled;
+    const gchar *nla_username;
+    const gchar *nla_password;
+    const gchar *pam_service;
+    DrdRuntimeMode runtime_mode;
+} DrdRuntimeContextSnapshot;
 
 /* 记录当前合并后的核心运行参数，帮助排查配置生效情况。 */
 static void
@@ -63,9 +91,10 @@ drd_application_log_effective_config(DrdApplication *self)
               drd_application_mode_to_string(encoding_opts->mode),
               encoding_opts->enable_frame_diff ? "enabled" : "disabled");
 
-    DRD_LOG_MESSAGE("Effective NLA %s, system=%s, PAM service=%s",
+    const DrdRuntimeMode runtime_mode = drd_config_get_runtime_mode(self->config);
+    DRD_LOG_MESSAGE("Effective NLA %s, runtime=%s, PAM service=%s",
               drd_config_is_nla_enabled(self->config) ? "enabled" : "disabled",
-              drd_config_get_system_mode(self->config) ? "true" : "false",
+              drd_application_runtime_mode_to_string(runtime_mode),
               drd_config_get_pam_service(self->config));
 }
 
@@ -97,6 +126,11 @@ drd_application_dispose(GObject *object)
     {
         drd_server_runtime_stop(self->runtime);
         g_clear_object(&self->runtime);
+    }
+
+    if (self->mode_controller != NULL)
+    {
+        g_clear_object(&self->mode_controller);
     }
 
     g_clear_object(&self->tls_credentials);
@@ -131,12 +165,13 @@ drd_application_on_signal(gpointer user_data)
     return G_SOURCE_CONTINUE;
 }
 
-/* 启动 RDP 监听器，并将 TLS、编码运行时串联起来。 */
 static gboolean
-drd_application_start_listener(DrdApplication *self, GError **error)
+drd_application_prepare_runtime(DrdApplication *self,
+                                gboolean require_stream,
+                                DrdRuntimeContextSnapshot *snapshot,
+                                GError **error)
 {
-    g_assert(self->listener == NULL);
-    g_return_val_if_fail(DRD_IS_SERVER_RUNTIME(self->runtime), FALSE);
+    g_return_val_if_fail(DRD_IS_APPLICATION(self), FALSE);
 
     if (self->config == NULL)
     {
@@ -154,11 +189,12 @@ drd_application_start_listener(DrdApplication *self, GError **error)
         return FALSE;
     }
 
+    const gboolean nla_enabled = drd_config_is_nla_enabled(self->config);
     const gchar *nla_username = drd_config_get_nla_username(self->config);
     const gchar *nla_password = drd_config_get_nla_password(self->config);
-    const gboolean nla_enabled = drd_config_is_nla_enabled(self->config);
     const gchar *pam_service = drd_config_get_pam_service(self->config);
-    const gboolean system_mode = drd_config_get_system_mode(self->config);
+    const DrdRuntimeMode runtime_mode = drd_config_get_runtime_mode(self->config);
+
     if (nla_enabled)
     {
         if (nla_username == NULL || nla_password == NULL)
@@ -172,7 +208,7 @@ drd_application_start_listener(DrdApplication *self, GError **error)
     }
     else
     {
-        if (!system_mode)
+        if (runtime_mode != DRD_RUNTIME_MODE_SYSTEM)
         {
             g_set_error_literal(error,
                                 G_IO_ERROR,
@@ -210,7 +246,7 @@ drd_application_start_listener(DrdApplication *self, GError **error)
         return FALSE;
     }
 
-    if (!system_mode)
+    if (require_stream)
     {
         if (!drd_server_runtime_prepare_stream(self->runtime, encoding_opts, error))
         {
@@ -219,18 +255,46 @@ drd_application_start_listener(DrdApplication *self, GError **error)
     }
     else
     {
-        DRD_LOG_MESSAGE("System mode enabled, skipping capture/encoding initialization");
+        DRD_LOG_MESSAGE("Runtime initialized without capture/encoding setup "
+                        "(runtime mode=%s)",
+                        drd_application_runtime_mode_to_string(runtime_mode));
+    }
+
+    if (snapshot != NULL)
+    {
+        snapshot->encoding_opts = encoding_opts;
+        snapshot->nla_enabled = nla_enabled;
+        snapshot->nla_username = nla_username;
+        snapshot->nla_password = nla_password;
+        snapshot->pam_service = pam_service;
+        snapshot->runtime_mode = runtime_mode;
+    }
+
+    return TRUE;
+}
+
+/* 启动 RDP 监听器，并将 TLS、编码运行时串联起来。 */
+static gboolean
+drd_application_start_listener(DrdApplication *self, GError **error)
+{
+    g_assert(self->listener == NULL);
+    g_return_val_if_fail(DRD_IS_SERVER_RUNTIME(self->runtime), FALSE);
+
+    DrdRuntimeContextSnapshot snapshot = {0};
+    if (!drd_application_prepare_runtime(self, TRUE, &snapshot, error))
+    {
+        return FALSE;
     }
 
     self->listener = drd_rdp_listener_new(drd_config_get_bind_address(self->config),
                                           drd_config_get_port(self->config),
                                           self->runtime,
-                                          encoding_opts,
-                                          nla_enabled,
-                                          nla_username,
-                                          nla_password,
-                                          pam_service,
-                                          system_mode);
+                                          snapshot.encoding_opts,
+                                          snapshot.nla_enabled,
+                                          snapshot.nla_username,
+                                          snapshot.nla_password,
+                                          snapshot.pam_service,
+                                          snapshot.runtime_mode == DRD_RUNTIME_MODE_SYSTEM);
     if (self->listener == NULL)
     {
         g_set_error_literal(error,
@@ -245,6 +309,68 @@ drd_application_start_listener(DrdApplication *self, GError **error)
     {
         g_clear_object(&self->listener);
         drd_server_runtime_stop(self->runtime);
+        return FALSE;
+    }
+
+    return TRUE;
+}
+
+static gboolean
+drd_application_start_system_daemon(DrdApplication *self, GError **error)
+{
+    DrdRuntimeContextSnapshot snapshot = {0};
+    if (!drd_application_prepare_runtime(self, FALSE, &snapshot, error))
+    {
+        return FALSE;
+    }
+
+    g_clear_object(&self->mode_controller);
+    self->mode_controller = G_OBJECT(drd_system_daemon_new(self->config,
+                                                           self->runtime,
+                                                           self->tls_credentials));
+    if (self->mode_controller == NULL)
+    {
+        g_set_error_literal(error,
+                            G_IO_ERROR,
+                            G_IO_ERROR_FAILED,
+                            "Failed to allocate system daemon controller");
+        return FALSE;
+    }
+
+    if (!drd_system_daemon_start(DRD_SYSTEM_DAEMON(self->mode_controller), error))
+    {
+        g_clear_object(&self->mode_controller);
+        return FALSE;
+    }
+
+    return TRUE;
+}
+
+static gboolean
+drd_application_start_handover_daemon(DrdApplication *self, GError **error)
+{
+    DrdRuntimeContextSnapshot snapshot = {0};
+    if (!drd_application_prepare_runtime(self, TRUE, &snapshot, error))
+    {
+        return FALSE;
+    }
+
+    g_clear_object(&self->mode_controller);
+    self->mode_controller = G_OBJECT(drd_handover_daemon_new(self->config,
+                                                             self->runtime,
+                                                             self->tls_credentials));
+    if (self->mode_controller == NULL)
+    {
+        g_set_error_literal(error,
+                            G_IO_ERROR,
+                            G_IO_ERROR_FAILED,
+                            "Failed to allocate handover daemon controller");
+        return FALSE;
+    }
+
+    if (!drd_handover_daemon_start(DRD_HANDOVER_DAEMON(self->mode_controller), error))
+    {
+        g_clear_object(&self->mode_controller);
         return FALSE;
     }
 
@@ -270,6 +396,7 @@ drd_application_parse_options(DrdApplication *self, gint *argc, gchar ***argv, G
     gboolean enable_nla_flag = FALSE;
     gboolean disable_nla_flag = FALSE;
     gboolean system_mode_flag = FALSE;
+    gchar *runtime_mode_name = NULL;
 
     GOptionEntry entries[] = {
         {"bind-address", 'b', 0, G_OPTION_ARG_STRING, &bind_address, "Bind address (default 0.0.0.0)", "ADDR"},
@@ -285,6 +412,7 @@ drd_application_parse_options(DrdApplication *self, gint *argc, gchar ***argv, G
         {"enable-nla", 0, 0, G_OPTION_ARG_NONE, &enable_nla_flag, "Force enable NLA regardless of config", NULL},
         {"disable-nla", 0, 0, G_OPTION_ARG_NONE, &disable_nla_flag, "Disable NLA and use TLS+PAM single sign-on (system mode only)", NULL},
         {"system", 0, 0, G_OPTION_ARG_NONE, &system_mode_flag, "Run in system mode (root, TLS/PAM login)", NULL},
+        {"mode", 0, 0, G_OPTION_ARG_STRING, &runtime_mode_name, "Runtime mode (user|system|handover)", "MODE"},
         {"enable-diff", 0, 0, G_OPTION_ARG_NONE, &enable_diff_flag, "Enable frame difference even if disabled in config", NULL},
         {"disable-diff", 0, 0, G_OPTION_ARG_NONE, &disable_diff_flag, "Disable frame difference regardless of config", NULL},
         {NULL}
@@ -300,6 +428,7 @@ drd_application_parse_options(DrdApplication *self, gint *argc, gchar ***argv, G
         g_clear_pointer(&key_path, g_free);
         g_clear_pointer(&config_path, g_free);
         g_clear_pointer(&encoder_mode, g_free);
+        g_clear_pointer(&runtime_mode_name, g_free);
         g_clear_pointer(&nla_username, g_free);
         g_clear_pointer(&nla_password, g_free);
         return FALSE;
@@ -316,6 +445,7 @@ drd_application_parse_options(DrdApplication *self, gint *argc, gchar ***argv, G
         g_clear_pointer(&key_path, g_free);
         g_clear_pointer(&config_path, g_free);
         g_clear_pointer(&encoder_mode, g_free);
+        g_clear_pointer(&runtime_mode_name, g_free);
         g_clear_pointer(&nla_username, g_free);
         g_clear_pointer(&nla_password, g_free);
         return FALSE;
@@ -332,6 +462,7 @@ drd_application_parse_options(DrdApplication *self, gint *argc, gchar ***argv, G
         g_clear_pointer(&key_path, g_free);
         g_clear_pointer(&config_path, g_free);
         g_clear_pointer(&encoder_mode, g_free);
+        g_clear_pointer(&runtime_mode_name, g_free);
         g_clear_pointer(&nla_username, g_free);
         g_clear_pointer(&nla_password, g_free);
         return FALSE;
@@ -347,6 +478,7 @@ drd_application_parse_options(DrdApplication *self, gint *argc, gchar ***argv, G
             g_clear_pointer(&cert_path, g_free);
             g_clear_pointer(&key_path, g_free);
             g_clear_pointer(&encoder_mode, g_free);
+            g_clear_pointer(&runtime_mode_name, g_free);
             g_clear_pointer(&nla_username, g_free);
             g_clear_pointer(&nla_password, g_free);
             return FALSE;
@@ -378,6 +510,7 @@ drd_application_parse_options(DrdApplication *self, gint *argc, gchar ***argv, G
                                enable_nla_flag,
                                disable_nla_flag,
                                system_mode_flag,
+                               runtime_mode_name,
                                capture_width,
                                capture_height,
                                encoder_mode,
@@ -389,12 +522,13 @@ drd_application_parse_options(DrdApplication *self, gint *argc, gchar ***argv, G
         g_clear_pointer(&key_path, g_free);
         g_clear_pointer(&config_path, g_free);
         g_clear_pointer(&encoder_mode, g_free);
+        g_clear_pointer(&runtime_mode_name, g_free);
         g_clear_pointer(&nla_username, g_free);
         g_clear_pointer(&nla_password, g_free);
         return FALSE;
     }
 
-    if (drd_config_get_system_mode(self->config) && geteuid() != 0)
+    if (drd_config_get_runtime_mode(self->config) == DRD_RUNTIME_MODE_SYSTEM && geteuid() != 0)
     {
         g_set_error_literal(error,
                             G_OPTION_ERROR,
@@ -405,6 +539,7 @@ drd_application_parse_options(DrdApplication *self, gint *argc, gchar ***argv, G
         g_clear_pointer(&key_path, g_free);
         g_clear_pointer(&config_path, g_free);
         g_clear_pointer(&encoder_mode, g_free);
+        g_clear_pointer(&runtime_mode_name, g_free);
         g_clear_pointer(&nla_username, g_free);
         g_clear_pointer(&nla_password, g_free);
         return FALSE;
@@ -415,6 +550,7 @@ drd_application_parse_options(DrdApplication *self, gint *argc, gchar ***argv, G
     g_clear_pointer(&key_path, g_free);
     g_clear_pointer(&config_path, g_free);
     g_clear_pointer(&encoder_mode, g_free);
+    g_clear_pointer(&runtime_mode_name, g_free);
     g_clear_pointer(&nla_username, g_free);
     g_clear_pointer(&nla_password, g_free);
 
@@ -478,17 +614,46 @@ drd_application_run(DrdApplication *self, int argc, char **argv, GError **error)
     self->sigint_id = g_unix_signal_add(SIGINT, drd_application_on_signal, self);
     self->sigterm_id = g_unix_signal_add(SIGTERM, drd_application_on_signal, self);
 
-    if (!drd_application_start_listener(self, error))
+    const DrdRuntimeMode runtime_mode = drd_config_get_runtime_mode(self->config);
+    gboolean started = FALSE;
+    switch (runtime_mode)
+    {
+        case DRD_RUNTIME_MODE_SYSTEM:
+            started = drd_application_start_system_daemon(self, error);
+            if (started)
+            {
+                DRD_LOG_MESSAGE("System daemon exposing DBus dispatcher (%s)",
+                                drd_application_runtime_mode_to_string(runtime_mode));
+            }
+            break;
+        case DRD_RUNTIME_MODE_HANDOVER:
+            started = drd_application_start_handover_daemon(self, error);
+            if (started)
+            {
+                DRD_LOG_MESSAGE("Handover daemon initialized (mode=%s)",
+                                drd_application_runtime_mode_to_string(runtime_mode));
+            }
+            break;
+        case DRD_RUNTIME_MODE_USER:
+        default:
+            started = drd_application_start_listener(self, error);
+            if (started)
+            {
+                DRD_LOG_MESSAGE("RDP service listening on %s:%u",
+                                drd_config_get_bind_address(self->config),
+                                drd_config_get_port(self->config));
+                DRD_LOG_MESSAGE("Loaded TLS credentials (cert=%s, key=%s)",
+                                drd_config_get_certificate_path(self->config),
+                                drd_config_get_private_key_path(self->config));
+            }
+            break;
+    }
+
+    if (!started)
     {
         return EXIT_FAILURE;
     }
 
-    DRD_LOG_MESSAGE("RDP service listening on %s:%u",
-              drd_config_get_bind_address(self->config),
-              drd_config_get_port(self->config));
-    DRD_LOG_MESSAGE("Loaded TLS credentials (cert=%s, key=%s)",
-              drd_config_get_certificate_path(self->config),
-              drd_config_get_private_key_path(self->config));
     g_main_loop_run(self->loop);
 
     DRD_LOG_MESSAGE("Main loop terminated");

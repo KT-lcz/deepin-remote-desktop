@@ -15,8 +15,10 @@
 10. 密钥存储；
 
 - 把drd的启动放到/etc/deepin/greeter.d 目录下，lightdm 启动虚拟屏幕greeter会话时，设置一个环境变量，读到了该环境变量，就启动drd --takeshare 进程，该进程不做端口监听，
-- 
 
+- greeter 远程登录：NLA协议；
+- 桌面共享：NLA协议；
+- 单点登录：TLS协议，拿用户名和密码去做pam认证；
 ### 单点登录
 CredSSP简介
 

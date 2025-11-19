@@ -60,6 +60,8 @@ struct _DrdRdpListener
     DrdEncodingOptions encoding_options;
     gboolean is_bound;
     GCancellable *cancellable;
+    DrdRdpListenerDelegateFunc delegate_func;
+    gpointer delegate_data;
 };
 
 G_DEFINE_TYPE(DrdRdpListener, drd_rdp_listener, G_TYPE_SOCKET_SERVICE)
@@ -149,6 +151,8 @@ drd_rdp_listener_init(DrdRdpListener *self)
     self->sessions = g_ptr_array_new_with_free_func(g_object_unref);
     self->is_bound = FALSE;
     self->cancellable = NULL;
+    self->delegate_func = NULL;
+    self->delegate_data = NULL;
 }
 
 static gboolean
@@ -830,6 +834,25 @@ drd_rdp_listener_incoming(GSocketService    *service,
     DrdRdpListener *self = DRD_RDP_LISTENER(service);
     g_autoptr(GError) accept_error = NULL;
 
+    if (self->delegate_func != NULL)
+    {
+        gboolean handled = self->delegate_func(self, connection, self->delegate_data, &accept_error);
+        if (handled)
+        {
+            if (accept_error != NULL)
+            {
+                DRD_LOG_WARNING("Delegate reported error handling connection: %s",
+                                accept_error->message);
+            }
+            return TRUE;
+        }
+        if (accept_error != NULL)
+        {
+            DRD_LOG_WARNING("Delegate failed to process connection: %s", accept_error->message);
+            return TRUE;
+        }
+    }
+
     if (!drd_rdp_listener_handle_connection(self, connection, &accept_error))
     {
         if (accept_error != NULL)
@@ -955,6 +978,27 @@ drd_rdp_listener_stop(DrdRdpListener *self)
 {
     g_return_if_fail(DRD_IS_RDP_LISTENER(self));
     drd_rdp_listener_stop_internal(self);
+}
+
+void
+drd_rdp_listener_set_delegate(DrdRdpListener *self,
+                              DrdRdpListenerDelegateFunc func,
+                              gpointer user_data)
+{
+    g_return_if_fail(DRD_IS_RDP_LISTENER(self));
+    self->delegate_func = func;
+    self->delegate_data = user_data;
+}
+
+gboolean
+drd_rdp_listener_adopt_connection(DrdRdpListener *self,
+                                  GSocketConnection *connection,
+                                  GError **error)
+{
+    g_return_val_if_fail(DRD_IS_RDP_LISTENER(self), FALSE);
+    g_return_val_if_fail(G_IS_SOCKET_CONNECTION(connection), FALSE);
+
+    return drd_rdp_listener_handle_connection(self, connection, error);
 }
 static gboolean
 drd_rdp_listener_authenticate_tls_login(DrdRdpPeerContext *ctx, freerdp_peer *client)

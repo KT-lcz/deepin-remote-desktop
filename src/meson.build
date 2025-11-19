@@ -1,4 +1,5 @@
 src_inc = include_directories('.')
+gnome = import('gnome')
 
 deps = [
   glib_dep,
@@ -36,11 +37,21 @@ core_sources = files(
   'session/drd_rdp_session.c',
   'session/drd_rdp_graphics_pipeline.c',
   'transport/drd_rdp_listener.c',
+  'transport/drd_rdp_routing_token.c',
   'security/drd_tls_credentials.c',
   'security/drd_local_session.c',
   'security/drd_nla_sam.c',
-  'utils/drd_log.c'
+  'utils/drd_log.c',
+  'system/drd_system_daemon.c',
+  'system/drd_handover_daemon.c'
 )
+
+dbus_gen_remote_desktop = gnome.gdbus_codegen('drd-dbus-remote-desktop',
+                                              'org.deepin.RemoteDesktop.xml',
+                                              interface_prefix: 'org.deepin.RemoteDesktop.',
+                                              namespace: 'DrdDBusRemoteDesktop')
+
+core_sources += dbus_gen_remote_desktop
 
 drd_media = static_library(
   'drd-media',
