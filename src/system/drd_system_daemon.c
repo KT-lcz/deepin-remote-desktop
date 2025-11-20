@@ -268,7 +268,7 @@ drd_system_daemon_register_client(DrdSystemDaemon *self,
                     token_preview);
     return TRUE;
 }
-
+// return FALSE 时，需要继续处理这个connection;return TRUE时，代表已经处理过，需要让handover进程来处理；
 static gboolean
 drd_system_daemon_delegate(DrdRdpListener *listener,
                            GSocketConnection *connection,
@@ -282,7 +282,8 @@ drd_system_daemon_delegate(DrdRdpListener *listener,
     g_autoptr(DrdRoutingTokenInfo) info = drd_routing_token_info_new();
     g_object_ref(connection);
     DRD_LOG_MESSAGE("drd_routing_token_peek run");
-    if (!drd_routing_token_peek(connection, NULL, info, error))
+    g_autoptr(GCancellable) cancellable = g_cancellable_new();
+    if (!drd_routing_token_peek(connection, cancellable, info, error))
     {
         g_object_unref(connection);
         return TRUE;
@@ -302,6 +303,7 @@ drd_system_daemon_delegate(DrdRdpListener *listener,
             drd_dbus_remote_desktop_rdp_handover_emit_take_client_ready(
                 existing->handover_iface,
                 existing->use_system_credentials);
+            g_object_unref(connection);
             return TRUE;
         }
     }
@@ -317,7 +319,8 @@ drd_system_daemon_delegate(DrdRdpListener *listener,
     }
 
     /* Allow the default listener to accept the connection so FreeRDP can build a session and send redirection. */
-    return TRUE;
+    g_object_unref(connection);
+    return FALSE;
 }
 
 static void
@@ -672,6 +675,7 @@ drd_system_daemon_on_start_handover(DrdDBusRemoteDesktopRdpHandover *interface,
     g_autofree gchar *certificate = NULL;
     g_autofree gchar *key = NULL;
     gboolean redirected_locally = FALSE;
+    drd_system_daemon_ensure_routing_token(self, client);
     const gboolean has_routing_token =
         client->routing != NULL && client->routing->routing_token != NULL;
 
@@ -685,14 +689,6 @@ drd_system_daemon_on_start_handover(DrdDBusRemoteDesktopRdpHandover *interface,
     if (client->session != NULL)
     {
         DRD_LOG_MESSAGE("client session not NULL");
-        if (!has_routing_token)
-        {
-            g_dbus_method_invocation_return_error(invocation,
-                                                  G_IO_ERROR,
-                                                  G_IO_ERROR_FAILED,
-                                                  "Routing token unavailable for active session");
-            return TRUE;
-        }
         if (!drd_rdp_session_send_server_redirection(client->session,
                                                      client->routing->routing_token,
                                                      username,

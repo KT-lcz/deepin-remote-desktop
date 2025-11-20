@@ -58,193 +58,6 @@ wstream_free_full(wStream *s)
     Stream_Free(s, TRUE);
 }
 
-static gboolean
-drd_routing_token_peek_bytes(DrdRoutingTokenPeekContext *ctx,
-                              guint8 *buffer,
-                              gsize length,
-                              GError **error)
-{
-    GPollFD poll_fds[2] = {0};
-    gint n_fds = 0;
-
-    poll_fds[n_fds].fd = g_socket_get_fd(ctx->socket);
-    poll_fds[n_fds].events = G_IO_IN;
-    n_fds++;
-
-    gboolean has_cancellable_fd = FALSE;
-    if (ctx->cancellable != NULL)
-    {
-        if (!g_cancellable_make_pollfd(ctx->cancellable, &poll_fds[n_fds]))
-        {
-            g_set_error_literal(error, G_IO_ERROR, G_IO_ERROR_FAILED, "Failed to prepare cancellable FD");
-            return FALSE;
-        }
-        has_cancellable_fd = TRUE;
-        n_fds++;
-    }
-
-    while (TRUE)
-    {
-        gint ret;
-        do
-        {
-            ret = g_poll(poll_fds, n_fds, DRD_ROUTING_TOKEN_PEEK_TIMEOUT_MS);
-        } while (ret == -1 && errno == EINTR);
-
-        if (ret == -1)
-        {
-            g_set_error(error,
-                        G_IO_ERROR,
-                        g_io_error_from_errno(errno),
-                        "Poll failed: %s",
-                        g_strerror(errno));
-            break;
-        }
-
-        if (has_cancellable_fd && g_cancellable_is_cancelled(ctx->cancellable))
-        {
-            g_set_error_literal(error, G_IO_ERROR, G_IO_ERROR_CANCELLED, "Cancelled while peeking token");
-            break;
-        }
-
-        do
-        {
-            ret = recv(poll_fds[0].fd, buffer, length, MSG_PEEK);
-        } while (ret == -1 && errno == EINTR);
-
-        if (ret == (gint)length)
-        {
-            if (has_cancellable_fd)
-            {
-                g_cancellable_release_fd(ctx->cancellable);
-            }
-            return TRUE;
-        }
-
-        if (ret == -1 && (errno == EAGAIN || errno == EWOULDBLOCK))
-        {
-            continue;
-        }
-
-        if (ret == -1)
-        {
-            g_set_error(error,
-                        G_IO_ERROR,
-                        g_io_error_from_errno(errno),
-                        "recv failed: %s",
-                        g_strerror(errno));
-        }
-        else
-        {
-            g_set_error_literal(error, G_IO_ERROR, G_IO_ERROR_FAILED, "Unexpected EOF while peeking token");
-        }
-        break;
-    }
-
-    if (has_cancellable_fd)
-    {
-        g_cancellable_release_fd(ctx->cancellable);
-    }
-    return FALSE;
-}
-
-static gboolean
-drd_routing_token_read_stream(DrdRoutingTokenPeekContext *ctx,
-                               wStream *stream,
-                               guint expected,
-                               GError **error)
-{
-    if (!drd_routing_token_peek_bytes(ctx, Stream_Buffer(stream), expected, error))
-    {
-        return FALSE;
-    }
-    Stream_SetPosition(stream, expected);
-    return TRUE;
-}
-
-static gint
-drd_routing_token_find_crlf(const gchar *buffer, gsize length)
-{
-    for (gsize i = 0; i + 1 < length; ++i)
-    {
-        if (buffer[i] == '\r' && buffer[i + 1] == '\n')
-        {
-            return (gint)i;
-        }
-    }
-    return -1;
-}
-
-static gchar *
-drd_routing_token_extract_cookie(const gchar *buffer,
-                                 gsize length,
-                                 gsize *line_length)
-{
-    const gsize prefix_len = strlen(DRD_ROUTING_TOKEN_PREFIX);
-    if (buffer == NULL || length <= prefix_len)
-    {
-        return NULL;
-    }
-
-    const gchar *match = g_strstr_len(buffer, length, DRD_ROUTING_TOKEN_PREFIX);
-    if (match == NULL)
-    {
-        return NULL;
-    }
-
-    const gsize remaining = length - (match - buffer);
-    const gint crlf = drd_routing_token_find_crlf(match, remaining);
-    if (crlf < 0 || (gsize)crlf <= prefix_len)
-    {
-        return NULL;
-    }
-
-    if (line_length != NULL)
-    {
-        *line_length = (match - buffer) + (gsize)crlf;
-    }
-
-    return g_strndup(match + prefix_len, (gsize)crlf - prefix_len);
-}
-
-static gboolean
-drd_routing_token_parse_neg_req(wStream *stream,
-                                gboolean *requested_rdstls,
-                                GError **error)
-{
-    /* rdpNegReq fields after cookie */
-    UINT8 type = 0;
-    UINT8 flags = 0;
-    UINT16 length = 0;
-    UINT32 requested_protocols = 0;
-
-    if (Stream_GetRemainingLength(stream) < 8)
-    {
-        g_set_error_literal(error,
-                            G_IO_ERROR,
-                            G_IO_ERROR_FAILED,
-                            "Incomplete rdpNegReq while peeking routing token");
-        return FALSE;
-    }
-
-    Stream_Read_UINT8(stream, type);
-    Stream_Read_UINT8(stream, flags);
-    Stream_Read_UINT16(stream, length);
-    if (type != 0x01 || length != 8)
-    {
-        g_set_error_literal(error,
-                            G_IO_ERROR,
-                            G_IO_ERROR_FAILED,
-                            "Invalid rdpNegReq header while peeking routing token");
-        return FALSE;
-    }
-    (void)flags;
-
-    Stream_Read_UINT32(stream, requested_protocols);
-    *requested_rdstls = (requested_protocols & PROTOCOL_RDSTLS) != 0;
-    return TRUE;
-}
-
 #define MAX_PEEK_TIME_MS 2000
 static gboolean
 peek_bytes (int            fd,
@@ -317,6 +130,48 @@ peek_bytes (int            fd,
     return TRUE;
 }
 
+static int
+find_cr_lf (const char *buffer,
+            int         length)
+{
+    int i;
+
+    for (i = 0; i < length - 1; ++i)
+    {
+        if (buffer[i] == 0x0D && buffer[i + 1] == 0x0A)
+            return i;
+    }
+
+    return -1;
+}
+static char *
+get_routing_token_without_prefix (char   *buffer,
+                                  size_t  buffer_length,
+                                  int *routing_token_length)
+{
+    g_autofree char *peeked_prefix = NULL;
+    g_autofree char *prefix = NULL;
+    size_t prefix_length;
+
+    prefix = g_strdup ("Cookie: msts=");
+    prefix_length = strlen (prefix);
+
+    if (buffer_length < prefix_length)
+        return NULL;
+
+    peeked_prefix = g_strndup (buffer, prefix_length);
+    if (g_strcmp0 (peeked_prefix, prefix) != 0)
+        return NULL;
+
+    *routing_token_length = find_cr_lf (buffer, buffer_length);
+    if (*routing_token_length == -1)
+        return NULL;
+
+    return g_strndup (buffer + prefix_length,
+                      *routing_token_length - prefix_length);
+}
+
+
 gboolean
 drd_routing_token_peek(GSocketConnection *connection,
                        GCancellable *cancellable,
@@ -333,8 +188,8 @@ drd_routing_token_peek(GSocketConnection *connection,
         return FALSE;
     }
 
-    /* Borrowed socket reference; never unref here, otherwise the connection loses its backing fd. */
-    DrdRoutingTokenPeekContext ctx = {socket, cancellable};
+
+    // copy form grd
     g_autoptr(wStream) stream = Stream_New(NULL, 4);
     if (stream == NULL)
     {
@@ -342,90 +197,93 @@ drd_routing_token_peek(GSocketConnection *connection,
         return FALSE;
     }
 
+    int fd = g_socket_get_fd (socket);
+    if (!peek_bytes (fd, Stream_Buffer (stream), 4, cancellable, error))
+        return FALSE;
 
+    /* TPKT values */
+    uint8_t  version;
+    uint16_t tpkt_length;
+    Stream_Read_UINT8 (stream, version);
+    Stream_Seek (stream, 1);
+    Stream_Read_UINT16_BE (stream, tpkt_length);
 
-    /* Peek TPKT header (4 bytes) */
-    if (!drd_routing_token_read_stream(&ctx, stream, 4, error))
+    if (version != 3)
     {
+        g_set_error (error, G_IO_ERROR, G_IO_ERROR_FAILED,
+                     "The TPKT Header doesn't have version 3");
         return FALSE;
     }
-
-    Stream_Rewind(stream, 4);
-    UINT8 version = 0;
-    UINT16 tpkt_length = 0;
-    Stream_Read_UINT8(stream, version);
-    Stream_Seek_UINT8(stream); /* reserved */
-    Stream_Read_UINT16_BE(stream, tpkt_length);
-
-    if (version != 3 || tpkt_length < 11)
+    if (tpkt_length < 4 + 7)
     {
-        g_set_error_literal(error, G_IO_ERROR, G_IO_ERROR_FAILED, "Invalid TPKT header when peeking token");
+        g_set_error (error, G_IO_ERROR, G_IO_ERROR_FAILED,
+                     "The x224Crq TPDU length is too short");
         return FALSE;
     }
+    /* Peek full PDU */
+    Stream_Free (stream, TRUE);
+    stream = Stream_New (NULL, tpkt_length);
+    g_assert (stream);
 
-    /* Read the full TPKT payload to inspect cookie and negotiation request */
-    Stream_Free(stream, TRUE);
-    stream = Stream_New(NULL, tpkt_length);
-    if (stream == NULL)
-    {
-        g_set_error_literal(error, G_IO_ERROR, G_IO_ERROR_FAILED, "Failed to allocate stream");
+    if (!peek_bytes (fd, Stream_Buffer (stream), tpkt_length, cancellable, error))
         return FALSE;
-    }
-    if (!drd_routing_token_read_stream(&ctx, stream, tpkt_length, error))
-    {
-        return FALSE;
-    }
 
-    Stream_SetPosition(stream, 4);
-    UINT8 length_indicator = 0;
-    UINT8 cr_cdt = 0;
-    UINT16 dst_ref = 0;
-    UINT16 src_ref = 0;
-    UINT8 class_opt = 0;
+    Stream_Seek (stream, 4);
 
-    Stream_Read_UINT8(stream, length_indicator);
-    Stream_Read_UINT8(stream, cr_cdt);
-    Stream_Read_UINT16(stream, dst_ref);
-    Stream_Read_UINT16(stream, src_ref);
-    Stream_Read_UINT8(stream, class_opt);
-    (void)src_ref;
 
-    if ((tpkt_length - 5) != length_indicator || cr_cdt != 0xE0 || dst_ref != 0 ||
+    /* Check x224Crq */
+    uint8_t  length_indicator;
+    uint8_t  cr_cdt;
+    uint16_t dst_ref;
+    uint8_t  class_opt;
+    Stream_Read_UINT8 (stream, length_indicator);
+    Stream_Read_UINT8 (stream, cr_cdt);
+    Stream_Read_UINT16 (stream, dst_ref);
+    Stream_Seek (stream, 2);
+    Stream_Read_UINT8 (stream, class_opt);
+    if (tpkt_length - 5 != length_indicator ||
+        cr_cdt != 0xE0 ||
+        dst_ref != 0 ||
         (class_opt & 0xFC) != 0)
     {
-        g_set_error_literal(error,
-                            G_IO_ERROR,
-                            G_IO_ERROR_FAILED,
-                            "Invalid x224 connection request while peeking routing token");
+        g_set_error (error, G_IO_ERROR, G_IO_ERROR_FAILED,
+                     "Wrong info on x224Crq");
         return FALSE;
     }
 
-    info->requested_rdstls = FALSE;
-    const gsize remaining = Stream_GetRemainingLength(stream);
-    gsize line_length = 0;
-    gchar *cookie =
-        drd_routing_token_extract_cookie((const gchar *)Stream_Pointer(stream), remaining, &line_length);
-    if (cookie == NULL)
-    {
+    int routing_token_length;
+    /* Check routingToken */
+    info->routing_token =
+      get_routing_token_without_prefix ((char *) Stream_Pointer (stream),
+                                        Stream_GetRemainingLength (stream),
+                                        &routing_token_length);
+    if (!info->routing_token )
         return TRUE;
-    }
 
-    g_clear_pointer(&info->routing_token, g_free);
-    info->routing_token = cookie;
-
-    Stream_Seek(stream, line_length + 2);
-    if (Stream_GetRemainingLength(stream) < 8)
-    {
+    /* Check rdpNegReq */
+    Stream_Seek (stream, routing_token_length + 2);
+    if (Stream_GetRemainingLength (stream) < 8)
         return TRUE;
-    }
 
-    if (!drd_routing_token_parse_neg_req(stream, &info->requested_rdstls, error))
+    /* rdpNegReq values */
+    uint8_t rdp_neg_type;
+    uint16_t rdp_neg_length;
+    uint32_t requested_protocols;
+    Stream_Read_UINT8 (stream, rdp_neg_type);
+    Stream_Seek (stream, 1);
+    Stream_Read_UINT16 (stream, rdp_neg_length);
+    Stream_Read_UINT32 (stream, requested_protocols);
+    if (rdp_neg_type != 0x01 || rdp_neg_length != 8)
     {
-        g_clear_pointer(&info->routing_token, g_free);
-        info->routing_token = NULL;
-        info->requested_rdstls = FALSE;
+        g_set_error (error, G_IO_ERROR, G_IO_ERROR_FAILED,
+                     "Wrong info on rdpNegReq");
         return FALSE;
     }
+
+    info->requested_rdstls = !!(requested_protocols & PROTOCOL_RDSTLS);
+
+    // end grd copy
+
 
     return TRUE;
 }

@@ -1,6 +1,15 @@
 # 变更记录
 # 变更记录
 
+## 2025-11-20：handover 重连短路监听器
+- **目的**：修复 StartHandover 后客户端重连仍再次落到 system 进程、触发 `peer->CheckFileDescriptor()` 崩溃的问题，确保 handover delegate 抢占的连接不会被默认监听逻辑重复处理。
+- **范围**：`src/transport/drd_rdp_listener.c`、`doc/architecture.md`、`.codex/plan/handover-reconnect-crash.md`。
+- **主要改动**：
+  1. `drd_rdp_listener_incoming()` 当 delegate 返回 handled 或产生错误时立即短路，不再继续走默认 `drd_rdp_listener_handle_connection()`，避免对 handover 重连 socket 二次创建 FreeRDP 会话。
+  2. 当 delegate 自身返回错误时保持原有语义——记录日志并停止后续处理，确保 system 监听器不会在半初始化的 socket 上继续初始化。
+  3. 架构文档补充监听短路说明，强调 system delegate 与默认监听链路之间的职责边界。
+- **影响**：handover 守护在 StartHandover → Redirect → 客户端重连后不再遇到重复进入 `drd_rdp_listener_incoming()` 的 FreeRDP 初始化流程，system 进程不会二次接管连接，从而消除 `peer->CheckFileDescriptor()` 崩溃。
+
 ## 2025-11-20：routing token peek 对齐 upstream
 - **目的**：system 模式在 StartHandover 之后无法触发重定向，原因是 `drd_routing_token_peek()` 只读取 11 字节导致 `Cookie: msts=` 永远解析失败，routing token 始终为空，系统端跳过 `RedirectClient`。需要将解析流程与 upstream `peek_routing_token()` 保持一致，确保二次连接能拿到 token 并触发 `TakeClientReady`。
 - **范围**：`src/transport/drd_rdp_routing_token.c`、`src/system/drd_system_daemon.c`、`doc/architecture.md`、`.codex/plan/takeclientready.md`。

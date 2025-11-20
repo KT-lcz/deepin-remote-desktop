@@ -314,11 +314,6 @@ drd_rdp_session_start_event_thread(DrdRdpSession *self)
     }
 
     g_atomic_int_set(&self->connection_alive, 1);
-    // self->event_thread = g_thread_new("drd-rdp-io", drd_rdp_session_event_thread, g_object_ref(self));
-    // if (self->event_thread != NULL)
-    // {
-    //     DRD_LOG_MESSAGE("Session %s started event thread", self->peer_address);
-    // }
 
     if (self->vcm != NULL && self->vcm != INVALID_HANDLE_VALUE && self->vcm_thread == NULL)
     {
@@ -376,29 +371,30 @@ drd_rdp_session_stop_event_thread(DrdRdpSession *self)
 
     drd_rdp_session_stop_render_thread(self);
 
+    g_atomic_int_set(&self->connection_alive, 0);
+
+    if (self->stop_event != NULL)
+    {
+        SetEvent(self->stop_event);
+    }
+
     if (self->event_thread != NULL)
     {
-        if (self->stop_event != NULL)
-        {
-            SetEvent(self->stop_event);
-        }
         g_thread_join(self->event_thread);
         self->event_thread = NULL;
         DRD_LOG_MESSAGE("Session %s stopped event thread", self->peer_address);
+    }
+
+    if (self->vcm_thread != NULL)
+    {
+        g_thread_join(self->vcm_thread);
+        self->vcm_thread = NULL;
     }
 
     if (self->stop_event != NULL)
     {
         CloseHandle(self->stop_event);
         self->stop_event = NULL;
-    }
-
-    g_atomic_int_set(&self->connection_alive, 0);
-
-    if (self->vcm_thread != NULL)
-    {
-        g_thread_join(self->vcm_thread);
-        self->vcm_thread = NULL;
     }
 
     drd_rdp_session_notify_closed(self);
