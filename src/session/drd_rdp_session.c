@@ -579,6 +579,7 @@ drd_rdp_session_send_server_redirection(DrdRdpSession *self,
                                         const gchar *password,
                                         const gchar *certificate)
 {
+    DRD_LOG_MESSAGE("drd_rdp_session_send_server_redirection");
     g_return_val_if_fail(DRD_IS_RDP_SESSION(self), FALSE);
     g_return_val_if_fail(self->peer != NULL, FALSE);
     g_return_val_if_fail(routing_token != NULL, FALSE);
@@ -596,6 +597,7 @@ drd_rdp_session_send_server_redirection(DrdRdpSession *self,
     g_autoptr(rdpRedirection) redirection = redirection_new();
     if (redirection == NULL)
     {
+        DRD_LOG_MESSAGE("redirection null");
         return FALSE;
     }
 

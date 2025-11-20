@@ -708,6 +708,7 @@ drd_rdp_listener_accept_peer(DrdRdpListener *self,
                               freerdp_peer   *peer,
                               const gchar    *peer_name)
 {
+    DRD_LOG_MESSAGE("listener accept peer");
     g_return_val_if_fail(DRD_IS_RDP_LISTENER(self), FALSE);
     g_return_val_if_fail(peer != NULL, FALSE);
 
@@ -807,6 +808,7 @@ drd_rdp_listener_handle_connection(DrdRdpListener *self,
                                    GSocketConnection *connection,
                                    GError **error)
 {
+    DRD_LOG_MESSAGE("lisener handle connection");
     g_return_val_if_fail(DRD_IS_RDP_LISTENER(self), FALSE);
     g_return_val_if_fail(G_IS_SOCKET_CONNECTION(connection), FALSE);
 
@@ -857,7 +859,8 @@ drd_rdp_listener_incoming(GSocketService    *service,
     DrdRdpListener *self = DRD_RDP_LISTENER(service);
     g_autoptr(GError) accept_error = NULL;
     DRD_LOG_MESSAGE("drd_rdp_listener_incoming");
-    if (self->delegate_func != NULL)
+
+    if (self->system_mode && self->delegate_func != NULL)
     {
         DRD_LOG_MESSAGE("delegate_func run");
         gboolean handled = self->delegate_func(self, connection, self->delegate_data, &accept_error);
@@ -868,7 +871,6 @@ drd_rdp_listener_incoming(GSocketService    *service,
                 DRD_LOG_WARNING("Delegate reported error handling connection: %s",
                                 accept_error->message);
             }
-            return TRUE;
         }
         if (accept_error != NULL)
         {
