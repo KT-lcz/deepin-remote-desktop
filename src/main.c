@@ -9,14 +9,14 @@ drd_initialize_winpr(void)
 {
     if (!winpr_InitializeSSL(WINPR_SSL_INIT_DEFAULT))
     {
-        g_printerr("WinPR SSL 初始化失败\n");
+        g_printerr("WinPR SSL init failed\n");
         return FALSE;
     }
 
     const WtsApiFunctionTable *table = FreeRDP_InitWtsApi();
     if (table == NULL || !WTSRegisterWtsApiFunctionTable(table))
     {
-        g_printerr("注册 WinPR WTS API 失败\n");
+        g_printerr("register WinPR WTS API failed\n");
         return FALSE;
     }
 

@@ -16,6 +16,16 @@ G_BEGIN_DECLS
 #define DRD_TYPE_RDP_SESSION (drd_rdp_session_get_type())
 G_DECLARE_FINAL_TYPE(DrdRdpSession, drd_rdp_session, DRD, RDP_SESSION, GObject)
 
+typedef enum
+{
+    DRD_RDP_SESSION_ERROR_NONE = 0,
+    DRD_RDP_SESSION_ERROR_BAD_CAPS,
+    DRD_RDP_SESSION_ERROR_BAD_MONITOR_DATA,
+    DRD_RDP_SESSION_ERROR_CLOSE_STACK_ON_DRIVER_FAILURE,
+    DRD_RDP_SESSION_ERROR_GRAPHICS_SUBSYSTEM_FAILED,
+    DRD_RDP_SESSION_ERROR_SERVER_REDIRECTION,
+} DrdRdpSessionError;
+
 typedef void (*DrdRdpSessionClosedFunc)(DrdRdpSession *session, gpointer user_data);
 
 DrdRdpSession *drd_rdp_session_new(freerdp_peer *peer);
@@ -31,7 +41,14 @@ BOOL drd_rdp_session_post_connect(DrdRdpSession *self);
 BOOL drd_rdp_session_activate(DrdRdpSession *self);
 BOOL drd_rdp_session_pump(DrdRdpSession *self);
 void drd_rdp_session_disconnect(DrdRdpSession *self, const gchar *reason);
+void drd_rdp_session_notify_error(DrdRdpSession *self, DrdRdpSessionError error);
 gboolean drd_rdp_session_start_event_thread(DrdRdpSession *self);
 void drd_rdp_session_stop_event_thread(DrdRdpSession *self);
+gboolean drd_rdp_session_send_server_redirection(DrdRdpSession *self,
+                                                  const gchar *routing_token,
+                                                  const gchar *username,
+                                                  const gchar *password,
+                                                  const gchar *certificate);
+gboolean drd_rdp_session_client_is_mstsc(DrdRdpSession *self);
 
 G_END_DECLS

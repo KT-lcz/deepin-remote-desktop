@@ -62,7 +62,7 @@ sequenceDiagram
   1. `user`：默认模式，单进程负责采集/编码/监听，直接通过 `DrdRdpListener` 服务客户端。
   2. `system`：仅在 root/systemd 下使用，`DrdApplication` 跳过采集/编码，实例化 `DrdSystemDaemon`。system daemon 在 GLib `incoming` 勾子中先透过 `DrdRoutingTokenInfo` 窥探 `Cookie: msts=<routing-token>`，把 socket + token 包装成 `DrdRemoteClient`，注册成 `org.deepin.RemoteDesktop.Rdp.Handover` skeleton 并挂到 `/org/deepin/RemoteDesktop/Rdp/Handovers/<session>`；同时在 system bus 导出 `Rdp.Dispatcher`，供 handover 进程通过 `RequestHandover` 领取待处理对象。
   3. `handover`：登陆会话进程，新建 `DrdHandoverDaemon`，先向 dispatcher 请求 handover 对象，再调用 `StartHandover` 获取一次性用户名/密码和 system 端 TLS 证书，监听 `RedirectClient`/`TakeClientReady`/`RestartHandover` 信号，并通过 `TakeClient` 拿到已经握手的 fd，交由本地 `DrdRdpListener` 继续进行 CredSSP / 会话激活。当前实现专注于 socket 与 DBus 框架，PAM 单点登录仍保持原状——lightdm/desktop 侧 SSO 能力就绪后，再在 `GetSystemCredentials`/handover proxy 里注入真实凭据。
-- **Routing Token 提供者**：`transport/drd_rdp_routing_token.[ch]` 借助 `MSG_PEEK` + `wStream` 解包 TPKT → x224 → rdpNegReq，提取 `Cookie: msts=` 并记录客户端是否请求 `RDSTLS`。system 守护用它生成 `DrdRemoteClient`，随后在 `RedirectClient` 信号中把 token + 临时凭据传给 handover。真实的“routing token 重定向”即是后续依据该 token 向原客户端发送 Server Redirection PDU，使客户端按 Windows RDP 协议自动跳转到目标 handover 进程。
+- **Routing Token 提供者**：`transport/drd_rdp_routing_token.[ch]` 借助 `MSG_PEEK` + `wStream` 解包 TPKT → x224 → rdpNegReq，提取 `Cookie: msts=` 并记录客户端是否请求 `RDSTLS`。system 守护用它生成 `DrdRemoteClient`，随后在 `RedirectClient` 信号中把 token + 临时凭据传给 handover。真实的“routing token 重定向”即是后续依据该 token 向原客户端发送 Server Redirection PDU，使客户端按 Windows RDP 协议自动跳转到目标 handover 进程。为了避免在 peek 阶段意外销毁底层 `GSocket`（导致后续 `freerdp_peer_new()` 无法复制 fd），`drd_routing_token_peek()` 只借用 `GSocketConnection` 的 socket 指针，不再使用 `g_autoptr(GSocket)` 自动 `unref`。
 - **运行时序**：
 
 ```mermaid
@@ -88,6 +88,10 @@ sequenceDiagram
 ```
 
 > 当前阶段刻意跳过 PAM 单点登录：system/handover 仍沿用“客户端输入凭据 → CredSSP/NLA”链路，待 lightdm/DSR 暴露统一 API 后再在 `drd_system_daemon_on_get_system_credentials()` 中返回真实凭据，以支持桌面级 SSO。
+
+> 更完整的远程登录/Server Redirection 时序、二次 handover 细节，请参考仓库根目录的《02-远程登录实现流程与机制.md》。
+
+- **DBus 服务配置**：系统模式在启动时通过 `g_bus_own_name_on_connection()` 抢占 `org.deepin.RemoteDesktop`，对应的 policy (`data/org.deepin.RemoteDesktop.conf`) 会安装到 `$(sysconfdir)/dbus-1/system.d/`，只允许 `deepin-remote-desktop` 用户拥有该服务，同时开放 `Rdp.Dispatcher`/`Rdp.Handover` 等接口给默认 context。部署时需同步安装该 conf，否则 system bus 不会允许占用或导出 handover 对象。
 
 ### 7. 通用工具
 - `utils/drd_frame`：帧描述对象，封装像素数据/元信息。

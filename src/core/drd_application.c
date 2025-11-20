@@ -395,7 +395,6 @@ drd_application_parse_options(DrdApplication *self, gint *argc, gchar ***argv, G
     gchar *nla_password = NULL;
     gboolean enable_nla_flag = FALSE;
     gboolean disable_nla_flag = FALSE;
-    gboolean system_mode_flag = FALSE;
     gchar *runtime_mode_name = NULL;
 
     GOptionEntry entries[] = {
@@ -411,7 +410,6 @@ drd_application_parse_options(DrdApplication *self, gint *argc, gchar ***argv, G
         {"nla-password", 0, 0, G_OPTION_ARG_STRING, &nla_password, "NLA password for static mode", "PASS"},
         {"enable-nla", 0, 0, G_OPTION_ARG_NONE, &enable_nla_flag, "Force enable NLA regardless of config", NULL},
         {"disable-nla", 0, 0, G_OPTION_ARG_NONE, &disable_nla_flag, "Disable NLA and use TLS+PAM single sign-on (system mode only)", NULL},
-        {"system", 0, 0, G_OPTION_ARG_NONE, &system_mode_flag, "Run in system mode (root, TLS/PAM login)", NULL},
         {"mode", 0, 0, G_OPTION_ARG_STRING, &runtime_mode_name, "Runtime mode (user|system|handover)", "MODE"},
         {"enable-diff", 0, 0, G_OPTION_ARG_NONE, &enable_diff_flag, "Enable frame difference even if disabled in config", NULL},
         {"disable-diff", 0, 0, G_OPTION_ARG_NONE, &disable_diff_flag, "Disable frame difference regardless of config", NULL},
@@ -509,7 +507,6 @@ drd_application_parse_options(DrdApplication *self, gint *argc, gchar ***argv, G
                                nla_password,
                                enable_nla_flag,
                                disable_nla_flag,
-                               system_mode_flag,
                                runtime_mode_name,
                                capture_width,
                                capture_height,

@@ -6,17 +6,28 @@
 #include <freerdp/constants.h>
 #include <freerdp/channels/drdynvc.h>
 #include <freerdp/channels/wtsvc.h>
+#include <freerdp/redirection.h>
+#include <freerdp/crypto/crypto.h>
+#include <freerdp/crypto/certificate.h>
 
 #include <gio/gio.h>
 #include <string.h>
 
 #include <winpr/synch.h>
 #include <winpr/wtypes.h>
+#include <winpr/crypto.h>
+#include <winpr/stream.h>
+#include <winpr/string.h>
 
 #include "core/drd_server_runtime.h"
 #include "utils/drd_log.h"
 #include "session/drd_rdp_graphics_pipeline.h"
 #include "security/drd_local_session.h"
+
+#define ELEMENT_TYPE_CERTIFICATE 32
+
+G_DEFINE_AUTOPTR_CLEANUP_FUNC(rdpCertificate, freerdp_certificate_free)
+G_DEFINE_AUTOPTR_CLEANUP_FUNC(rdpRedirection, redirection_free)
 
 struct _DrdRdpSession
 {
@@ -42,6 +53,7 @@ struct _DrdRdpSession
     gint closed_cb_invoked;
     DrdLocalSession *local_session;
     gboolean passive_mode;
+    DrdRdpSessionError last_error;
 };
 
 G_DEFINE_TYPE(DrdRdpSession, drd_rdp_session, G_TYPE_OBJECT)
@@ -64,6 +76,10 @@ static gboolean drd_rdp_session_start_render_thread(DrdRdpSession *self);
 static void drd_rdp_session_stop_render_thread(DrdRdpSession *self);
 static gpointer drd_rdp_session_render_thread(gpointer user_data);
 static void drd_rdp_session_notify_closed(DrdRdpSession *self);
+gboolean drd_rdp_session_client_is_mstsc(DrdRdpSession *self);
+static WCHAR *drd_rdp_session_get_utf16_string(const char *str, size_t *size);
+static WCHAR *drd_rdp_session_generate_redirection_guid(size_t *size);
+static BYTE *drd_rdp_session_get_certificate_container(const char *certificate, size_t *size);
 
 static void
 drd_rdp_session_dispose(GObject *object)
@@ -132,6 +148,7 @@ drd_rdp_session_init(DrdRdpSession *self)
     g_atomic_int_set(&self->closed_cb_invoked, 0);
     self->local_session = NULL;
     self->passive_mode = FALSE;
+    self->last_error = DRD_RDP_SESSION_ERROR_NONE;
 }
 
 DrdRdpSession *
@@ -403,6 +420,247 @@ drd_rdp_session_notify_closed(DrdRdpSession *self)
     }
 
     self->closed_cb(self, self->closed_cb_data);
+}
+
+gboolean
+drd_rdp_session_client_is_mstsc(DrdRdpSession *self)
+{
+    g_return_val_if_fail(DRD_IS_RDP_SESSION(self), FALSE);
+    if (self->peer == NULL || self->peer->context == NULL || self->peer->context->settings == NULL)
+    {
+        return FALSE;
+    }
+
+    rdpSettings *settings = self->peer->context->settings;
+    const guint32 os_major = freerdp_settings_get_uint32(settings, FreeRDP_OsMajorType);
+    const guint32 os_minor = freerdp_settings_get_uint32(settings, FreeRDP_OsMinorType);
+    return os_major == OSMAJORTYPE_WINDOWS && os_minor == OSMINORTYPE_WINDOWS_NT;
+}
+
+static WCHAR *
+drd_rdp_session_get_utf16_string(const char *str, size_t *size)
+{
+    g_return_val_if_fail(str != NULL, NULL);
+    g_return_val_if_fail(size != NULL, NULL);
+
+    *size = 0;
+    WCHAR *utf16 = ConvertUtf8ToWCharAlloc(str, size);
+    if (utf16 == NULL)
+    {
+        return NULL;
+    }
+
+    *size = (*size + 1) * sizeof(WCHAR);
+    return utf16;
+}
+
+static WCHAR *
+drd_rdp_session_generate_redirection_guid(size_t *size)
+{
+    BYTE guid_bytes[16] = {0};
+    g_autofree gchar *guid_base64 = NULL;
+
+    if (winpr_RAND(guid_bytes, sizeof(guid_bytes)) == -1)
+    {
+        return NULL;
+    }
+
+    guid_base64 = crypto_base64_encode(guid_bytes, sizeof(guid_bytes));
+    if (guid_base64 == NULL)
+    {
+        return NULL;
+    }
+
+    return drd_rdp_session_get_utf16_string(guid_base64, size);
+}
+
+static BYTE *
+drd_rdp_session_get_certificate_container(const char *certificate,
+                                          size_t *size)
+{
+    g_return_val_if_fail(certificate != NULL, NULL);
+    g_return_val_if_fail(size != NULL, NULL);
+
+    g_autoptr(rdpCertificate) rdp_cert = freerdp_certificate_new_from_pem(certificate);
+    if (rdp_cert == NULL)
+    {
+        return NULL;
+    }
+
+    size_t der_length = 0;
+    g_autofree BYTE *der_cert = freerdp_certificate_get_der(rdp_cert, &der_length);
+    if (der_cert == NULL)
+    {
+        return NULL;
+    }
+
+    wStream *stream = Stream_New(NULL, 2048);
+    if (stream == NULL)
+    {
+        return NULL;
+    }
+
+    if (!Stream_EnsureRemainingCapacity(stream, 12))
+    {
+        Stream_Free(stream, TRUE);
+        return NULL;
+    }
+
+    Stream_Write_UINT32(stream, ELEMENT_TYPE_CERTIFICATE);
+    Stream_Write_UINT32(stream, ENCODING_TYPE_ASN1_DER);
+    const gint64 der_len_signed = (gint64)der_length;
+    if (der_len_signed < 0 || der_len_signed > G_MAXUINT32)
+    {
+        Stream_Free(stream, TRUE);
+        return NULL;
+    }
+    Stream_Write_UINT32(stream, der_len_signed);
+
+    if (!Stream_EnsureRemainingCapacity(stream, der_length))
+    {
+        Stream_Free(stream, TRUE);
+        return NULL;
+    }
+
+    Stream_Write(stream, der_cert, der_length);
+
+    *size = Stream_GetPosition(stream);
+    BYTE *container = Stream_Buffer(stream);
+    Stream_Free(stream, FALSE);
+    return container;
+}
+
+void
+drd_rdp_session_notify_error(DrdRdpSession *self, DrdRdpSessionError error)
+{
+    g_return_if_fail(DRD_IS_RDP_SESSION(self));
+    if (error == DRD_RDP_SESSION_ERROR_NONE)
+    {
+        return;
+    }
+
+    self->last_error = error;
+    const gchar *reason = NULL;
+    switch (error)
+    {
+        case DRD_RDP_SESSION_ERROR_BAD_CAPS:
+            reason = "client reported invalid capabilities";
+            break;
+        case DRD_RDP_SESSION_ERROR_BAD_MONITOR_DATA:
+            reason = "client monitor layout invalid";
+            break;
+        case DRD_RDP_SESSION_ERROR_CLOSE_STACK_ON_DRIVER_FAILURE:
+            reason = "graphics driver requested close";
+            break;
+        case DRD_RDP_SESSION_ERROR_GRAPHICS_SUBSYSTEM_FAILED:
+            reason = "graphics subsystem failed";
+            break;
+        case DRD_RDP_SESSION_ERROR_SERVER_REDIRECTION:
+            reason = "server redirection requested";
+            break;
+        case DRD_RDP_SESSION_ERROR_NONE:
+        default:
+            reason = "unknown";
+            break;
+    }
+
+    DRD_LOG_WARNING("Session %s reported error: %s", self->peer_address, reason);
+
+    if (error == DRD_RDP_SESSION_ERROR_SERVER_REDIRECTION)
+    {
+        drd_rdp_session_disconnect(self, reason);
+    }
+}
+
+gboolean
+drd_rdp_session_send_server_redirection(DrdRdpSession *self,
+                                        const gchar *routing_token,
+                                        const gchar *username,
+                                        const gchar *password,
+                                        const gchar *certificate)
+{
+    g_return_val_if_fail(DRD_IS_RDP_SESSION(self), FALSE);
+    g_return_val_if_fail(self->peer != NULL, FALSE);
+    g_return_val_if_fail(routing_token != NULL, FALSE);
+    g_return_val_if_fail(username != NULL, FALSE);
+    g_return_val_if_fail(password != NULL, FALSE);
+    g_return_val_if_fail(certificate != NULL, FALSE);
+
+    rdpSettings *settings = self->peer->context != NULL ? self->peer->context->settings : NULL;
+    if (settings == NULL)
+    {
+        DRD_LOG_WARNING("Session %s missing settings, cannot send redirection", self->peer_address);
+        return FALSE;
+    }
+
+    g_autoptr(rdpRedirection) redirection = redirection_new();
+    if (redirection == NULL)
+    {
+        return FALSE;
+    }
+
+    guint32 redirection_flags = 0;
+    guint32 incorrect_flags = 0;
+    size_t size = 0;
+
+    redirection_flags |= LB_LOAD_BALANCE_INFO;
+    redirection_set_byte_option(redirection,
+                                LB_LOAD_BALANCE_INFO,
+                                (const BYTE *)routing_token,
+                                strlen(routing_token));
+
+    redirection_flags |= LB_USERNAME;
+    redirection_set_string_option(redirection, LB_USERNAME, username);
+
+    redirection_flags |= LB_PASSWORD;
+    guint32 os_major = freerdp_settings_get_uint32(settings, FreeRDP_OsMajorType);
+    if (os_major != OSMAJORTYPE_IOS && os_major != OSMAJORTYPE_ANDROID)
+    {
+        redirection_flags |= LB_PASSWORD_IS_PK_ENCRYPTED;
+    }
+
+    g_autofree WCHAR *utf16_password = drd_rdp_session_get_utf16_string(password, &size);
+    if (utf16_password == NULL)
+    {
+        return FALSE;
+    }
+    redirection_set_byte_option(redirection, LB_PASSWORD, (const BYTE *)utf16_password, size);
+
+    redirection_flags |= LB_REDIRECTION_GUID;
+    g_autofree WCHAR *encoded_guid = drd_rdp_session_generate_redirection_guid(&size);
+    if (encoded_guid == NULL)
+    {
+        return FALSE;
+    }
+    redirection_set_byte_option(redirection, LB_REDIRECTION_GUID, (const BYTE *)encoded_guid, size);
+
+    redirection_flags |= LB_TARGET_CERTIFICATE;
+    g_autofree BYTE *certificate_container =
+        drd_rdp_session_get_certificate_container(certificate, &size);
+    if (certificate_container == NULL)
+    {
+        return FALSE;
+    }
+    redirection_set_byte_option(redirection, LB_TARGET_CERTIFICATE, certificate_container, size);
+
+    redirection_set_flags(redirection, redirection_flags);
+
+    if (!redirection_settings_are_valid(redirection, &incorrect_flags))
+    {
+        DRD_LOG_WARNING("Session %s invalid redirection flags 0x%08x",
+                        self->peer_address,
+                        incorrect_flags);
+        return FALSE;
+    }
+
+    DRD_LOG_MESSAGE("Session %s sending server redirection", self->peer_address);
+    if (!self->peer->SendServerRedirection(self->peer, redirection))
+    {
+        DRD_LOG_WARNING("Session %s failed to send server redirection", self->peer_address);
+        return FALSE;
+    }
+
+    return TRUE;
 }
 
 void

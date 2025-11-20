@@ -15,5 +15,5 @@
 - [x] 步骤 1
 - [x] 步骤 2
 - [x] 步骤 3（system 端监听委托 + routing token 解析、handover 对象注册、handover 端 Request→TakeClient 流程骨架）
-- [ ] 步骤 4
+- [ ] 步骤 4（Server Redirection + handover 双重接力细节、PDU/FD 接力、重连 token 管理）
 - [ ] 步骤 5

@@ -42,6 +42,7 @@ static gboolean drd_rdp_listener_authenticate_tls_login(DrdRdpPeerContext *ctx, 
 static gboolean drd_rdp_listener_incoming(GSocketService *service,
                                           GSocketConnection *connection,
                                           GObject *source_object);
+static gboolean drd_rdp_listener_connection_keep_open(GSocketConnection *connection);
 
 struct _DrdRdpListener
 {
@@ -62,6 +63,8 @@ struct _DrdRdpListener
     GCancellable *cancellable;
     DrdRdpListenerDelegateFunc delegate_func;
     gpointer delegate_data;
+    DrdRdpListenerSessionFunc session_cb;
+    gpointer session_cb_data;
 };
 
 G_DEFINE_TYPE(DrdRdpListener, drd_rdp_listener, G_TYPE_SOCKET_SERVICE)
@@ -153,6 +156,8 @@ drd_rdp_listener_init(DrdRdpListener *self)
     self->cancellable = NULL;
     self->delegate_func = NULL;
     self->delegate_data = NULL;
+    self->session_cb = NULL;
+    self->session_cb_data = NULL;
 }
 
 static gboolean
@@ -806,6 +811,7 @@ drd_rdp_listener_handle_connection(DrdRdpListener *self,
     g_return_val_if_fail(G_IS_SOCKET_CONNECTION(connection), FALSE);
 
     g_autofree gchar *peer_name = drd_rdp_listener_describe_connection(connection);
+    const gboolean keep_open = drd_rdp_listener_connection_keep_open(connection);
     freerdp_peer *peer = drd_rdp_listener_peer_from_connection(connection, error);
     if (peer == NULL)
     {
@@ -814,14 +820,31 @@ drd_rdp_listener_handle_connection(DrdRdpListener *self,
         return FALSE;
     }
 
-    g_io_stream_close(G_IO_STREAM(connection), NULL, NULL);
-    g_object_unref(connection);
-
     if (!drd_rdp_listener_accept_peer(self, peer, peer_name))
     {
         freerdp_peer_free(peer);
+        if (!keep_open)
+        {
+            g_io_stream_close(G_IO_STREAM(connection), NULL, NULL);
+        }
+        g_object_unref(connection);
         return FALSE;
     }
+
+    if (self->session_cb != NULL && peer->context != NULL)
+    {
+        DrdRdpPeerContext *ctx = (DrdRdpPeerContext *)peer->context;
+        if (ctx != NULL && ctx->session != NULL)
+        {
+            self->session_cb(self, ctx->session, connection, self->session_cb_data);
+        }
+    }
+
+    if (!keep_open)
+    {
+        g_io_stream_close(G_IO_STREAM(connection), NULL, NULL);
+    }
+    g_object_unref(connection);
 
     return TRUE;
 }
@@ -990,6 +1013,16 @@ drd_rdp_listener_set_delegate(DrdRdpListener *self,
     self->delegate_data = user_data;
 }
 
+void
+drd_rdp_listener_set_session_callback(DrdRdpListener *self,
+                                      DrdRdpListenerSessionFunc func,
+                                      gpointer user_data)
+{
+    g_return_if_fail(DRD_IS_RDP_LISTENER(self));
+    self->session_cb = func;
+    self->session_cb_data = user_data;
+}
+
 gboolean
 drd_rdp_listener_adopt_connection(DrdRdpListener *self,
                                   GSocketConnection *connection,
@@ -1052,4 +1085,13 @@ drd_rdp_listener_authenticate_tls_login(DrdRdpPeerContext *ctx, freerdp_peer *cl
     drd_rdp_session_attach_local_session(ctx->session, local_session);
     DRD_LOG_MESSAGE("Peer %s TLS/PAM single sign-on accepted for %s", client->hostname, username);
     return TRUE;
+}
+static gboolean
+drd_rdp_listener_connection_keep_open(GSocketConnection *connection)
+{
+    if (!G_IS_SOCKET_CONNECTION(connection))
+    {
+        return FALSE;
+    }
+    return g_object_get_data(G_OBJECT(connection), "drd-system-keep-open") != NULL;
 }

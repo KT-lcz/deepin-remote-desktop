@@ -34,3 +34,4 @@ xfixes_dep = dependency('xfixes', required: true)
 xtst_dep = dependency('xtst', required: true)
 
 subdir('src')
+subdir('data')

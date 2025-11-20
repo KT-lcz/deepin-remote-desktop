@@ -214,20 +214,21 @@ drd_routing_token_parse_neg_req(wStream *stream, gboolean *requested_rdstls)
 
 gboolean
 drd_routing_token_peek(GSocketConnection *connection,
-                                GCancellable *cancellable,
-                                DrdRoutingTokenInfo *info,
-                                GError **error)
+                       GCancellable *cancellable,
+                       DrdRoutingTokenInfo *info,
+                       GError **error)
 {
     g_return_val_if_fail(G_IS_SOCKET_CONNECTION(connection), FALSE);
     g_return_val_if_fail(info != NULL, FALSE);
 
-    g_autoptr(GSocket) socket = g_socket_connection_get_socket(connection);
+    GSocket *socket = g_socket_connection_get_socket(connection);
     if (!G_IS_SOCKET(socket))
     {
         g_set_error_literal(error, G_IO_ERROR, G_IO_ERROR_FAILED, "Socket unavailable for routing token peek");
         return FALSE;
     }
 
+    /* Borrowed socket reference; never unref here, otherwise the connection loses its backing fd. */
     DrdRoutingTokenPeekContext ctx = {socket, cancellable};
     g_autoptr(wStream) stream = Stream_New(NULL, 512);
     if (stream == NULL)

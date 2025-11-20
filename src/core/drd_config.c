@@ -491,7 +491,6 @@ drd_config_merge_cli(DrdConfig *self,
                       const gchar *nla_password,
                       gboolean cli_enable_nla,
                       gboolean cli_disable_nla,
-                      gboolean system_mode_cli,
                       const gchar *runtime_mode_name,
                       gint width,
                       gint height,
@@ -556,7 +555,7 @@ drd_config_merge_cli(DrdConfig *self,
         self->nla_enabled = FALSE;
     }
 
-    if (runtime_mode_name != NULL || system_mode_cli)
+    if (runtime_mode_name != NULL)
     {
         DrdRuntimeMode cli_mode = self->runtime_mode;
         if (runtime_mode_name != NULL)
@@ -566,11 +565,6 @@ drd_config_merge_cli(DrdConfig *self,
                 return FALSE;
             }
         }
-        else if (system_mode_cli)
-        {
-            cli_mode = DRD_RUNTIME_MODE_SYSTEM;
-        }
-
         drd_config_set_runtime_mode_internal(self, cli_mode);
     }
 

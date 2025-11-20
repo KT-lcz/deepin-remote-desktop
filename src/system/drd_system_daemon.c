@@ -6,6 +6,7 @@
 #include "core/drd_dbus_constants.h"
 #include "transport/drd_rdp_listener.h"
 #include "transport/drd_rdp_routing_token.h"
+#include "session/drd_rdp_session.h"
 #include "drd-dbus-remote-desktop.h"
 #include "utils/drd_log.h"
 
@@ -18,9 +19,11 @@ typedef struct _DrdRemoteClient
     gchar *object_path;
     DrdRoutingTokenInfo *routing;
     GSocketConnection *connection;
+    DrdRdpSession *session;
     DrdDBusRemoteDesktopRdpHandover *handover_iface;
     GDBusObjectSkeleton *object_skeleton;
     gboolean assigned;
+    gboolean use_system_credentials;
 } DrdRemoteClient;
 
 typedef struct
@@ -41,6 +44,12 @@ static gboolean drd_system_daemon_delegate(DrdRdpListener *listener,
                                            GSocketConnection *connection,
                                            gpointer user_data,
                                            GError **error);
+static void drd_system_daemon_on_session_ready(DrdRdpListener *listener,
+                                               DrdRdpSession *session,
+                                               GSocketConnection *connection,
+                                               gpointer user_data);
+static DrdRemoteClient *drd_system_daemon_find_client_by_token(DrdSystemDaemon *self,
+                                                               const gchar *routing_token);
 static gboolean drd_system_daemon_on_start_handover(DrdDBusRemoteDesktopRdpHandover *interface,
                                                    GDBusMethodInvocation *invocation,
                                                    const gchar *username,
@@ -53,9 +62,6 @@ static gboolean drd_system_daemon_on_take_client(DrdDBusRemoteDesktopRdpHandover
 static gboolean drd_system_daemon_on_get_system_credentials(DrdDBusRemoteDesktopRdpHandover *interface,
                                                            GDBusMethodInvocation *invocation,
                                                            gpointer user_data);
-static void drd_system_daemon_on_take_client_ready(DrdDBusRemoteDesktopRdpHandover *interface,
-                                                   gboolean use_system_credentials,
-                                                   gpointer user_data);
 
 struct _DrdSystemDaemon
 {
@@ -84,11 +90,41 @@ drd_remote_client_free(DrdRemoteClient *client)
 
     g_clear_object(&client->object_skeleton);
     g_clear_object(&client->handover_iface);
-    g_clear_object(&client->connection);
+    if (client->connection != NULL)
+    {
+        g_object_set_data(G_OBJECT(client->connection), "drd-system-client", NULL);
+        g_object_set_data(G_OBJECT(client->connection), "drd-system-keep-open", NULL);
+        g_clear_object(&client->connection);
+    }
+    g_clear_object(&client->session);
     drd_routing_token_info_free(client->routing);
     g_clear_pointer(&client->object_path, g_free);
     g_clear_pointer(&client->id, g_free);
     g_free(client);
+}
+
+static DrdRemoteClient *
+drd_system_daemon_find_client_by_token(DrdSystemDaemon *self, const gchar *routing_token)
+{
+    g_return_val_if_fail(DRD_IS_SYSTEM_DAEMON(self), NULL);
+    g_return_val_if_fail(routing_token != NULL, NULL);
+
+    GHashTableIter iter;
+    gpointer key = NULL;
+    gpointer value = NULL;
+    g_hash_table_iter_init(&iter, self->remote_clients);
+    while (g_hash_table_iter_next(&iter, &key, &value))
+    {
+        DrdRemoteClient *client = value;
+        if (client->routing != NULL &&
+            client->routing->routing_token != NULL &&
+            g_strcmp0(client->routing->routing_token, routing_token) == 0)
+        {
+            return client;
+        }
+    }
+
+    return NULL;
 }
 
 static void
@@ -129,6 +165,13 @@ drd_system_daemon_remove_client(DrdSystemDaemon *self, DrdRemoteClient *client)
         g_dbus_object_manager_server_unexport(self->bus.handover_manager, client->object_path);
     }
 
+    if (client->connection != NULL)
+    {
+        g_object_set_data(G_OBJECT(client->connection), "drd-system-client", NULL);
+        g_object_set_data(G_OBJECT(client->connection), "drd-system-keep-open", NULL);
+    }
+    g_clear_object(&client->session);
+
     g_hash_table_remove(self->remote_clients, client->object_path);
 }
 
@@ -149,6 +192,8 @@ drd_system_daemon_register_client(DrdSystemDaemon *self,
                                           DRD_REMOTE_DESKTOP_HANDOVERS_OBJECT_PATH,
                                           client->id);
 
+    client->session = NULL;
+    client->use_system_credentials = FALSE;
     client->handover_iface = drd_dbus_remote_desktop_rdp_handover_skeleton_new();
     g_signal_connect(client->handover_iface,
                      "handle-start-handover",
@@ -162,10 +207,6 @@ drd_system_daemon_register_client(DrdSystemDaemon *self,
                      "handle-get-system-credentials",
                      G_CALLBACK(drd_system_daemon_on_get_system_credentials),
                      client);
-    g_signal_connect(client->handover_iface,
-                     "take-client-ready",
-                     G_CALLBACK(drd_system_daemon_on_take_client_ready),
-                     client);
 
     client->object_skeleton = g_dbus_object_skeleton_new(client->object_path);
     g_dbus_object_skeleton_add_interface(client->object_skeleton,
@@ -176,6 +217,9 @@ drd_system_daemon_register_client(DrdSystemDaemon *self,
         g_dbus_object_manager_server_export(self->bus.handover_manager,
                                             client->object_skeleton);
     }
+
+    g_object_set_data(G_OBJECT(connection), "drd-system-client", client);
+    g_object_set_data(G_OBJECT(connection), "drd-system-keep-open", GINT_TO_POINTER(1));
 
     g_hash_table_replace(self->remote_clients, g_strdup(client->object_path), client);
     drd_system_daemon_queue_client(self, client);
@@ -208,6 +252,24 @@ drd_system_daemon_delegate(DrdRdpListener *listener,
         return TRUE;
     }
 
+    if (info->routing_token != NULL)
+    {
+        DrdRemoteClient *existing =
+            drd_system_daemon_find_client_by_token(self, info->routing_token);
+        if (existing != NULL && existing->session == NULL)
+        {
+            g_clear_object(&existing->connection);
+            existing->connection = g_object_ref(connection);
+            g_object_set_data(G_OBJECT(connection), "drd-system-client", existing);
+            g_object_set_data(G_OBJECT(connection), "drd-system-keep-open", GINT_TO_POINTER(1));
+
+            drd_dbus_remote_desktop_rdp_handover_emit_take_client_ready(
+                existing->handover_iface,
+                existing->use_system_credentials);
+            return TRUE;
+        }
+    }
+
     DrdRoutingTokenInfo *owned_info = info;
     info = NULL;
 
@@ -217,7 +279,38 @@ drd_system_daemon_delegate(DrdRdpListener *listener,
         g_object_unref(connection);
     }
 
-    return TRUE;
+    return FALSE;
+}
+
+static void
+drd_system_daemon_on_session_ready(DrdRdpListener *listener,
+                                   DrdRdpSession *session,
+                                   GSocketConnection *connection,
+                                   gpointer user_data)
+{
+    (void)listener;
+    DrdSystemDaemon *self = DRD_SYSTEM_DAEMON(user_data);
+    if (!DRD_IS_SYSTEM_DAEMON(self))
+    {
+        return;
+    }
+
+    DrdRemoteClient *client = g_object_get_data(G_OBJECT(connection), "drd-system-client");
+    if (client == NULL)
+    {
+        return;
+    }
+
+    if (client->session != NULL)
+    {
+        g_clear_object(&client->session);
+    }
+    client->session = g_object_ref(session);
+    if (client->routing != NULL)
+    {
+        client->use_system_credentials =
+            drd_rdp_session_client_is_mstsc(session) && !client->routing->requested_rdstls;
+    }
 }
 
 static gboolean
@@ -431,6 +524,9 @@ drd_system_daemon_start_listener(DrdSystemDaemon *self, GError **error)
         return FALSE;
     }
     drd_rdp_listener_set_delegate(self->listener, drd_system_daemon_delegate, self);
+    drd_rdp_listener_set_session_callback(self->listener,
+                                          drd_system_daemon_on_session_ready,
+                                          self);
 
     DRD_LOG_MESSAGE("System daemon listening on %s:%u",
               drd_config_get_bind_address(self->config),
@@ -472,6 +568,15 @@ drd_system_daemon_start_bus(DrdSystemDaemon *self, GError **error)
                      "handle-request-handover",
                      G_CALLBACK(drd_system_daemon_handle_request_handover),
                      self);
+
+    // TODO
+    g_bus_own_name (G_BUS_TYPE_SYSTEM,
+                   "org.deepin.RemoteDesktop",
+                   G_BUS_NAME_OWNER_FLAGS_NONE,
+                   NULL,
+                   NULL,
+                   NULL,
+                   self, NULL);
 
     if (!g_dbus_interface_skeleton_export(G_DBUS_INTERFACE_SKELETON(self->bus.dispatcher),
                                           self->bus.connection,
@@ -527,6 +632,7 @@ drd_system_daemon_on_start_handover(DrdDBusRemoteDesktopRdpHandover *interface,
     DrdSystemDaemon *self = client->daemon;
     g_autofree gchar *certificate = NULL;
     g_autofree gchar *key = NULL;
+    gboolean redirected_locally = FALSE;
 
     if (client->routing == NULL || client->routing->routing_token == NULL)
     {
@@ -544,14 +650,47 @@ drd_system_daemon_on_start_handover(DrdDBusRemoteDesktopRdpHandover *interface,
         return TRUE;
     }
 
+    if (client->session != NULL)
+    {
+        if (!drd_rdp_session_send_server_redirection(client->session,
+                                                     client->routing->routing_token,
+                                                     username,
+                                                     password,
+                                                     certificate))
+        {
+            g_dbus_method_invocation_return_error(invocation,
+                                                  G_IO_ERROR,
+                                                  G_IO_ERROR_FAILED,
+                                                  "Failed to redirect client session");
+            return TRUE;
+        }
+        drd_rdp_session_notify_error(client->session, DRD_RDP_SESSION_ERROR_SERVER_REDIRECTION);
+        g_clear_object(&client->session);
+        if (client->connection != NULL)
+        {
+            g_io_stream_close(G_IO_STREAM(client->connection), NULL, NULL);
+            g_clear_object(&client->connection);
+        }
+        redirected_locally = TRUE;
+    }
+    else
+    {
+        drd_dbus_remote_desktop_rdp_handover_emit_redirect_client(interface,
+                                                                  client->routing->routing_token,
+                                                                  username,
+                                                                  password);
+    }
+
     drd_dbus_remote_desktop_rdp_handover_complete_start_handover(interface,
                                                                  invocation,
                                                                  certificate,
                                                                  key);
-    drd_dbus_remote_desktop_rdp_handover_emit_redirect_client(interface,
-                                                              client->routing->routing_token,
-                                                              username,
-                                                              password);
+
+    if (redirected_locally)
+    {
+        client->assigned = TRUE;
+    }
+
     DRD_LOG_MESSAGE("StartHandover acknowledged for %s", client->object_path);
     return TRUE;
 }
@@ -591,6 +730,7 @@ drd_system_daemon_on_take_client(DrdDBusRemoteDesktopRdpHandover *interface,
                                                               handle);
 
     g_io_stream_close(G_IO_STREAM(client->connection), NULL, NULL);
+    g_clear_object(&client->session);
     drd_system_daemon_remove_client(self, client);
     DRD_LOG_MESSAGE("Socket handed over for client %s", client->object_path);
     return TRUE;
@@ -608,15 +748,4 @@ drd_system_daemon_on_get_system_credentials(DrdDBusRemoteDesktopRdpHandover *int
                                           G_IO_ERROR_NOT_SUPPORTED,
                                           "System credentials not available");
     return TRUE;
-}
-
-static void
-drd_system_daemon_on_take_client_ready(DrdDBusRemoteDesktopRdpHandover *interface,
-                                       gboolean use_system_credentials,
-                                       gpointer user_data)
-{
-    (void)interface;
-    (void)use_system_credentials;
-    DrdRemoteClient *client = user_data;
-    DRD_LOG_MESSAGE("TakeClientReady received for %s", client->object_path);
 }

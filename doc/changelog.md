@@ -1,5 +1,13 @@
 # 变更记录
 
+## 2025-11-21：system handover 路由 token socket 修复
+- **目的**：system 模式监听端口在 peek routing token 后立即出现 `g_socket_is_connected` 断言并拒绝连接，需要修复 socket 生命周期，确保 handover 注册阶段不会破坏 TCP 会话。
+- **范围**：`src/transport/drd_rdp_routing_token.c`、`doc/architecture.md`、`.codex/plan/system-socket-handshake.md`。
+- **主要改动**：
+  1. `drd_routing_token_peek()` 不再用 `g_autoptr(GSocket)` 自动 `unref`，改为借用 `GSocketConnection` 持有的 socket 指针并加注释说明原因，防止 system 守护 peek 完毕后销毁底层 `GSocket`。
+  2. 架构文档在 Routing Token 小节记录该约束，提醒开发者在 peek 阶段切勿释放 socket；计划文档同步建立 `system-socket-handshake`，跟踪排查与修复节点。
+- **影响**：system 模式在注册 handover 客户端时不再触发 GLib/GIO 断言，`drd_rdp_listener_incoming` 能继续交由 handover 流程处理连接，后续 `freerdp_peer_new()` 可以成功复制 fd。
+
 ## 2025-11-20：运行模式与 handover 框架对齐
 - **目的**：对齐 gnome-remote-desktop 的 system/handover 设计，为 system bus handover、routing token 重定向以及后续 LightDM 单点登录打好地基。
 - **范围**：`core/drd_config.*`、`core/drd_application.c`、`transport/drd_rdp_listener.*`、`transport/drd_rdp_routing_token.*`、`system/drd_system_daemon.*`、`system/drd_handover_daemon.*`、`doc/architecture.md`、`.codex/plan/system-handover.md`。
@@ -7,8 +15,8 @@
   1. `DrdRuntimeMode` 将 CLI/配置统一成 user/system/handover 三态；`--mode=`/`[service] runtime_mode` 线上实时切换，system/handover 模式下跳过原有采集/编码路径并托管给新的守护类。
   2. `DrdRdpListener` 支持 delegate + adopt API，system 守护可在 `incoming` 前窥探连接，自行注册 handover 对象；handover 守护可在接收 Unix FD 后复用原有监听器流程。
   3. 新增 `DrdRoutingTokenInfo`，在 TLS/TPKT 握手阶段读取 `Cookie: msts=` 与 `RDSTLS` 标志，为 DBus handover 对象提供 routing token。
-  4. system 守护导出 `org.deepin.RemoteDesktop.Rdp.Dispatcher/Handover` skeleton，handover 守护通过 Request/Start/TakeClient 请求 socket fd；start handover 仅返回 TLS 证书/密钥，不涉及 PAM/NLA 切换。
-  5. 架构文档增加运行模式、system/handover 数据流与 mermaid 序列图，强调 LightDM 尚未提供 SSO API，本轮仅实现 socket 调度与 DBus 框架。
+  4. system 守护导出 `org.deepin.RemoteDesktop.Rdp.Dispatcher/Handover` skeleton，handover 守护通过 Request/Start/TakeClient 请求 socket fd；StartHandover 会根据是否存在活跃 session 决定发送 Server Redirection PDU 还是向已存在的 handover 转发 `RedirectClient` 信号，重连成功后通过 `TakeClientReady/TakeClient` 将新的 socket FD 交给目标 handover。
+  5. 架构文档增加运行模式、system/handover 数据流与 mermaid 序列图，强调 LightDM 尚未提供 SSO API，本轮仅实现 socket 调度与 DBus 框架；`data/org.deepin.RemoteDesktop.conf` 引入 system bus policy，安装到 `/etc/dbus-1/system.d/`，只允许 `root` 用户占有 `org.deepin.RemoteDesktop*`，并开放 Dispatcher/Handover 接口给默认 context。
 - **影响**：system 模式可以注册/排队多个待 handover 的客户端，并通过 routing token 触发二次重定向；handover 模式以普通用户身份运行，拿到 fd 后立刻复用现有 RDP 会话初始化逻辑。PAM 单点登录暂未介入——需要等待 deepin 桌面（lightdm）暴露统一认证接口。
 
 ## 2025-11-19：监听层切换至 GSocketService
