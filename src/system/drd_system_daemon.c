@@ -62,6 +62,7 @@ static gboolean drd_system_daemon_on_take_client(DrdDBusRemoteDesktopRdpHandover
 static gboolean drd_system_daemon_on_get_system_credentials(DrdDBusRemoteDesktopRdpHandover *interface,
                                                            GDBusMethodInvocation *invocation,
                                                            gpointer user_data);
+static void drd_system_daemon_ensure_routing_token(DrdSystemDaemon *self, DrdRemoteClient *client);
 
 struct _DrdSystemDaemon
 {
@@ -125,6 +126,37 @@ drd_system_daemon_find_client_by_token(DrdSystemDaemon *self, const gchar *routi
     }
 
     return NULL;
+}
+
+static gchar *
+drd_system_daemon_generate_routing_token(DrdSystemDaemon *self)
+{
+    gchar *token = NULL;
+    do
+    {
+        guint32 value = g_random_int();
+        if (value == 0)
+        {
+            continue;
+        }
+        g_free(token);
+        token = g_strdup_printf("%u", value);
+    } while (token == NULL || drd_system_daemon_find_client_by_token(self, token) != NULL);
+    return token;
+}
+
+static void
+drd_system_daemon_ensure_routing_token(DrdSystemDaemon *self, DrdRemoteClient *client)
+{
+    if (client->routing == NULL)
+    {
+        client->routing = drd_routing_token_info_new();
+    }
+
+    if (client->routing->routing_token == NULL)
+    {
+        client->routing->routing_token = drd_system_daemon_generate_routing_token(self);
+    }
 }
 
 static void
@@ -221,6 +253,8 @@ drd_system_daemon_register_client(DrdSystemDaemon *self,
 
     g_object_set_data(G_OBJECT(connection), "drd-system-client", client);
     g_object_set_data(G_OBJECT(connection), "drd-system-keep-open", GINT_TO_POINTER(1));
+
+    drd_system_daemon_ensure_routing_token(self, client);
 
     g_hash_table_replace(self->remote_clients, g_strdup(client->object_path), client);
     DRD_LOG_MESSAGE("drd_system_daemon_queue_client run");
@@ -650,6 +684,7 @@ drd_system_daemon_on_start_handover(DrdDBusRemoteDesktopRdpHandover *interface,
 
     if (client->session != NULL)
     {
+        DRD_LOG_MESSAGE("client session not NULL");
         if (!has_routing_token)
         {
             g_dbus_method_invocation_return_error(invocation,
@@ -681,6 +716,7 @@ drd_system_daemon_on_start_handover(DrdDBusRemoteDesktopRdpHandover *interface,
     }
     else
     {
+        DRD_LOG_MESSAGE("client session is NULL");
         if (has_routing_token)
         {
             drd_dbus_remote_desktop_rdp_handover_emit_redirect_client(interface,

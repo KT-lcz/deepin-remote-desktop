@@ -1,4 +1,15 @@
 # 变更记录
+# 变更记录
+
+## 2025-11-20：routing token peek 对齐 upstream
+- **目的**：system 模式在 StartHandover 之后无法触发重定向，原因是 `drd_routing_token_peek()` 只读取 11 字节导致 `Cookie: msts=` 永远解析失败，routing token 始终为空，系统端跳过 `RedirectClient`。需要将解析流程与 upstream `peek_routing_token()` 保持一致，确保二次连接能拿到 token 并触发 `TakeClientReady`。
+- **范围**：`src/transport/drd_rdp_routing_token.c`、`src/system/drd_system_daemon.c`、`doc/architecture.md`、`.codex/plan/takeclientready.md`。
+- **主要改动**：
+  1. `drd_routing_token_peek()` 读取 TPKT header 后再一次性 peek 完整 payload，校验 x224 字段并用 `\r\n` 边界提取 `Cookie: msts=`，随后解析 `rdpNegReq` 中的 `requested_protocols`，完整复制 upstream 逻辑；若解析失败会返回 GIO 错误并保留 socket，避免 silent fallback。
+  2. 首次连接缺失 routing token 时，system daemon 会随机生成十进制 token 并写入 `DrdRemoteClient`，以便在 `StartHandover` 阶段通过 Server Redirection PDU 主动推送给客户端；重连后即可携带 `Cookie: msts=<token>` 触发 `TakeClientReady`。
+  3. routing token 解析失败时会清空之前缓存的 token，防止错误值污染后续 handover；同时在无 cookie 的初次连接上保持兼容，让 StartHandover 仍可下发 TLS 凭据。
+  4. 架构文档更新 Routing Token 章节，说明新的解析顺序、`RDSTLS` 捕获方式以及本地 token 生成策略；计划文档记录本次修复进度。
+- **影响**：Server Redirection PDU 再次可用——首次连接即便没有 `Cookie: msts=`，system daemon 也会生成 token 并在 StartHandover 下发；客户端依据该 token 重连后，system delegate 能匹配已注册的 handover 并发出 `TakeClientReady`，handover daemon 随即调用 `TakeClient()` 领取 socket，系统端和 handover 端连接闭环可恢复。
 
 ## 2025-11-21：system handover 路由 token socket 修复
 - **目的**：system 模式监听端口在 peek routing token 后立即出现 `g_socket_is_connected` 断言并拒绝连接，需要修复 socket 生命周期，确保 handover 注册阶段不会破坏 TCP 会话；同时修正 handover 队列在 delegate 返回 FALSE 时被提前清空的问题。
