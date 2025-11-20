@@ -135,6 +135,7 @@ drd_system_daemon_queue_client(DrdSystemDaemon *self, DrdRemoteClient *client)
 
     if (!client->assigned)
     {
+        DRD_LOG_MESSAGE("g_queue_push_tail client run");
         g_queue_push_tail(self->pending_clients, client);
     }
 }
@@ -222,6 +223,7 @@ drd_system_daemon_register_client(DrdSystemDaemon *self,
     g_object_set_data(G_OBJECT(connection), "drd-system-keep-open", GINT_TO_POINTER(1));
 
     g_hash_table_replace(self->remote_clients, g_strdup(client->object_path), client);
+    DRD_LOG_MESSAGE("drd_system_daemon_queue_client run");
     drd_system_daemon_queue_client(self, client);
 
     const gchar *token_preview = client->routing != NULL && client->routing->routing_token != NULL
@@ -245,7 +247,7 @@ drd_system_daemon_delegate(DrdRdpListener *listener,
 
     g_autoptr(DrdRoutingTokenInfo) info = drd_routing_token_info_new();
     g_object_ref(connection);
-
+    DRD_LOG_MESSAGE("drd_routing_token_peek run");
     if (!drd_routing_token_peek(connection, NULL, info, error))
     {
         g_object_unref(connection);
@@ -272,14 +274,16 @@ drd_system_daemon_delegate(DrdRdpListener *listener,
 
     DrdRoutingTokenInfo *owned_info = info;
     info = NULL;
-
+    DRD_LOG_MESSAGE("drd_system_daemon_register_client run");
     if (!drd_system_daemon_register_client(self, connection, owned_info))
     {
         drd_routing_token_info_free(owned_info);
         g_object_unref(connection);
+        return TRUE;
     }
 
-    return FALSE;
+    /* Allow the default listener to accept the connection so FreeRDP can build a session and send redirection. */
+    return TRUE;
 }
 
 static void
@@ -356,6 +360,7 @@ drd_system_daemon_handle_request_handover(DrdDBusRemoteDesktopRdpDispatcher *int
                                               G_IO_ERROR,
                                               G_IO_ERROR_NOT_FOUND,
                                               "No pending RDP handover requests");
+        DRD_LOG_MESSAGE("request handover error");
         return TRUE;
     }
 
@@ -633,15 +638,8 @@ drd_system_daemon_on_start_handover(DrdDBusRemoteDesktopRdpHandover *interface,
     g_autofree gchar *certificate = NULL;
     g_autofree gchar *key = NULL;
     gboolean redirected_locally = FALSE;
-
-    if (client->routing == NULL || client->routing->routing_token == NULL)
-    {
-        g_dbus_method_invocation_return_error(invocation,
-                                              G_IO_ERROR,
-                                              G_IO_ERROR_FAILED,
-                                              "Routing token unavailable for this client");
-        return TRUE;
-    }
+    const gboolean has_routing_token =
+        client->routing != NULL && client->routing->routing_token != NULL;
 
     g_autoptr(GError) io_error = NULL;
     if (!drd_system_daemon_load_tls_material(self, &certificate, &key, &io_error))
@@ -652,6 +650,14 @@ drd_system_daemon_on_start_handover(DrdDBusRemoteDesktopRdpHandover *interface,
 
     if (client->session != NULL)
     {
+        if (!has_routing_token)
+        {
+            g_dbus_method_invocation_return_error(invocation,
+                                                  G_IO_ERROR,
+                                                  G_IO_ERROR_FAILED,
+                                                  "Routing token unavailable for active session");
+            return TRUE;
+        }
         if (!drd_rdp_session_send_server_redirection(client->session,
                                                      client->routing->routing_token,
                                                      username,
@@ -675,10 +681,18 @@ drd_system_daemon_on_start_handover(DrdDBusRemoteDesktopRdpHandover *interface,
     }
     else
     {
-        drd_dbus_remote_desktop_rdp_handover_emit_redirect_client(interface,
-                                                                  client->routing->routing_token,
-                                                                  username,
-                                                                  password);
+        if (has_routing_token)
+        {
+            drd_dbus_remote_desktop_rdp_handover_emit_redirect_client(interface,
+                                                                      client->routing->routing_token,
+                                                                      username,
+                                                                      password);
+        }
+        else
+        {
+            DRD_LOG_WARNING("StartHandover for %s missing routing token; skipping RedirectClient signal",
+                            client->object_path);
+        }
     }
 
     drd_dbus_remote_desktop_rdp_handover_complete_start_handover(interface,

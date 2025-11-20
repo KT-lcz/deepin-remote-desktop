@@ -856,9 +856,10 @@ drd_rdp_listener_incoming(GSocketService    *service,
 {
     DrdRdpListener *self = DRD_RDP_LISTENER(service);
     g_autoptr(GError) accept_error = NULL;
-
+    DRD_LOG_MESSAGE("drd_rdp_listener_incoming");
     if (self->delegate_func != NULL)
     {
+        DRD_LOG_MESSAGE("delegate_func run");
         gboolean handled = self->delegate_func(self, connection, self->delegate_data, &accept_error);
         if (handled)
         {

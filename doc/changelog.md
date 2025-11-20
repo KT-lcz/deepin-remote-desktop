@@ -1,12 +1,15 @@
 # 变更记录
 
 ## 2025-11-21：system handover 路由 token socket 修复
-- **目的**：system 模式监听端口在 peek routing token 后立即出现 `g_socket_is_connected` 断言并拒绝连接，需要修复 socket 生命周期，确保 handover 注册阶段不会破坏 TCP 会话。
-- **范围**：`src/transport/drd_rdp_routing_token.c`、`doc/architecture.md`、`.codex/plan/system-socket-handshake.md`。
+- **目的**：system 模式监听端口在 peek routing token 后立即出现 `g_socket_is_connected` 断言并拒绝连接，需要修复 socket 生命周期，确保 handover 注册阶段不会破坏 TCP 会话；同时修正 handover 队列在 delegate 返回 FALSE 时被提前清空的问题。
+- **范围**：`src/transport/drd_rdp_routing_token.c`、`src/system/drd_system_daemon.c`、`doc/architecture.md`、`.codex/plan/system-socket-handshake.md`、`.codex/plan/system-handover-queue.md`。
 - **主要改动**：
   1. `drd_routing_token_peek()` 不再用 `g_autoptr(GSocket)` 自动 `unref`，改为借用 `GSocketConnection` 持有的 socket 指针并加注释说明原因，防止 system 守护 peek 完毕后销毁底层 `GSocket`。
-  2. 架构文档在 Routing Token 小节记录该约束，提醒开发者在 peek 阶段切勿释放 socket；计划文档同步建立 `system-socket-handshake`，跟踪排查与修复节点。
-- **影响**：system 模式在注册 handover 客户端时不再触发 GLib/GIO 断言，`drd_rdp_listener_incoming` 能继续交由 handover 流程处理连接，后续 `freerdp_peer_new()` 可以成功复制 fd。
+  2. `drd_system_daemon_delegate()` 在成功注册 handover client 后直接返回 TRUE，阻止默认监听器继续初始化 `freerdp_peer`，保护 pending 队列中的连接不被提前关闭；新增计划文档跟踪该问题。
+  3. `drd_system_daemon_on_start_handover()` 允许缺失 routing token 的客户端继续完成调用，只在存在既有 session 时才强制要求 token；缺口情况下跳过 `RedirectClient` 信号，提示 handover 直接 `TakeClient`。
+  4. `drd_system_daemon_delegate()` 在首次注册 handover 客户端后不再吞掉连接，而是让 `DrdRdpListener` 继续创建 `DrdRdpSession`，确保 system 端能够发送 Server Redirection PDU；仅在匹配已有 routing token 的二次连接时才拦截并立即触发 `TakeClientReady`。
+  5. 架构文档在 Routing Token 与运行模式章节记录 socket 生命周期、delegate 行为以及无 token 时的兼容策略，提醒开发者在 peek 与 handover 阶段避免释放底层 socket。
+- **影响**：system 模式在注册 handover 客户端时不再触发 GLib/GIO 断言，`drd_rdp_listener_incoming` 能继续交由 handover 流程处理连接，后续 `freerdp_peer_new()` 可以成功复制 fd；没有携带 routing token 的客户端仍能领取 TLS 证书并通过 `TakeClient` 抢占现有连接，只是无法收到服务器重定向信号。启用 Server Redirection 后，支持该功能的客户端会在收到 PDU 后主动重连，system 守护在二次连接上匹配 routing token 并发出 `TakeClientReady`。
 
 ## 2025-11-20：运行模式与 handover 框架对齐
 - **目的**：对齐 gnome-remote-desktop 的 system/handover 设计，为 system bus handover、routing token 重定向以及后续 LightDM 单点登录打好地基。
