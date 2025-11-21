@@ -25,4 +25,9 @@ gboolean drd_tls_credentials_apply(DrdTlsCredentials *self, rdpSettings *setting
 rdpCertificate *drd_tls_credentials_get_certificate(DrdTlsCredentials *self);
 rdpPrivateKey *drd_tls_credentials_get_private_key(DrdTlsCredentials *self);
 
+gboolean drd_tls_credentials_read_material(DrdTlsCredentials *self,
+                                           gchar **certificate,
+                                           gchar **key,
+                                           GError **error);
+
 G_END_DECLS

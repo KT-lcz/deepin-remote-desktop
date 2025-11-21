@@ -6,6 +6,7 @@
 #include "core/drd_dbus_constants.h"
 #include "drd-dbus-remote-desktop.h"
 #include "transport/drd_rdp_listener.h"
+#include "session/drd_rdp_session.h"
 #include "utils/drd_log.h"
 
 static gboolean drd_handover_daemon_bind_handover(DrdHandoverDaemon *self, GError **error);
@@ -21,6 +22,14 @@ static void drd_handover_daemon_on_take_client_ready(DrdDBusRemoteDesktopRdpHand
                                                      gpointer user_data);
 static void drd_handover_daemon_on_restart_handover(DrdDBusRemoteDesktopRdpHandover *interface,
                                                     gpointer user_data);
+static void drd_handover_daemon_on_session_ready(DrdRdpListener *listener,
+                                                 DrdRdpSession *session,
+                                                 GSocketConnection *connection,
+                                                 gpointer user_data);
+static gboolean drd_handover_daemon_redirect_active_client(DrdHandoverDaemon *self,
+                                                           const gchar *routing_token,
+                                                           const gchar *username,
+                                                           const gchar *password);
 
 struct _DrdHandoverDaemon
 {
@@ -35,6 +44,7 @@ struct _DrdHandoverDaemon
     gchar *handover_object_path;
     DrdRdpListener *listener;
     GSocketConnection *active_connection;
+    DrdRdpSession *active_session;
 };
 
 G_DEFINE_TYPE(DrdHandoverDaemon, drd_handover_daemon, G_TYPE_OBJECT)
@@ -49,6 +59,7 @@ drd_handover_daemon_dispose(GObject *object)
     g_clear_pointer(&self->handover_object_path, g_free);
     g_clear_object(&self->listener);
     g_clear_object(&self->active_connection);
+    g_clear_object(&self->active_session);
     g_clear_object(&self->tls_credentials);
     g_clear_object(&self->runtime);
     g_clear_object(&self->config);
@@ -70,6 +81,7 @@ drd_handover_daemon_init(DrdHandoverDaemon *self)
     self->handover_object_path = NULL;
     self->listener = NULL;
     self->active_connection = NULL;
+    self->active_session = NULL;
 }
 
 DrdHandoverDaemon *
@@ -125,7 +137,7 @@ drd_handover_daemon_bind_handover(DrdHandoverDaemon *self, GError **error)
                      "take-client-ready",
                      G_CALLBACK(drd_handover_daemon_on_take_client_ready),
                      self);
-    g_signal_connect(self->handover_proxy,
+    g_signal_connect(self->handover_proxy,// 什么时候发这个信号？// TODO
                      "restart-handover",
                      G_CALLBACK(drd_handover_daemon_on_restart_handover),
                      self);
@@ -213,12 +225,15 @@ drd_handover_daemon_on_redirect_client(DrdDBusRemoteDesktopRdpHandover *interfac
                                        gpointer user_data)
 {
     (void)interface;
-    (void)username;
-    (void)password;
     DrdHandoverDaemon *self = user_data;
     DRD_LOG_MESSAGE("RedirectClient received (token=%s) for %s",
                     routing_token != NULL ? routing_token : "unknown",
                     self->handover_object_path);
+
+    if (!drd_handover_daemon_redirect_active_client(self, routing_token, username, password))
+    {
+        DRD_LOG_WARNING("Failed to redirect current client for %s", self->handover_object_path);
+    }
 }
 
 static void
@@ -244,6 +259,88 @@ drd_handover_daemon_on_restart_handover(DrdDBusRemoteDesktopRdpHandover *interfa
     (void)interface;
     DrdHandoverDaemon *self = user_data;
     DRD_LOG_MESSAGE("RestartHandover received for %s", self->handover_object_path);
+}
+
+static void
+drd_handover_daemon_on_session_ready(DrdRdpListener *listener,
+                                     DrdRdpSession *session,
+                                     GSocketConnection *connection,
+                                     gpointer user_data)
+{
+    (void)listener;
+    DrdHandoverDaemon *self = DRD_HANDOVER_DAEMON(user_data);
+    if (!DRD_IS_HANDOVER_DAEMON(self))
+    {
+        return;
+    }
+
+    g_clear_object(&self->active_session);
+    if (DRD_IS_RDP_SESSION(session))
+    {
+        self->active_session = g_object_ref(session);
+    }
+
+    g_clear_object(&self->active_connection);
+    if (G_IS_SOCKET_CONNECTION(connection))
+    {
+        self->active_connection = g_object_ref(connection);
+    }
+}
+
+static gboolean
+drd_handover_daemon_redirect_active_client(DrdHandoverDaemon *self,
+                                           const gchar *routing_token,
+                                           const gchar *username,
+                                           const gchar *password)
+{
+    if (!DRD_IS_HANDOVER_DAEMON(self) || self->active_session == NULL)
+    {
+        return FALSE;
+    }
+
+    if (routing_token == NULL || username == NULL || password == NULL)
+    {
+        DRD_LOG_WARNING("RedirectClient missing routing data, ignoring");
+        return FALSE;
+    }
+
+    if (self->tls_credentials == NULL)
+    {
+        DRD_LOG_WARNING("TLS credentials unavailable, cannot send server redirection");
+        return FALSE;
+    }
+
+    g_autofree gchar *certificate = NULL;
+    g_autoptr(GError) tls_error = NULL;
+    if (!drd_tls_credentials_read_material(self->tls_credentials, &certificate, NULL, &tls_error))
+    {
+        if (tls_error != NULL)
+        {
+            DRD_LOG_WARNING("Failed to read TLS credential for redirect: %s", tls_error->message);
+        }
+        return FALSE;
+    }
+
+    if (!drd_rdp_session_send_server_redirection(self->active_session,
+                                                 routing_token,
+                                                 username,
+                                                 password,
+                                                 certificate))
+    {
+        DRD_LOG_WARNING("Active session failed to send server redirection");
+        return FALSE;
+    }
+
+    drd_rdp_session_notify_error(self->active_session, DRD_RDP_SESSION_ERROR_SERVER_REDIRECTION);
+    g_clear_object(&self->active_session);
+
+    if (self->active_connection != NULL)
+    {
+        g_io_stream_close(G_IO_STREAM(self->active_connection), NULL, NULL);
+        g_clear_object(&self->active_connection);
+    }
+
+    return TRUE;
 }
 
 void
@@ -308,6 +405,10 @@ drd_handover_daemon_start(DrdHandoverDaemon *self, GError **error)
                                 "Failed to create handover listener");
             return FALSE;
         }
+
+        drd_rdp_listener_set_session_callback(self->listener,
+                                              drd_handover_daemon_on_session_ready,
+                                              self);
     }
 
     if (!drd_handover_daemon_bind_handover(self, error))

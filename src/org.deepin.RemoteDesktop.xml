@@ -82,23 +82,6 @@
   </interface>
 
   <!--
-      org.deepin.RemoteDesktop.Vnc.Server:
-      @short_description: VNC server interface
-
-      This API is intended to report status about the VNC server.
-      No compatibility between versions is promised.
-  -->
-  <interface name="org.deepin.RemoteDesktop.Vnc.Server">
-
-    <property name="Enabled" type="b" access="read" />
-    <property name="Port" type="i" access="read" />
-    <property name="NegotiatePort" type="b" access="read" />
-    <property name="AuthMethod" type="s" access="read" />
-    <property name="ViewOnly" type="b" access="read" />
-
-  </interface>
-
-  <!--
       org.deepin.RemoteDesktop.Rdp.Dispatcher:
       @short_description: Dispatcher interface
 

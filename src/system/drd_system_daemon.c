@@ -24,6 +24,7 @@ typedef struct _DrdRemoteClient
     GDBusObjectSkeleton *object_skeleton;
     gboolean assigned;
     gboolean use_system_credentials;
+    guint handover_count;
 } DrdRemoteClient;
 
 typedef struct
@@ -227,6 +228,7 @@ drd_system_daemon_register_client(DrdSystemDaemon *self,
 
     client->session = NULL;
     client->use_system_credentials = FALSE;
+    client->handover_count = 0;
     client->handover_iface = drd_dbus_remote_desktop_rdp_handover_skeleton_new();
     g_signal_connect(client->handover_iface,
                      "handle-start-handover",
@@ -364,24 +366,13 @@ drd_system_daemon_load_tls_material(DrdSystemDaemon *self,
     g_return_val_if_fail(certificate != NULL, FALSE);
     g_return_val_if_fail(key != NULL, FALSE);
 
-    const gchar *cert_path = drd_tls_credentials_get_certificate_path(self->tls_credentials);
-    const gchar *key_path = drd_tls_credentials_get_private_key_path(self->tls_credentials);
-    if (cert_path == NULL || key_path == NULL)
+    if (self->tls_credentials == NULL)
     {
-        g_set_error_literal(error, G_IO_ERROR, G_IO_ERROR_FAILED, "TLS credential paths unavailable");
+        g_set_error_literal(error, G_IO_ERROR, G_IO_ERROR_FAILED, "TLS credentials unavailable");
         return FALSE;
     }
 
-    if (!g_file_get_contents(cert_path, certificate, NULL, error))
-    {
-        return FALSE;
-    }
-    if (!g_file_get_contents(key_path, key, NULL, error))
-    {
-        g_clear_pointer(certificate, g_free);
-        return FALSE;
-    }
-    return TRUE;
+    return drd_tls_credentials_read_material(self->tls_credentials, certificate, key, error);
 }
 
 static gboolean
@@ -776,8 +767,20 @@ drd_system_daemon_on_take_client(DrdDBusRemoteDesktopRdpHandover *interface,
                                                               handle);
 
     g_io_stream_close(G_IO_STREAM(client->connection), NULL, NULL);
+    g_clear_object(&client->connection);
     g_clear_object(&client->session);
-    drd_system_daemon_remove_client(self, client);
+
+    client->handover_count++;
+    if (client->handover_count >= 2)
+    {
+        drd_system_daemon_remove_client(self, client);
+    }
+    else
+    {
+        client->assigned = FALSE;
+        drd_system_daemon_queue_client(self, client);
+        DRD_LOG_MESSAGE("Client %s ready for next handover stage", client->object_path);
+    }
     DRD_LOG_MESSAGE("Socket handed over for client %s", client->object_path);
     return TRUE;
 }

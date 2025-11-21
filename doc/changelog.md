@@ -1,6 +1,16 @@
 # 变更记录
 # 变更记录
 
+## 2025-11-20：RedirectClient 与多阶段 handover
+- **目的**：第二个 handover 进程在 `RequestHandover` 阶段收到 “No pending RDP handover requests”，且 `RedirectClient` 信号仅打印日志，导致 system 未能驱动 greeter→用户会话的二次重定向。
+- **范围**：`src/system/drd_system_daemon.c`、`src/system/drd_handover_daemon.c`、`src/security/drd_tls_credentials.*`、`doc/architecture.md`、`.codex/plan/system-redirectclient.md`。
+- **主要改动**：
+  1. `DrdRemoteClient` 引入 `handover_count`，`drd_system_daemon_on_take_client()` 第一次 `TakeClient()` 后不再移除对象，而是重新排队等待下一段 handover；第二次领取后才真正 `remove_client()`，确保用户会话能复用同一 object path。
+  2. 新增 `drd_tls_credentials_read_material()`，system/handover 均复用该助手载入 PEM 证书/私钥，避免重复 I/O 逻辑。
+  3. handover 守护挂接 listener session 回调并缓存当前 `DrdRdpSession`，收到 `RedirectClient` 信号时调用 `drd_rdp_session_send_server_redirection()` + `drd_rdp_session_notify_error()`，同步关闭本地 socket，真正驱动客户端重连。
+  4. 文档新增多阶段 handover 队列与 RedirectClient 执行链说明，记录 system delegate → handover → client 的完整重定向路径。
+- **影响**：第二个 handover 进程能够顺利获取待接管对象，system 在 `StartHandover` 时会唤起现有 handover 发送 Server Redirection，客户端重连后由新 handover 领取 FD，远程登录流程符合 “System → Greeter → 用户” 的双阶段时序。
+
 ## 2025-11-20：handover 重连短路监听器
 - **目的**：修复 StartHandover 后客户端重连仍再次落到 system 进程、触发 `peer->CheckFileDescriptor()` 崩溃的问题，确保 handover delegate 抢占的连接不会被默认监听逻辑重复处理。
 - **范围**：`src/transport/drd_rdp_listener.c`、`doc/architecture.md`、`.codex/plan/handover-reconnect-crash.md`。
