@@ -273,7 +273,7 @@ drd_handover_daemon_on_session_ready(DrdRdpListener *listener,
     {
         return;
     }
-
+    DRD_LOG_MESSAGE("handover on session ready");
     g_clear_object(&self->active_session);
     if (DRD_IS_RDP_SESSION(session))
     {

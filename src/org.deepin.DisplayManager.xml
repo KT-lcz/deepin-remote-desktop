@@ -5,7 +5,7 @@
     <property name="Address" type="s" access="read"/>
   </interface>
   <interface name="org.deepin.DisplayManager.RemoteDisplayFactory">
-    <method name="CreateRemoteDisplay">
+    <method name="CreateRemoteGreeterDisplay">
       <arg name="remote_id" direction="in" type="y"/>
       <arg name="width" direction="in" type="u"/>
       <arg name="height" direction="in" type="u"/>

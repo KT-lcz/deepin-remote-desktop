@@ -8,6 +8,7 @@
 #include "transport/drd_rdp_routing_token.h"
 #include "session/drd_rdp_session.h"
 #include "drd-dbus-remote-desktop.h"
+#include "drd-dbus-lightdm.h"
 #include "utils/drd_log.h"
 
 typedef struct _DrdSystemDaemon DrdSystemDaemon;
@@ -63,7 +64,6 @@ static gboolean drd_system_daemon_on_take_client(DrdDBusRemoteDesktopRdpHandover
 static gboolean drd_system_daemon_on_get_system_credentials(DrdDBusRemoteDesktopRdpHandover *interface,
                                                            GDBusMethodInvocation *invocation,
                                                            gpointer user_data);
-static void drd_system_daemon_ensure_routing_token(DrdSystemDaemon *self, DrdRemoteClient *client);
 
 struct _DrdSystemDaemon
 {
@@ -78,6 +78,8 @@ struct _DrdSystemDaemon
     GHashTable *remote_clients;
     GQueue *pending_clients;
     guint client_counter;
+
+    DrdDBusLightdmRemoteDisplayFactory *remote_display_factory;
 };
 
 G_DEFINE_TYPE(DrdSystemDaemon, drd_system_daemon, G_TYPE_OBJECT)
@@ -146,19 +148,6 @@ drd_system_daemon_generate_routing_token(DrdSystemDaemon *self)
     return token;
 }
 
-static void
-drd_system_daemon_ensure_routing_token(DrdSystemDaemon *self, DrdRemoteClient *client)
-{
-    if (client->routing == NULL)
-    {
-        client->routing = drd_routing_token_info_new();
-    }
-
-    if (client->routing->routing_token == NULL)
-    {
-        client->routing->routing_token = drd_system_daemon_generate_routing_token(self);
-    }
-}
 
 static void
 drd_system_daemon_queue_client(DrdSystemDaemon *self, DrdRemoteClient *client)
@@ -219,7 +208,7 @@ drd_system_daemon_register_client(DrdSystemDaemon *self,
 
     DrdRemoteClient *client = g_new0(DrdRemoteClient, 1);
     client->daemon = self;
-    client->routing = info;
+    client->routing = g_object_ref(info);
     client->connection = g_object_ref(connection);
     client->id = g_strdup_printf("session%u", ++self->client_counter);
     client->object_path = g_strdup_printf("%s/%s",
@@ -256,8 +245,6 @@ drd_system_daemon_register_client(DrdSystemDaemon *self,
     g_object_set_data(G_OBJECT(connection), "drd-system-client", client);
     g_object_set_data(G_OBJECT(connection), "drd-system-keep-open", GINT_TO_POINTER(1));
 
-    drd_system_daemon_ensure_routing_token(self, client);
-
     g_hash_table_replace(self->remote_clients, g_strdup(client->object_path), client);
     DRD_LOG_MESSAGE("drd_system_daemon_queue_client run");
     drd_system_daemon_queue_client(self, client);
@@ -268,6 +255,24 @@ drd_system_daemon_register_client(DrdSystemDaemon *self,
     DRD_LOG_MESSAGE("Registered handover client %s (token=%s)",
                     client->object_path,
                     token_preview);
+    //
+    // // call lightdm create remote display
+    // if (!self->remote_display_factory)
+    //     self->remote_display_factory = drd_dbus_lightdm_remote_display_factory_proxy_new_for_bus_sync(G_BUS_TYPE_SYSTEM,
+    //         G_DBUS_PROXY_FLAGS_DO_NOT_AUTO_START,
+    //         DRD_LIGHTDM_REMOTE_FACTORY_BUS_NAME,
+    //         DRD_LIGHTDM_REMOTE_FACTORY_OBJECT_PATH,
+    //         NULL,
+    //         NULL);
+    // g_autofree gchar* session_path=NULL;
+    // g_autofree GError *error = NULL;
+    // if (!drd_dbus_lightdm_remote_display_factory_call_create_remote_greeter_display_sync(self->remote_display_factory,
+    //     g_random_int_range(0,128),1920,1080,"0.0.0.0",&session_path,NULL,&error)) {
+    //     DRD_LOG_WARNING("create remote display failed %s",error->message);
+    //     return FALSE;
+    // }
+    // DRD_LOG_MESSAGE("session_path=%s",session_path);
+
     return TRUE;
 }
 // return FALSE 时，需要继续处理这个connection;return TRUE时，代表已经处理过，需要让handover进程来处理；
@@ -292,7 +297,7 @@ drd_system_daemon_delegate(DrdRdpListener *listener,
     }
 
     if (info->routing_token != NULL)
-    {
+    {   // 第二次进
         DrdRemoteClient *existing =
             drd_system_daemon_find_client_by_token(self, info->routing_token);
         if (existing != NULL && existing->session == NULL)
@@ -310,12 +315,10 @@ drd_system_daemon_delegate(DrdRdpListener *listener,
         }
     }
 
-    DrdRoutingTokenInfo *owned_info = info;
-    info = NULL;
     DRD_LOG_MESSAGE("drd_system_daemon_register_client run");
-    if (!drd_system_daemon_register_client(self, connection, owned_info))
+    if (!drd_system_daemon_register_client(self, connection, info))
     {
-        drd_routing_token_info_free(owned_info);
+        drd_routing_token_info_free(info);
         g_object_unref(connection);
         return TRUE;
     }
@@ -666,7 +669,6 @@ drd_system_daemon_on_start_handover(DrdDBusRemoteDesktopRdpHandover *interface,
     g_autofree gchar *certificate = NULL;
     g_autofree gchar *key = NULL;
     gboolean redirected_locally = FALSE;
-    drd_system_daemon_ensure_routing_token(self, client);
     const gboolean has_routing_token =
         client->routing != NULL && client->routing->routing_token != NULL;
 
@@ -679,7 +681,8 @@ drd_system_daemon_on_start_handover(DrdDBusRemoteDesktopRdpHandover *interface,
 
     if (client->session != NULL)
     {
-        DRD_LOG_MESSAGE("client session not NULL");
+        // gchar *gen_routing_token=g_strdup (client->id + strlen (REMOTE_DESKTOP_CLIENT_OBJECT_PATH "/"));
+        DRD_LOG_MESSAGE("client session not NULL,routing token is %s",client->routing->routing_token);
         if (!drd_rdp_session_send_server_redirection(client->session,
                                                      client->routing->routing_token,
                                                      username,
@@ -773,6 +776,7 @@ drd_system_daemon_on_take_client(DrdDBusRemoteDesktopRdpHandover *interface,
     client->handover_count++;
     if (client->handover_count >= 2)
     {
+        DRD_LOG_MESSAGE("remove client %s", client->object_path);
         drd_system_daemon_remove_client(self, client);
     }
     else
@@ -781,7 +785,7 @@ drd_system_daemon_on_take_client(DrdDBusRemoteDesktopRdpHandover *interface,
         drd_system_daemon_queue_client(self, client);
         DRD_LOG_MESSAGE("Client %s ready for next handover stage", client->object_path);
     }
-    DRD_LOG_MESSAGE("Socket handed over for client %s", client->object_path);
+
     return TRUE;
 }
 

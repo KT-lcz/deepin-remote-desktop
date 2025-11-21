@@ -862,12 +862,13 @@ drd_rdp_listener_incoming(GSocketService    *service,
 
     if (self->system_mode && self->delegate_func != NULL)
     {
-        DRD_LOG_MESSAGE("delegate_func run");
         const gboolean handled =
             self->delegate_func(self, connection, self->delegate_data, &accept_error);
 
         if (handled)
         {
+            // 第二次进这里
+            DRD_LOG_MESSAGE("delegate_func run handled");
             if (accept_error != NULL)
             {
                 DRD_LOG_WARNING("Delegate reported error while handling connection: %s",
@@ -882,6 +883,7 @@ drd_rdp_listener_incoming(GSocketService    *service,
         }
     }
 
+    // 第一次进这里
     if (!drd_rdp_listener_handle_connection(self, g_object_ref(connection), &accept_error))
     {
         if (accept_error != NULL)

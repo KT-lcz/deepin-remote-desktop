@@ -253,8 +253,7 @@ drd_routing_token_peek(GSocketConnection *connection,
 
     int routing_token_length;
     /* Check routingToken */
-    info->routing_token =
-      get_routing_token_without_prefix ((char *) Stream_Pointer (stream),
+    info->routing_token = get_routing_token_without_prefix ((char *) Stream_Pointer (stream),
                                         Stream_GetRemainingLength (stream),
                                         &routing_token_length);
     if (!info->routing_token )
