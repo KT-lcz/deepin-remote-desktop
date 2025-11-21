@@ -50,8 +50,12 @@ dbus_gen_remote_desktop = gnome.gdbus_codegen('drd-dbus-remote-desktop',
                                               'org.deepin.RemoteDesktop.xml',
                                               interface_prefix: 'org.deepin.RemoteDesktop.',
                                               namespace: 'DrdDBusRemoteDesktop')
-
+dbus_gen_lightdm = gnome.gdbus_codegen('drd-dbus-lightdm',
+                                          'org.deepin.DisplayManager.xml',
+                                          interface_prefix: 'org.deepin.DisplayManager.',
+                                          namespace: 'DrdDBusLightdm')
 core_sources += dbus_gen_remote_desktop
+core_sources += dbus_gen_lightdm
 
 drd_media = static_library(
   'drd-media',

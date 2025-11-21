@@ -148,6 +148,55 @@ drd_tls_credentials_get_private_key(DrdTlsCredentials *self)
 }
 
 gboolean
+drd_tls_credentials_read_material(DrdTlsCredentials *self,
+                                  gchar **certificate,
+                                  gchar **key,
+                                  GError **error)
+{
+    g_return_val_if_fail(DRD_IS_TLS_CREDENTIALS(self), FALSE);
+
+    gchar *cert_data = NULL;
+    gchar *key_data = NULL;
+
+    if (certificate != NULL)
+    {
+        if (!g_file_get_contents(self->certificate_path, &cert_data, NULL, error))
+        {
+            return FALSE;
+        }
+    }
+
+    if (key != NULL)
+    {
+        if (!g_file_get_contents(self->private_key_path, &key_data, NULL, error))
+        {
+            g_clear_pointer(&cert_data, g_free);
+            return FALSE;
+        }
+    }
+
+    if (certificate != NULL)
+    {
+        *certificate = cert_data;
+    }
+    else
+    {
+        g_clear_pointer(&cert_data, g_free);
+    }
+
+    if (key != NULL)
+    {
+        *key = key_data;
+    }
+    else
+    {
+        g_clear_pointer(&key_data, g_free);
+    }
+
+    return TRUE;
+}
+
+gboolean
 drd_tls_credentials_apply(DrdTlsCredentials *self, rdpSettings *settings, GError **error)
 {
     g_return_val_if_fail(DRD_IS_TLS_CREDENTIALS(self), FALSE);
