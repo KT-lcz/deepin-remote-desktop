@@ -1,6 +1,16 @@
 # 变更记录
 # 变更记录
 
+## 2025-11-21：remote id / routing token 互逆
+- **目的**：system 模式仍将 handover 对象命名为 `session%u` 且依赖客户端携带的 cookie，初次连接无法生成 routing token，导致 StartHandover/RedirectClient 链路不稳定。需要对齐 upstream，通过 deterministic 映射让 remote_id 与 routing token 始终互逆。
+- **范围**：`src/system/drd_system_daemon.c`、`doc/architecture.md`、`.codex/plan/remote-id-routing-token.md`。
+- **主要改动**：
+  1. 新增 `get_id_from_routing_token()` / `get_routing_token_from_id()` 与 `drd_system_daemon_generate_remote_identity()`，通过 `/org/deepin/RemoteDesktop/Rdp/Handovers/<token>` 模式一次生成 remote_id 与十进制 token，并拒绝 0 或重复 token。
+  2. `drd_system_daemon_register_client()` 不再引用 peek 结构体，改为复制 `DrdRoutingTokenInfo`，若客户端未携带合法 token 即立即分配新 token；注册时始终把 token 写入 `DrdRemoteClient::routing->routing_token`，确保 StartHandover 可以发送 Server Redirection。
+  3. `drd_system_daemon_find_client_by_token()` 直接将 cookie 解析成整数后调用互逆函数做 O(1) 哈希查找，拒绝格式错误 token 并重新生成，避免遍历 `remote_clients`。
+  4. 文档新增 “Remote ID ↔ Routing Token 互逆” 小节，记录映射函数与新查找路径；计划文档补充任务背景与执行步骤。
+- **影响**：system 守护在初次连接时即可拿到合法 routing token，StartHandover/RedirectClient 必然携带 cookie；二次连接只需解析十进制 token 即可命中特定 handover，减少 O(n) 查找。非法/重复 cookie 会即时重置并写日志，避免 handover 状态错乱。
+
 ## 2025-11-20：RedirectClient 与多阶段 handover
 - **目的**：第二个 handover 进程在 `RequestHandover` 阶段收到 “No pending RDP handover requests”，且 `RedirectClient` 信号仅打印日志，导致 system 未能驱动 greeter→用户会话的二次重定向。
 - **范围**：`src/system/drd_system_daemon.c`、`src/system/drd_handover_daemon.c`、`src/security/drd_tls_credentials.*`、`doc/architecture.md`、`.codex/plan/system-redirectclient.md`。
