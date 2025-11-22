@@ -50,7 +50,10 @@ struct _DrdSystemDaemon
     GQueue *pending_clients;
 
     DrdDBusLightdmRemoteDisplayFactory *remote_display_factory;
+    GMainLoop *main_loop;
 };
+
+static void drd_system_daemon_request_shutdown(DrdSystemDaemon *self);
 
 static gchar *
 get_id_from_routing_token(guint32 routing_token)
@@ -537,6 +540,16 @@ drd_system_daemon_stop_listener(DrdSystemDaemon *self)
     }
 }
 
+static void
+drd_system_daemon_request_shutdown(DrdSystemDaemon *self)
+{
+    if (self->main_loop != NULL && g_main_loop_is_running(self->main_loop))
+    {
+        DRD_LOG_MESSAGE("System daemon shutting down main loop");
+        g_main_loop_quit(self->main_loop);
+    }
+}
+
 void
 drd_system_daemon_stop(DrdSystemDaemon *self)
 {
@@ -552,6 +565,8 @@ drd_system_daemon_stop(DrdSystemDaemon *self)
     {
         g_queue_clear(self->pending_clients);
     }
+
+    drd_system_daemon_request_shutdown(self);
 }
 
 static void
@@ -564,6 +579,7 @@ drd_system_daemon_dispose(GObject *object)
     g_clear_object(&self->tls_credentials);
     g_clear_object(&self->runtime);
     g_clear_object(&self->config);
+    g_clear_pointer(&self->main_loop, g_main_loop_unref);
     if (self->pending_clients != NULL)
     {
         g_queue_free(self->pending_clients);
@@ -597,6 +613,7 @@ drd_system_daemon_init(DrdSystemDaemon *self)
                                                  g_free,
                                                  (GDestroyNotify)drd_remote_client_free);
     self->pending_clients = g_queue_new();
+    self->main_loop = NULL;
 }
 
 DrdSystemDaemon *
@@ -615,6 +632,25 @@ drd_system_daemon_new(DrdConfig *config,
         self->tls_credentials = g_object_ref(tls_credentials);
     }
     return self;
+}
+
+gboolean
+drd_system_daemon_set_main_loop(DrdSystemDaemon *self, GMainLoop *loop)
+{
+    g_return_val_if_fail(DRD_IS_SYSTEM_DAEMON(self), FALSE);
+
+    if (self->main_loop != NULL)
+    {
+        g_main_loop_unref(self->main_loop);
+        self->main_loop = NULL;
+    }
+
+    if (loop != NULL)
+    {
+        self->main_loop = g_main_loop_ref(loop);
+    }
+
+    return TRUE;
 }
 
 static gboolean
@@ -798,7 +834,7 @@ drd_system_daemon_on_start_handover(DrdDBusRemoteDesktopRdpHandover *interface,
         g_clear_object(&client->session);
         if (client->connection != NULL)
         {
-            g_io_stream_close(G_IO_STREAM(client->connection), NULL, NULL);
+//            g_io_stream_close(G_IO_STREAM(client->connection), NULL, NULL);
             g_clear_object(&client->connection);
         }
         redirected_locally = TRUE;

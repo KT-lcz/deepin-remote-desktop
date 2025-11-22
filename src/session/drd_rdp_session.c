@@ -674,7 +674,8 @@ drd_rdp_session_disconnect(DrdRdpSession *self, const gchar *reason)
     drd_rdp_session_stop_event_thread(self);
     drd_rdp_session_disable_graphics_pipeline(self, NULL);
     g_clear_pointer(&self->local_session, drd_local_session_close);
-
+    g_atomic_int_set(&self->render_running,0);
+    g_atomic_int_set(&self->connection_alive,0);
     if (self->peer != NULL && self->peer->Disconnect != NULL)
     {
         self->peer->Disconnect(self->peer);

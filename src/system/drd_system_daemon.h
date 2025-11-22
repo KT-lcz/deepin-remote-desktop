@@ -1,5 +1,6 @@
 #pragma once
 
+#include <glib.h>
 #include <glib-object.h>
 
 #include "core/drd_config.h"
@@ -17,5 +18,6 @@ DrdSystemDaemon *drd_system_daemon_new(DrdConfig *config,
 
 gboolean drd_system_daemon_start(DrdSystemDaemon *self, GError **error);
 void drd_system_daemon_stop(DrdSystemDaemon *self);
+gboolean drd_system_daemon_set_main_loop(DrdSystemDaemon *self, GMainLoop *loop);
 
 G_END_DECLS

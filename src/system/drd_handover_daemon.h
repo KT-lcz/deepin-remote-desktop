@@ -1,5 +1,6 @@
 #pragma once
 
+#include <glib.h>
 #include <glib-object.h>
 
 #include "core/drd_config.h"
@@ -17,5 +18,6 @@ DrdHandoverDaemon *drd_handover_daemon_new(DrdConfig *config,
 
 gboolean drd_handover_daemon_start(DrdHandoverDaemon *self, GError **error);
 void drd_handover_daemon_stop(DrdHandoverDaemon *self);
+gboolean drd_handover_daemon_set_main_loop(DrdHandoverDaemon *self, GMainLoop *loop);
 
 G_END_DECLS

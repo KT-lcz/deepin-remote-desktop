@@ -11,6 +11,16 @@
   4. 文档新增 “Remote ID ↔ Routing Token 互逆” 小节，记录映射函数与新查找路径；计划文档补充任务背景与执行步骤。
 - **影响**：system 守护在初次连接时即可拿到合法 routing token，StartHandover/RedirectClient 必然携带 cookie；二次连接只需解析十进制 token 即可命中特定 handover，减少 O(n) 查找。非法/重复 cookie 会即时重置并写日志，避免 handover 状态错乱。
 
+## 2025-11-21：handover redirect 连接释放
+- **目的**：第一个 handover 在发送 Server Redirection 后手动调用 `g_io_stream_close()` 会偶发崩溃，因为 FreeRDP 会话已经在内部销毁 socket。需要对齐 upstream，彻底移除 handover 对 socket 的直接管理。
+- **范围**：`src/system/drd_handover_daemon.c`、`doc/architecture.md`、`.codex/plan/handover-redirect-close.md`。
+- **主要改动**：
+  1. handover 结构体移除 `active_connection` 字段，并新增主循环引用，RedirectClient 成功后会调用 `drd_handover_daemon_stop()` 与 `g_main_loop_quit()` 直接退出进程，全程依赖 `DrdRdpSession` 完成 socket 关闭。
+  2. system 守护同样增加 `GMainLoop` 引用与 `drd_system_daemon_set_main_loop()`，`drd_system_daemon_stop()` 在释放资源后会请求退出主循环，方便 system 模式在致命错误或人工触发时优雅停机。
+  3. 架构文档更新“连接关闭职责”说明，强调 handover 只触发 server redirection，socket 生命周期完全由会话控制且完成后立即交棒下一阶段；system 守护也具备同等的主循环退出能力。
+  3. 记录计划文件，跟踪此次修复。
+- **影响**：RedirectClient 流程不会再访问失效的 `GSocketConnection`，第二个 handover 启动时也不会触发崩溃，行为与 gnome-remote-desktop 一致。
+
 ## 2025-11-20：RedirectClient 与多阶段 handover
 - **目的**：第二个 handover 进程在 `RequestHandover` 阶段收到 “No pending RDP handover requests”，且 `RedirectClient` 信号仅打印日志，导致 system 未能驱动 greeter→用户会话的二次重定向。
 - **范围**：`src/system/drd_system_daemon.c`、`src/system/drd_handover_daemon.c`、`src/security/drd_tls_credentials.*`、`doc/architecture.md`、`.codex/plan/system-redirectclient.md`。

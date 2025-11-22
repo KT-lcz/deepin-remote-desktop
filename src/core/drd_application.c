@@ -337,7 +337,18 @@ drd_application_start_system_daemon(DrdApplication *self, GError **error)
         return FALSE;
     }
 
-    if (!drd_system_daemon_start(DRD_SYSTEM_DAEMON(self->mode_controller), error))
+    DrdSystemDaemon *system_daemon = DRD_SYSTEM_DAEMON(self->mode_controller);
+    if (!drd_system_daemon_set_main_loop(system_daemon, self->loop))
+    {
+        g_set_error_literal(error,
+                            G_IO_ERROR,
+                            G_IO_ERROR_FAILED,
+                            "Failed to attach main loop to system daemon");
+        g_clear_object(&self->mode_controller);
+        return FALSE;
+    }
+
+    if (!drd_system_daemon_start(system_daemon, error))
     {
         g_clear_object(&self->mode_controller);
         return FALSE;
@@ -368,7 +379,18 @@ drd_application_start_handover_daemon(DrdApplication *self, GError **error)
         return FALSE;
     }
 
-    if (!drd_handover_daemon_start(DRD_HANDOVER_DAEMON(self->mode_controller), error))
+    DrdHandoverDaemon *handover_daemon = DRD_HANDOVER_DAEMON(self->mode_controller);
+    if (!drd_handover_daemon_set_main_loop(handover_daemon, self->loop))
+    {
+        g_set_error_literal(error,
+                            G_IO_ERROR,
+                            G_IO_ERROR_FAILED,
+                            "Failed to attach main loop to handover daemon");
+        g_clear_object(&self->mode_controller);
+        return FALSE;
+    }
+
+    if (!drd_handover_daemon_start(handover_daemon, error))
     {
         g_clear_object(&self->mode_controller);
         return FALSE;

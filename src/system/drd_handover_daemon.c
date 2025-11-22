@@ -30,6 +30,7 @@ static gboolean drd_handover_daemon_redirect_active_client(DrdHandoverDaemon *se
                                                            const gchar *routing_token,
                                                            const gchar *username,
                                                            const gchar *password);
+static void drd_handover_daemon_request_shutdown(DrdHandoverDaemon *self);
 
 struct _DrdHandoverDaemon
 {
@@ -43,8 +44,8 @@ struct _DrdHandoverDaemon
     DrdDBusRemoteDesktopRdpHandover *handover_proxy;
     gchar *handover_object_path;
     DrdRdpListener *listener;
-    GSocketConnection *active_connection;
     DrdRdpSession *active_session;
+    GMainLoop *main_loop;
 };
 
 G_DEFINE_TYPE(DrdHandoverDaemon, drd_handover_daemon, G_TYPE_OBJECT)
@@ -58,11 +59,11 @@ drd_handover_daemon_dispose(GObject *object)
     g_clear_object(&self->handover_proxy);
     g_clear_pointer(&self->handover_object_path, g_free);
     g_clear_object(&self->listener);
-    g_clear_object(&self->active_connection);
     g_clear_object(&self->active_session);
     g_clear_object(&self->tls_credentials);
     g_clear_object(&self->runtime);
     g_clear_object(&self->config);
+    g_clear_pointer(&self->main_loop, g_main_loop_unref);
 
     G_OBJECT_CLASS(drd_handover_daemon_parent_class)->dispose(object);
 }
@@ -80,8 +81,8 @@ drd_handover_daemon_init(DrdHandoverDaemon *self)
     self->handover_proxy = NULL;
     self->handover_object_path = NULL;
     self->listener = NULL;
-    self->active_connection = NULL;
     self->active_session = NULL;
+    self->main_loop = NULL;
 }
 
 DrdHandoverDaemon *
@@ -233,7 +234,11 @@ drd_handover_daemon_on_redirect_client(DrdDBusRemoteDesktopRdpHandover *interfac
     if (!drd_handover_daemon_redirect_active_client(self, routing_token, username, password))
     {
         DRD_LOG_WARNING("Failed to redirect current client for %s", self->handover_object_path);
+        return;
     }
+
+    drd_handover_daemon_stop(self);
+    drd_handover_daemon_request_shutdown(self);
 }
 
 static void
@@ -268,6 +273,7 @@ drd_handover_daemon_on_session_ready(DrdRdpListener *listener,
                                      gpointer user_data)
 {
     (void)listener;
+    (void)connection;
     DrdHandoverDaemon *self = DRD_HANDOVER_DAEMON(user_data);
     if (!DRD_IS_HANDOVER_DAEMON(self))
     {
@@ -278,12 +284,6 @@ drd_handover_daemon_on_session_ready(DrdRdpListener *listener,
     if (DRD_IS_RDP_SESSION(session))
     {
         self->active_session = g_object_ref(session);
-    }
-
-    g_clear_object(&self->active_connection);
-    if (G_IS_SOCKET_CONNECTION(connection))
-    {
-        self->active_connection = g_object_ref(connection);
     }
 }
 
@@ -334,10 +334,36 @@ drd_handover_daemon_redirect_active_client(DrdHandoverDaemon *self,
     drd_rdp_session_notify_error(self->active_session, DRD_RDP_SESSION_ERROR_SERVER_REDIRECTION);
     g_clear_object(&self->active_session);
 
-    if (self->active_connection != NULL)
+    /* 会话线程会在 notify_error 之后关闭底层连接，此处无需再操作 socket。 */
+    return TRUE;
+}
+
+static void
+drd_handover_daemon_request_shutdown(DrdHandoverDaemon *self)
+{
+    g_return_if_fail(DRD_IS_HANDOVER_DAEMON(self));
+
+    if (self->main_loop != NULL && g_main_loop_is_running(self->main_loop))
     {
-        g_io_stream_close(G_IO_STREAM(self->active_connection), NULL, NULL);
-        g_clear_object(&self->active_connection);
+        DRD_LOG_MESSAGE("Handover daemon exiting after redirect");
+        g_main_loop_quit(self->main_loop);
+    }
+}
+
+gboolean
+drd_handover_daemon_set_main_loop(DrdHandoverDaemon *self, GMainLoop *loop)
+{
+    g_return_val_if_fail(DRD_IS_HANDOVER_DAEMON(self), FALSE);
+
+    if (self->main_loop != NULL)
+    {
+        g_main_loop_unref(self->main_loop);
+        self->main_loop = NULL;
+    }
+
+    if (loop != NULL)
+    {
+        self->main_loop = g_main_loop_ref(loop);
     }
 
     return TRUE;
@@ -346,6 +372,7 @@ drd_handover_daemon_redirect_active_client(DrdHandoverDaemon *self,
 void
 drd_handover_daemon_stop(DrdHandoverDaemon *self)
 {
+    DRD_LOG_MESSAGE("drd_handover_daemon_stop");
     g_return_if_fail(DRD_IS_HANDOVER_DAEMON(self));
 
     g_clear_object(&self->dispatcher_proxy);
