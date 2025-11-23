@@ -358,8 +358,8 @@ drd_system_daemon_register_client(DrdSystemDaemon *self,
     DRD_LOG_MESSAGE("Registered handover client %s (token=%s)",
                     client->id,
                     token_preview);
-    //
-    // // call lightdm create remote display
+
+    // call lightdm create remote display
     // if (!self->remote_display_factory)
     //     self->remote_display_factory = drd_dbus_lightdm_remote_display_factory_proxy_new_for_bus_sync(G_BUS_TYPE_SYSTEM,
     //         G_DBUS_PROXY_FLAGS_DO_NOT_AUTO_START,

@@ -30,4 +30,9 @@ gboolean drd_tls_credentials_read_material(DrdTlsCredentials *self,
                                            gchar **key,
                                            GError **error);
 
+gboolean drd_tls_credentials_reload_from_pem(DrdTlsCredentials *self,
+                                             const gchar *certificate_pem,
+                                             const gchar *key_pem,
+                                             GError **error);
+
 G_END_DECLS

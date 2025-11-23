@@ -1,6 +1,24 @@
 # 变更记录
 # 变更记录
 
+## 2025-11-23：handover TLS 继承与连接接管
+- **目的**：handover 进程在 system 阶段已有客户端时重启，会直接复用本地证书与 `GSocketConnection` 自动指针，导致 TLS 身份与 system 下发的证书不一致、`TakeClient` 返回后发生二次 `g_object_unref()`。需要沿用 dispatcher 返回的证书/私钥，并修复连接所有权。
+- **范围**：`src/security/drd_tls_credentials.*`、`src/system/drd_handover_daemon.c`、`doc/architecture.md`、`doc/changelog.md`、`.codex/plan/handover-nla-negotiation.md`。
+- **主要改动**：
+  1. `DrdTlsCredentials` 现在缓存最新的 PEM 证书/私钥，并新增 `drd_tls_credentials_reload_from_pem()`，允许 handover 直接在内存中替换 `rdpCertificate`/`rdpPrivateKey` 并向后续 `RedirectClient` 暴露一致的 TLS 材料。
+  2. `drd_handover_daemon_start_session()` 对 dispatcher 返回的证书/私钥执行 reload，确保 handover 与 system 呈现同一 TLS 身份；`drd_handover_daemon_take_client()` 使用 `g_steal_pointer()` 把 `GSocketConnection` 的引用转移给 `DrdRdpListener`，消除 `g_object_unref: G_IS_OBJECT` 告警。
+  3. 架构文档新增 TLS 继承与连接引用管理说明，并在变更记录与计划文件中标记本次修复。
+- **影响**：handover 进程无须直接读取证书文件即可继承 system 的 TLS 身份，Server Redirection 后的客户端不会再因为证书漂移或连接被提前释放而在 CredSSP 阶段失败。
+
+## 2025-11-22：system handover 日志写入崩溃修复
+- **目的**：system 进程在 handover 重连/RedirectClient 高频日志期间会在 `drd_log_writer()` → `g_printerr()` 内触发 `g_convert()`，进一步进入 `iconv_open()` 和 `malloc/tcache`，出现重入崩溃。需要让日志写入路径脱离 `g_printerr`，保证在 GLib 日志锁中只执行可重入的最小逻辑。
+- **范围**：`src/utils/drd_log.c`、`doc/architecture.md`、`.codex/plan/system-handover-log-writer.md`。
+- **主要改动**：
+  1. `drd_log_writer()` 改为使用 `GString` 拼接日志并直接 `write(STDERR_FILENO, …)` 输出，完全跳过 `g_printerr()`、locale 检测与 iconv 初始化；同时新增内部 `drd_log_write_stderr()`，以重试逻辑保证在 `EINTR` 下也不会截断输出。
+  2. 日志章节补充“日志链路与观测”说明（含 mermaid 流程图），记录 `DRD_LOG_*` 宏→GLib structured log→writer→stderr 的完整链路，并明确本次修复目的。
+  3. 更新 `.codex/plan/system-handover-log-writer.md`，标记堆栈分析、实现与文档同步节点，方便追踪后续反馈。
+- **影响**：system/handover 在连接峰值或崩溃路径中不会再触发 `iconv_open()`，日志输出线程安全且无需额外堆分配，消除了重连两次 handover 后 `malloc/tcache` 触发的异常退出。
+
 ## 2025-11-21：remote id / routing token 互逆
 - **目的**：system 模式仍将 handover 对象命名为 `session%u` 且依赖客户端携带的 cookie，初次连接无法生成 routing token，导致 StartHandover/RedirectClient 链路不稳定。需要对齐 upstream，通过 deterministic 映射让 remote_id 与 routing token 始终互逆。
 - **范围**：`src/system/drd_system_daemon.c`、`doc/architecture.md`、`.codex/plan/remote-id-routing-token.md`。

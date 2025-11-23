@@ -174,6 +174,27 @@ drd_handover_daemon_start_session(DrdHandoverDaemon *self, GError **error)
         return FALSE;
     }
 
+    if (self->tls_credentials == NULL)
+    {
+        g_set_error_literal(error,
+                            G_IO_ERROR,
+                            G_IO_ERROR_FAILED,
+                            "TLS credentials unavailable for handover listener");
+        return FALSE;
+    }
+    if (certificate == NULL || key == NULL)
+    {
+        g_set_error_literal(error,
+                            G_IO_ERROR,
+                            G_IO_ERROR_FAILED,
+                            "Dispatcher did not provide TLS material");
+        return FALSE;
+    }
+    if (!drd_tls_credentials_reload_from_pem(self->tls_credentials, certificate, key, error))
+    {
+        return FALSE;
+    }
+
     DRD_LOG_MESSAGE("StartHandover negotiated TLS (%zu bytes cert)",
                     certificate != NULL ? strlen(certificate) : 0);
     return TRUE;
@@ -209,7 +230,9 @@ drd_handover_daemon_take_client(DrdHandoverDaemon *self, GError **error)
 
     g_autoptr(GSocketConnection) connection =
         g_socket_connection_factory_create_connection(socket);
-    if (!drd_rdp_listener_adopt_connection(self->listener, connection, error))
+    if (!drd_rdp_listener_adopt_connection(self->listener,
+                                           g_steal_pointer(&connection),
+                                           error))
     {
         return FALSE;
     }

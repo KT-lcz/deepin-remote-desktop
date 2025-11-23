@@ -12,6 +12,19 @@
 - **配置/安全**：INI/CLI 合并，TLS 凭据集中加载，NLA SAM 临时文件确保 CredSSP，拒绝回退纯 TLS/RDP。
 - **可观测性**：关键路径日志保持英语，文档/计划与源码同步更新，便于跟踪 renderer、Rdpgfx、会话生命周期。
 
+### 日志链路与观测
+- `drd_log_init()` 统一安装 `g_log_set_writer_func()`，所有 `DRD_LOG_*` 宏会通过 `g_log_structured_standard()` 注入 domain/level/file/line/func 元信息，保证 system/handover 场景都能拿到同一格式。
+- 自定义 `drd_log_writer()` 仅在栈上拼装 `domain-level [file:line func]: message`，随后把 `GString` 的 buffer 直接写入 `STDERR_FILENO`。这样可以绕开 `g_printerr()` 内部的 `g_convert()/iconv_open()`，避免在 GLib 日志锁内重复初始化 locale 造成 `malloc/tcache` 重入崩溃。
+- 该 writer 只依赖 `write()`，能够在 handover/system 等多线程环境下稳定输出日志，并且在崩溃路径中仍可安全调用。
+
+```mermaid
+flowchart LR
+    Macro["DRD_LOG_* 宏"] --> GLib["g_log_structured_standard()"]
+    GLib --> Writer["drd_log_writer()"]
+    Writer --> Format["GString 拼接"]
+    Format --> Sink["write(STDERR_FILENO)"]
+```
+
 ## 模块分层
 
 ### 1. 核心层
@@ -62,11 +75,13 @@ sequenceDiagram
   1. `user`：默认模式，单进程负责采集/编码/监听，直接通过 `DrdRdpListener` 服务客户端。
   2. `system`：仅在 root/systemd 下使用，`DrdApplication` 跳过采集/编码，实例化 `DrdSystemDaemon`。system daemon 在 GLib `incoming` 勾子中先透过 `DrdRoutingTokenInfo` 窥探 `Cookie: msts=<routing-token>`，把 socket + token 包装成 `DrdRemoteClient`，注册成 `org.deepin.RemoteDesktop.Rdp.Handover` skeleton 并挂到 `/org/deepin/RemoteDesktop/Rdp/Handovers/<session>`；同时在 system bus 导出 `Rdp.Dispatcher`，供 handover 进程通过 `RequestHandover` 领取待处理对象。
   3. `handover`：登陆会话进程，新建 `DrdHandoverDaemon`，先向 dispatcher 请求 handover 对象，再调用 `StartHandover` 获取一次性用户名/密码和 system 端 TLS 证书，监听 `RedirectClient`/`TakeClientReady`/`RestartHandover` 信号，并通过 `TakeClient` 拿到已经握手的 fd，交由本地 `DrdRdpListener` 继续进行 CredSSP / 会话激活。当前实现专注于 socket 与 DBus 框架，PAM 单点登录仍保持原状——lightdm/desktop 侧 SSO 能力就绪后，再在 `GetSystemCredentials`/handover proxy 里注入真实凭据。
+- **TLS 继承与缓存**：handover 端 `StartHandover` 返回的 PEM 证书/私钥会立即喂给 `DrdTlsCredentials` 的内存 reload 逻辑，后者同时缓存 PEM 数据，`drd_rdp_session_send_server_redirection()` 在递交下一段 handover 时读取到的始终是当前会话使用的同一份证书，确保客户端不会在 system→handover 切换时收到不同的 TLS 身份。
 - **system delegate 行为**：只有当客户端带着既有 routing token（二次连接）时，`drd_system_daemon_delegate()` 才会拦截 `incoming`，替换 `DrdRemoteClient::connection` 并立即通过 `TakeClientReady` 通知 handover；对于首次接入的客户端，delegate 注册 handover 对象后会让默认监听器继续创建 `freerdp_peer`，以便 system 端持有 `DrdRdpSession` 并在 `StartHandover` 阶段发送 Server Redirection PDU。
 - **监听短路**：`drd_rdp_listener_incoming()` 一旦检测到 delegate 已处理连接（或 delegate 自身返回错误）就会提前返回，确保 handover 重连的 socket 不会被默认监听逻辑再次创建 `freerdp_peer`，避免在 `peer->CheckFileDescriptor()` 等路径访问失效会话。
 - **多阶段 handover 队列**：`drd_system_daemon_on_take_client()` 在第一次 `TakeClient()` 完成后不会移除 `DrdRemoteClient`，而是重置 `assigned` 并重新压入 pending 队列；待第二段 handover 领取对象后再次 `TakeClient()` 才真正移除，确保用户会话能够复用相同 object path 并触发后续 `RedirectClient`。
 - **RedirectClient 执行链**：当 system 端检测到 `StartHandover` 发起方已经不是自身（`client->session == NULL`）时，会通过 handover DBus 对象广播 `RedirectClient(token, username, password)`；仍持有活跃会话的 handover 守护在 `drd_handover_daemon_on_redirect_client()` 中调用 `drd_rdp_session_send_server_redirection()` 并断开本地连接，客户端随即携带 routing token 重连 system，system delegate 再次发出 `TakeClientReady` 供下一段 handover 领取 FD。
 - **连接关闭职责**：向客户端发送 Server Redirection PDU 后，由 `DrdRdpSession` 内部驱动连接关闭；handover 进程不再保存或直接操作 `GSocketConnection`，避免手动 `g_io_stream_close()` 与 FreeRDP 生命周期冲突。RedirectClient 成功后 handover 会立即调用 `drd_handover_daemon_stop()` 并请求主循环退出，以便 system/handover 链路在下一阶段交由新的进程接力。system 守护也会缓存 `GMainLoop` 引用，`drd_system_daemon_stop()` 发生时会自动 `g_main_loop_quit()`，确保以 system 模式运行的进程能够在致命错误或外部触发下优雅退出。
+- **连接引用管理**：`drd_handover_daemon_take_client()` 在把 `GSocketConnection` 交给 `DrdRdpListener` 前会窃取引用，listener 在 `drd_rdp_listener_handle_connection()` 里负责最终 `g_object_unref()`，防止自动变量离开作用域时重复释放，解决早前 `g_object_unref: assertion 'G_IS_OBJECT (object)' failed` 的告警及潜在 use-after-free。
 - **Routing Token 提供者**：`transport/drd_rdp_routing_token.[ch]` 借助 `MSG_PEEK` + `wStream` 解包 TPKT → x224 → `Cookie: msts=` → `rdpNegReq`，提取服务端下发的 routing token 并同步记录客户端是否请求 `RDSTLS`。实现完全对齐 upstream `peek_routing_token()`：先读取 TPKT 长度再一次性 peek 全量 payload，校验 x224 字段（`length_indicator/cr_cdt/dst_ref/class_opt`），找到 `\r\n` 终结的 cookie 行并跳过，再解析 `rdpNegReq` 区块，保证在二次连接时准确还原 token 与 `RDSTLS` 标志。对于首次接入且未携带 `Cookie: msts=` 的客户端，system 守护会随机生成一个十进制 routing token 并缓存到 `DrdRemoteClient`，随后在 `StartHandover` 中将该 token 注入 Server Redirection PDU——客户端重连后就会带上 `msts`，`drd_routing_token_peek()` 得以匹配并触发 `TakeClientReady`。真实的“routing token 重定向”即是后续依据该 token 向原客户端发送 Server Redirection PDU，使客户端按 Windows RDP 协议自动跳转到目标 handover 进程。为了避免在 peek 阶段意外销毁底层 `GSocket`（导致后续 `freerdp_peer_new()` 无法复制 fd），`drd_routing_token_peek()` 只借用 `GSocketConnection` 的 socket 指针，不再使用 `g_autoptr(GSocket)` 自动 `unref`；若客户端完全缺失 routing token 且已生成本地 token，StartHandover 仍会正常触发 RedirectClient/TakeClient；只有在 handover 未开启重定向链路时，才需要直接调用 `TakeClient` 领走现有 socket。
 - **Remote ID ↔ Routing Token 互逆**：`src/system/drd_system_daemon.c` 内新增 `get_id_from_routing_token()` 与 `get_routing_token_from_id()`，由 `drd_system_daemon_generate_remote_identity()` 统一生成 `/org/deepin/RemoteDesktop/Rdp/Handovers/<token>` 形式的 remote_id 以及十进制 routing token。`remote_clients` 哈希表直接使用 remote_id 作为键，`drd_system_daemon_find_client_by_token()` 只需解析 `Cookie: msts=` 并调用互逆函数即可 O(1) 命中客户端，避免遍历。初次连接必定拿到生成的 token，StartHandover/RedirectClient 始终拥有可用的 cookie，而二次连接若提供非法 token 会被即时拒绝并重新分配合法 token，保证 handover 链路稳定。
 - **运行时序**：
