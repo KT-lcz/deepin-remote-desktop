@@ -1,7 +1,7 @@
 #include "utils/drd_log.h"
 
-#include <stdio.h>
-#include <string.h>
+#include <errno.h>
+#include <unistd.h>
 
 static const gchar *
 drd_log_level_to_string(GLogLevelFlags level)
@@ -38,6 +38,25 @@ drd_log_lookup_field(const GLogField *fields, gsize n_fields, const gchar *name)
     return NULL;
 }
 
+// static void
+// drd_log_write_stderr(const gchar *buffer, gsize length)
+// {
+//     while (length > 0)
+//     {
+//         const ssize_t written = write(STDERR_FILENO, buffer, length);
+//         if (written < 0)
+//         {
+//             if (errno == EINTR)
+//             {
+//                 continue;
+//             }
+//             break;
+//         }
+//         buffer += written;
+//         length -= written;
+//     }
+// }
+
 static GLogWriterOutput
 drd_log_writer(GLogLevelFlags log_level, const GLogField *fields, gsize n_fields, gpointer user_data G_GNUC_UNUSED)
 {
@@ -70,7 +89,13 @@ drd_log_writer(GLogLevelFlags log_level, const GLogField *fields, gsize n_fields
         domain = "drd";
     }
 
+    // GString *formatted = g_string_new(NULL);
+    // g_string_append_printf(
+    //     formatted, "%s-%s [%s:%s %s]: %s\n", domain, level_str, file, line, func, message);
+    // drd_log_write_stderr(formatted->str, formatted->len);
+    // g_string_free(formatted, TRUE);
     g_printerr("%s-%s [%s:%s %s]: %s\n", domain, level_str, file, line, func, message);
+
     return G_LOG_WRITER_HANDLED;
 }
 

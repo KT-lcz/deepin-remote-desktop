@@ -412,6 +412,7 @@ drd_peer_activate(freerdp_peer *client)
 static void
 drd_peer_disconnected(freerdp_peer *client)
 {
+    DRD_LOG_MESSAGE("%s peer disconnected",client->hostname );
     DrdRdpPeerContext *ctx = (DrdRdpPeerContext *)client->context;
     if (ctx != NULL && ctx->session != NULL)
     {
@@ -858,7 +859,7 @@ drd_rdp_listener_incoming(GSocketService    *service,
 {
     DrdRdpListener *self = DRD_RDP_LISTENER(service);
     g_autoptr(GError) accept_error = NULL;
-    DRD_LOG_MESSAGE("drd_rdp_listener_incoming");
+    // DRD_LOG_MESSAGE("drd_rdp_listener_incoming");
 
     if (self->system_mode && self->delegate_func != NULL)
     {

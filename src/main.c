@@ -37,7 +37,7 @@ main(int argc, char **argv)
     int status = drd_application_run(app, argc, argv, &error);
     if (status != 0 && error != NULL)
     {
-        g_printerr("运行失败：%s\n", error->message);
+        g_printerr("run error：%s\n", error->message);
     }
 
     return status;

@@ -12,6 +12,8 @@ struct _DrdTlsCredentials
 
     gchar *certificate_path;
     gchar *private_key_path;
+    gchar *certificate_pem;
+    gchar *private_key_pem;
     rdpCertificate *certificate;
     rdpPrivateKey *private_key;
 };
@@ -37,6 +39,8 @@ drd_tls_credentials_dispose(GObject *object)
 
     g_clear_pointer(&self->certificate_path, g_free);
     g_clear_pointer(&self->private_key_path, g_free);
+    g_clear_pointer(&self->certificate_pem, g_free);
+    g_clear_pointer(&self->private_key_pem, g_free);
 
     G_OBJECT_CLASS(drd_tls_credentials_parent_class)->dispose(object);
 }
@@ -53,8 +57,58 @@ drd_tls_credentials_init(DrdTlsCredentials *self)
 {
     self->certificate_path = NULL;
     self->private_key_path = NULL;
+    self->certificate_pem = NULL;
+    self->private_key_pem = NULL;
     self->certificate = NULL;
     self->private_key = NULL;
+}
+
+static gboolean
+drd_tls_credentials_apply_pem(DrdTlsCredentials *self,
+                               const gchar *certificate_pem,
+                               const gchar *private_key_pem,
+                               GError **error)
+{
+    g_return_val_if_fail(certificate_pem != NULL, FALSE);
+    g_return_val_if_fail(private_key_pem != NULL, FALSE);
+
+    rdpCertificate *certificate = freerdp_certificate_new_from_pem(certificate_pem);
+    if (certificate == NULL)
+    {
+        g_set_error_literal(error,
+                            G_IO_ERROR,
+                            G_IO_ERROR_FAILED,
+                            "Failed to parse TLS certificate material");
+        return FALSE;
+    }
+
+    rdpPrivateKey *key = freerdp_key_new_from_pem(private_key_pem);
+    if (key == NULL)
+    {
+        freerdp_certificate_free(certificate);
+        g_set_error_literal(error,
+                            G_IO_ERROR,
+                            G_IO_ERROR_FAILED,
+                            "Failed to parse TLS private key material");
+        return FALSE;
+    }
+
+    if (self->certificate != NULL)
+    {
+        freerdp_certificate_free(self->certificate);
+    }
+    if (self->private_key != NULL)
+    {
+        freerdp_key_free(self->private_key);
+    }
+    g_free(self->certificate_pem);
+    g_free(self->private_key_pem);
+
+    self->certificate = certificate;
+    self->private_key = key;
+    self->certificate_pem = g_strdup(certificate_pem);
+    self->private_key_pem = g_strdup(private_key_pem);
+    return TRUE;
 }
 
 /* 读取 PEM 证书与私钥，失败时通过 GError 传递细节，方便上层统一记录。 */
@@ -62,38 +116,20 @@ static gboolean
 drd_tls_credentials_load(DrdTlsCredentials *self, const gchar *certificate_path, const gchar *private_key_path, GError **error)
 {
     g_autofree gchar *cert_data = NULL;
-    gsize cert_len = 0;
-    if (!g_file_get_contents(certificate_path, &cert_data, &cert_len, error))
+    if (!g_file_get_contents(certificate_path, &cert_data, NULL, error))
     {
-        return FALSE;
-    }
-
-    self->certificate = freerdp_certificate_new_from_pem(cert_data);
-    if (self->certificate == NULL)
-    {
-        g_set_error(error,
-                    G_IO_ERROR,
-                    G_IO_ERROR_FAILED,
-                    "Failed to parse certificate from '%s'",
-                    certificate_path);
         return FALSE;
     }
 
     g_autofree gchar *key_data = NULL;
-    gsize key_len = 0;
-    if (!g_file_get_contents(private_key_path, &key_data, &key_len, error))
+    if (!g_file_get_contents(private_key_path, &key_data, NULL, error))
     {
         return FALSE;
     }
 
-    self->private_key = freerdp_key_new_from_pem(key_data);
-    if (self->private_key == NULL)
+    if (!drd_tls_credentials_apply_pem(self, cert_data, key_data, error))
     {
-        g_set_error(error,
-                    G_IO_ERROR,
-                    G_IO_ERROR_FAILED,
-                    "Failed to parse private key from '%s'",
-                    private_key_path);
+        g_prefix_error(error, "Failed to load TLS material from files: ");
         return FALSE;
     }
 
@@ -155,42 +191,51 @@ drd_tls_credentials_read_material(DrdTlsCredentials *self,
 {
     g_return_val_if_fail(DRD_IS_TLS_CREDENTIALS(self), FALSE);
 
-    gchar *cert_data = NULL;
-    gchar *key_data = NULL;
-
     if (certificate != NULL)
     {
-        if (!g_file_get_contents(self->certificate_path, &cert_data, NULL, error))
+        if (self->certificate_pem == NULL)
         {
+            g_set_error_literal(error,
+                                G_IO_ERROR,
+                                G_IO_ERROR_FAILED,
+                                "TLS certificate material unavailable");
             return FALSE;
         }
+        *certificate = g_strdup(self->certificate_pem);
     }
 
     if (key != NULL)
     {
-        if (!g_file_get_contents(self->private_key_path, &key_data, NULL, error))
+        if (self->private_key_pem == NULL)
         {
-            g_clear_pointer(&cert_data, g_free);
+            g_set_error_literal(error,
+                                G_IO_ERROR,
+                                G_IO_ERROR_FAILED,
+                                "TLS private key material unavailable");
+            if (certificate != NULL)
+            {
+                g_free(*certificate);
+                *certificate = NULL;
+            }
             return FALSE;
         }
+        *key = g_strdup(self->private_key_pem);
     }
 
-    if (certificate != NULL)
-    {
-        *certificate = cert_data;
-    }
-    else
-    {
-        g_clear_pointer(&cert_data, g_free);
-    }
+    return TRUE;
+}
 
-    if (key != NULL)
+gboolean
+drd_tls_credentials_reload_from_pem(DrdTlsCredentials *self,
+                                    const gchar *certificate_pem,
+                                    const gchar *key_pem,
+                                    GError **error)
+{
+    g_return_val_if_fail(DRD_IS_TLS_CREDENTIALS(self), FALSE);
+
+    if (!drd_tls_credentials_apply_pem(self, certificate_pem, key_pem, error))
     {
-        *key = key_data;
-    }
-    else
-    {
-        g_clear_pointer(&key_data, g_free);
+        return FALSE;
     }
 
     return TRUE;
