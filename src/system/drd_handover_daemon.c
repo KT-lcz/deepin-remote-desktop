@@ -2,6 +2,7 @@
 
 #include <gio/gio.h>
 #include <gio/gunixfdlist.h>
+#include <string.h>
 
 #include "core/drd_dbus_constants.h"
 #include "drd-dbus-remote-desktop.h"
@@ -31,6 +32,8 @@ static gboolean drd_handover_daemon_redirect_active_client(DrdHandoverDaemon *se
                                                            const gchar *username,
                                                            const gchar *password);
 static void drd_handover_daemon_request_shutdown(DrdHandoverDaemon *self);
+static gboolean drd_handover_daemon_refresh_nla_credentials(DrdHandoverDaemon *self, GError **error);
+static void drd_handover_daemon_clear_nla_credentials(DrdHandoverDaemon *self);
 
 struct _DrdHandoverDaemon
 {
@@ -46,6 +49,9 @@ struct _DrdHandoverDaemon
     DrdRdpListener *listener;
     DrdRdpSession *active_session;
     GMainLoop *main_loop;
+
+    gchar *nla_username;
+    gchar *nla_password;
 };
 
 G_DEFINE_TYPE(DrdHandoverDaemon, drd_handover_daemon, G_TYPE_OBJECT)
@@ -60,6 +66,7 @@ drd_handover_daemon_dispose(GObject *object)
     g_clear_pointer(&self->handover_object_path, g_free);
     g_clear_object(&self->listener);
     g_clear_object(&self->active_session);
+    drd_handover_daemon_clear_nla_credentials(self);
     g_clear_object(&self->tls_credentials);
     g_clear_object(&self->runtime);
     g_clear_object(&self->config);
@@ -83,6 +90,9 @@ drd_handover_daemon_init(DrdHandoverDaemon *self)
     self->listener = NULL;
     self->active_session = NULL;
     self->main_loop = NULL;
+
+    self->nla_username = NULL;
+    self->nla_password = NULL;
 }
 
 DrdHandoverDaemon *
@@ -101,6 +111,74 @@ drd_handover_daemon_new(DrdConfig *config,
         self->tls_credentials = g_object_ref(tls_credentials);
     }
     return self;
+}
+
+static gchar *
+drd_handover_daemon_generate_token(const gchar *prefix, gsize random_bytes)
+{
+    g_autofree guint8 *bytes = g_new(guint8, random_bytes);
+    if (bytes == NULL)
+    {
+        return NULL;
+    }
+
+    for (gsize i = 0; i < random_bytes; i++)
+    {
+        bytes[i] = (guint8)g_random_int_range(0, 256);
+    }
+
+    g_autoptr(GString) token = g_string_sized_new((prefix != NULL ? strlen(prefix) : 0) +
+                                                  random_bytes * 2);
+    if (token == NULL)
+    {
+        return NULL;
+    }
+
+    if (prefix != NULL)
+    {
+        g_string_append(token, prefix);
+    }
+    for (gsize i = 0; i < random_bytes; i++)
+    {
+        g_string_append_printf(token, "%02x", bytes[i]);
+    }
+
+    return g_string_free(g_steal_pointer(&token), FALSE);
+}
+
+static void
+drd_handover_daemon_clear_nla_credentials(DrdHandoverDaemon *self)
+{
+    g_return_if_fail(DRD_IS_HANDOVER_DAEMON(self));
+
+    g_clear_pointer(&self->nla_username, g_free);
+    if (self->nla_password != NULL)
+    {
+        memset(self->nla_password, 0, strlen(self->nla_password));
+        g_clear_pointer(&self->nla_password, g_free);
+    }
+}
+
+static gboolean
+drd_handover_daemon_refresh_nla_credentials(DrdHandoverDaemon *self, GError **error)
+{
+    g_return_val_if_fail(DRD_IS_HANDOVER_DAEMON(self), FALSE);
+
+    drd_handover_daemon_clear_nla_credentials(self);
+
+    self->nla_username = drd_handover_daemon_generate_token("handover-", 8);
+    self->nla_password = drd_handover_daemon_generate_token("handover-", 16);
+    if (self->nla_username == NULL || self->nla_password == NULL)
+    {
+        drd_handover_daemon_clear_nla_credentials(self);
+        g_set_error_literal(error,
+                            G_IO_ERROR,
+                            G_IO_ERROR_FAILED,
+                            "Failed to generate NLA credentials for handover");
+        return FALSE;
+    }
+
+    return TRUE;
 }
 
 static gboolean
@@ -150,22 +228,14 @@ drd_handover_daemon_bind_handover(DrdHandoverDaemon *self, GError **error)
 static gboolean
 drd_handover_daemon_start_session(DrdHandoverDaemon *self, GError **error)
 {
-    const gchar *username = drd_config_get_nla_username(self->config);
-    const gchar *password = drd_config_get_nla_password(self->config);
-    if (username == NULL)
-    {
-        username = "handover";
-    }
-    if (password == NULL)
-    {
-        password = "handover";
-    }
+    g_return_val_if_fail(self->nla_username != NULL, FALSE);
+    g_return_val_if_fail(self->nla_password != NULL, FALSE);
 
     g_autofree gchar *certificate = NULL;
     g_autofree gchar *key = NULL;
     if (!drd_dbus_remote_desktop_rdp_handover_call_start_handover_sync(self->handover_proxy,
-                                                                       username,
-                                                                       password,
+                                                                       self->nla_username,
+                                                                       self->nla_password,
                                                                        &certificate,
                                                                        &key,
                                                                        NULL,
@@ -425,6 +495,14 @@ drd_handover_daemon_start(DrdHandoverDaemon *self, GError **error)
         }
     }
 
+    if (self->nla_username == NULL || self->nla_password == NULL)
+    {
+        if (!drd_handover_daemon_refresh_nla_credentials(self, error))
+        {
+            return FALSE;
+        }
+    }
+
     if (self->listener == NULL)
     {
         const DrdEncodingOptions *encoding_opts = drd_config_get_encoding_options(self->config);
@@ -443,8 +521,8 @@ drd_handover_daemon_start(DrdHandoverDaemon *self, GError **error)
                                  self->runtime,
                                  encoding_opts,
                                  drd_config_is_nla_enabled(self->config),
-                                 drd_config_get_nla_username(self->config),
-                                 drd_config_get_nla_password(self->config),
+                                 self->nla_username,
+                                 self->nla_password,
                                  drd_config_get_pam_service(self->config),
                                  FALSE);
         if (self->listener == NULL)
