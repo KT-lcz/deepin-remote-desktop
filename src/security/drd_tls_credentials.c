@@ -155,6 +155,12 @@ drd_tls_credentials_new(const gchar *certificate_path, const gchar *private_key_
     return self;
 }
 
+DrdTlsCredentials *
+drd_tls_credentials_new_empty(void)
+{
+    return g_object_new(DRD_TYPE_TLS_CREDENTIALS, NULL);
+}
+
 const gchar *
 drd_tls_credentials_get_certificate_path(DrdTlsCredentials *self)
 {

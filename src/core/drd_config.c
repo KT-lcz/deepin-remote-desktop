@@ -591,7 +591,8 @@ drd_config_merge_cli(DrdConfig *self,
         self->encoding.enable_frame_diff = diff_override > 0;
     }
 
-    if (self->certificate_path == NULL || self->private_key_path == NULL)
+    if (self->runtime_mode != DRD_RUNTIME_MODE_HANDOVER &&
+        (self->certificate_path == NULL || self->private_key_path == NULL))
     {
         g_set_error_literal(error,
                             G_OPTION_ERROR,
@@ -609,7 +610,7 @@ drd_config_merge_cli(DrdConfig *self,
         return FALSE;
     }
 
-    if (self->nla_enabled)
+    if (self->nla_enabled && self->runtime_mode != DRD_RUNTIME_MODE_HANDOVER)
     {
         if (self->nla_username == NULL || *self->nla_username == '\0' ||
             self->nla_password == NULL || *self->nla_password == '\0')

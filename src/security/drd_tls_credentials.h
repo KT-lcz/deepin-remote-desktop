@@ -17,6 +17,8 @@ DrdTlsCredentials *drd_tls_credentials_new(const gchar *certificate_path,
                                              const gchar *private_key_path,
                                              GError **error);
 
+DrdTlsCredentials *drd_tls_credentials_new_empty(void);
+
 const gchar *drd_tls_credentials_get_certificate_path(DrdTlsCredentials *self);
 const gchar *drd_tls_credentials_get_private_key_path(DrdTlsCredentials *self);
 

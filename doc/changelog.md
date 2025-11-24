@@ -1,6 +1,15 @@
 # 变更记录
 # 变更记录
 
+## 2025-11-24：handover 模式动态凭据加载
+- **目的**：解除 handover 运行对配置文件/CLI 中 TLS 与 NLA 账号的强制依赖，改为运行时获取一次性凭据。
+- **范围**：`core/drd_config` 参数校验、`core/drd_application` 运行时准备、`system/drd_handover_daemon` 启动顺序、TLS 凭据管理。
+- **主要改动**：
+  - handover 模式下跳过 TLS 文件与静态 NLA 账号的校验，允许凭据在运行期注入。
+  - 新增空的 `DrdTlsCredentials` 工厂，配合 dispatcher 返回的 PEM 数据即时加载证书。
+  - handover 启动时先完成 DBus 绑定与 TLS 物料获取，再创建监听器，确保 `drd_rdp_listener` 使用最新凭据。
+
+
 ## 2025-11-23：handover TLS 继承与连接接管
 - **目的**：handover 进程在 system 阶段已有客户端时重启，会直接复用本地证书与 `GSocketConnection` 自动指针，导致 TLS 身份与 system 下发的证书不一致、`TakeClient` 返回后发生二次 `g_object_unref()`。需要沿用 dispatcher 返回的证书/私钥，并修复连接所有权。
 - **范围**：`src/security/drd_tls_credentials.*`、`src/system/drd_handover_daemon.c`、`doc/architecture.md`、`doc/changelog.md`、`.codex/plan/handover-nla-negotiation.md`。

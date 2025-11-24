@@ -246,6 +246,10 @@ drd_handover_daemon_start_session(DrdHandoverDaemon *self, GError **error)
 
     if (self->tls_credentials == NULL)
     {
+        self->tls_credentials = drd_tls_credentials_new_empty();
+    }
+    if (self->tls_credentials == NULL)
+    {
         g_set_error_literal(error,
                             G_IO_ERROR,
                             G_IO_ERROR_FAILED,

@@ -178,59 +178,66 @@ drd_application_prepare_runtime(DrdApplication *self,
         self->config = drd_config_new();
     }
 
-    const gchar *cert_path = drd_config_get_certificate_path(self->config);
-    const gchar *key_path = drd_config_get_private_key_path(self->config);
-    if (cert_path == NULL || key_path == NULL)
-    {
-        g_set_error_literal(error,
-                            G_IO_ERROR,
-                            G_IO_ERROR_INVALID_ARGUMENT,
-                            "TLS certificate or key path missing after config merge");
-        return FALSE;
-    }
-
     const gboolean nla_enabled = drd_config_is_nla_enabled(self->config);
     const gchar *nla_username = drd_config_get_nla_username(self->config);
     const gchar *nla_password = drd_config_get_nla_password(self->config);
     const gchar *pam_service = drd_config_get_pam_service(self->config);
     const DrdRuntimeMode runtime_mode = drd_config_get_runtime_mode(self->config);
 
-    if (nla_enabled)
+    const gboolean require_tls_paths = runtime_mode != DRD_RUNTIME_MODE_HANDOVER;
+    const gchar *cert_path = NULL;
+    const gchar *key_path = NULL;
+    if (require_tls_paths)
     {
-        if (nla_username == NULL || nla_password == NULL)
+        cert_path = drd_config_get_certificate_path(self->config);
+        key_path = drd_config_get_private_key_path(self->config);
+        if (cert_path == NULL || key_path == NULL)
         {
             g_set_error_literal(error,
                                 G_IO_ERROR,
                                 G_IO_ERROR_INVALID_ARGUMENT,
-                                "NLA username/password missing after config merge");
-            return FALSE;
-        }
-    }
-    else
-    {
-        if (runtime_mode != DRD_RUNTIME_MODE_SYSTEM)
-        {
-            g_set_error_literal(error,
-                                G_IO_ERROR,
-                                G_IO_ERROR_INVALID_ARGUMENT,
-                                "Disabling NLA requires --system");
-            return FALSE;
-        }
-        if (pam_service == NULL)
-        {
-            g_set_error_literal(error,
-                                G_IO_ERROR,
-                                G_IO_ERROR_INVALID_ARGUMENT,
-                                "PAM service missing for TLS authentication");
+                                "TLS certificate or key path missing after config merge");
             return FALSE;
         }
     }
 
+    if (nla_enabled && runtime_mode != DRD_RUNTIME_MODE_HANDOVER && (nla_username == NULL || nla_password == NULL))
+    {
+        g_set_error_literal(error,
+                    G_IO_ERROR,
+                    G_IO_ERROR_INVALID_ARGUMENT,
+                    "NLA username/password missing after config merge");
+        return FALSE;
+    }
+
+    if (!nla_enabled && pam_service == NULL)
+    {
+        g_set_error_literal(error,
+                            G_IO_ERROR,
+                            G_IO_ERROR_INVALID_ARGUMENT,
+                            "PAM service missing for TLS authentication");
+        return FALSE;
+    }
+
     if (self->tls_credentials == NULL)
     {
-        self->tls_credentials = drd_tls_credentials_new(cert_path, key_path, error);
+        if (runtime_mode == DRD_RUNTIME_MODE_HANDOVER)
+        {
+            self->tls_credentials = drd_tls_credentials_new_empty();
+        }
+        else
+        {
+            self->tls_credentials = drd_tls_credentials_new(cert_path, key_path, error);
+        }
         if (self->tls_credentials == NULL)
         {
+            if (error != NULL && *error == NULL && require_tls_paths)
+            {
+                g_set_error_literal(error,
+                                    G_IO_ERROR,
+                                    G_IO_ERROR_FAILED,
+                                    "Failed to load TLS credentials");
+            }
             return FALSE;
         }
         drd_server_runtime_set_tls_credentials(self->runtime, self->tls_credentials);
