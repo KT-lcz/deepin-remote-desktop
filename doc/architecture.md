@@ -113,6 +113,19 @@ sequenceDiagram
 > 更完整的远程登录/Server Redirection 时序、二次 handover 细节，请参考仓库根目录的《02-远程登录实现流程与机制.md》。
 
 - **DBus 服务配置**：系统模式在启动时通过 `g_bus_own_name_on_connection()` 抢占 `org.deepin.RemoteDesktop`，对应的 policy (`data/org.deepin.RemoteDesktop.conf`) 会安装到 `$(sysconfdir)/dbus-1/system.d/`，只允许 `deepin-remote-desktop` 用户拥有该服务，同时开放 `Rdp.Dispatcher`/`Rdp.Handover` 等接口给默认 context。部署时需同步安装该 conf，否则 system bus 不会允许占用或导出 handover 对象。
+- **部署与安装布局**：`meson install` 默认遵循 `sysconfdir/datadir/prefix`，不直接写死 `/etc`/`/usr`，确保发行版可通过 `-Dprefix` 覆盖安装路径。当前数据/服务文件的落盘策略如下：
+  - `data/config.d` 作为模板集合安装到 `${datadir}/deepin-remote-desktop/`（默认 `/usr/share/deepin-remote-desktop/`），保持多会话共享；
+  - `data/11-deepin-remote-desktop-handover` 安装至 `${sysconfdir}/deepin/greeters.d/`（默认 `/etc/deepin/greeters.d/`），供 greeter 阶段自动触发 handover；
+  - `deepin-remote-desktop-system.service` 部署到 `systemd_system_unit_dir`（通常 `/usr/lib/systemd/system/`），其余 handover/user unit 则统一进入 `systemd_user_unit_dir`（`/usr/lib/systemd/user/` 等）；
+  - 如果打包环境暴露 `pkg-config systemd`，Meson 会自动读取 `systemdsystemunitdir/systemduserunitdir`，否则回退到 `prefix/lib/systemd/{system,user}`，便于 Debian/Fedora 等差异路径共存。
+
+```mermaid
+flowchart TB
+    Meson["meson install"] --> Share["/usr/share/deepin-remote-desktop/config.d"]
+    Meson --> Greeter["/etc/deepin/greeters.d/11-deepin-remote-desktop-handover"]
+    Meson --> SystemUnit["/usr/lib/systemd/system/deepin-remote-desktop-system.service"]
+    Meson --> UserUnits["/usr/lib/systemd/user/\n- deepin-remote-desktop-handover.service\n- deepin-remote-desktop-user.service"]
+```
 
 ### 7. 通用工具
 - `utils/drd_frame`：帧描述对象，封装像素数据/元信息。
