@@ -19,6 +19,25 @@
 - greeter 远程登录：NLA协议；
 - 桌面共享：NLA协议；
 - 单点登录：TLS协议，拿用户名和密码去做pam认证；
+
+- handover进程需要一次性的用户名和密码，配置里面要移除用户名和密码；
+- 生成一个完整的配置文件，用于做示例和说明；
+- 使用系统凭据的场景：use_system_credentials = true;应该是对于不同客户端的兼容场景
+```markdown
+use_system_credentials 由 system 进程在解析带 routing token 的重连时决定：先根据首次连接采集到的客户端信息判断是否为 MSTSC（grd_session_rdp_is_client_mstsc() 检查 FreeRDP 报告的 OS 类型，src/grd-session-rdp.c (lines 203-212)），再解析 routing token 中的 rdpNegReq 是否启用了 RDSTLS（requested_rdstls，src/grd-rdp-routing-token.c (lines 254-272)）。若 客户端是 MSTSC 且未请求 RDSTLS，system 认为它无法安全接受服务器注入的新一次性凭据，于是把 remote_client->use_system_credentials 置为 TRUE 并在发 TakeClientReady 时携带该标记（src/grd-daemon-system.c (lines 605-654)）。
+
+handover 侧收到 TakeClientReady(true) 后会先调用 GetSystemCredentials，从 system 的 GrdSettings（通常绑定 TPM/GKeyFile 后端）拷贝出长期凭据，并覆盖本地原本的随机一次性凭据，再去调用 TakeClient（src/grd-daemon-handover.c (lines 181-213)）。system 对应的 GetSystemCredentials 处理器只允许这类 handover 调用一次，并返回当前 system 凭据（src/grd-daemon-system.c (lines 400-439)）。
+
+流程差异体现在：
+
+凭据来源不同：常规（use_system_credentials=false）时，handover 一直使用 GrdCredentialsOneTime 生成的随机账号（src/grd-credentials-one-time.c (lines 184-203)），并在每次新连接时重建（src/grd-daemon-handover.c (lines 387-412)）；而 true 场景直接改用 system 长期凭据，以匹配 MSTSC 已缓存/展示给用户的账号，避免重定向后因凭据不一致导致 NLA 失败。
+安全提示不同：当 handover 被迫使用 system 凭据且当前属于远程登录场景（grd_is_remote_login()），它会弹出“继续使用不安全连接？”对话框或提示，提醒管理员此时没有 RDSTLS，真实系统账号正在透传（src/grd-daemon-handover.c (lines 387-414)）。
+StartHandover 与 Server Redirection 输出：在 GetSystemCredentials 覆盖后，后续 StartHandover/RedirectClient 所嵌入的用户名、密码就是 system 账户，确保 MSTSC 在未启用 RDSTLS 时仍能自动重连（src/grd-daemon-handover.c (lines 248-268), src/grd-daemon-system.c (lines 330-373)）。由于凭据与客户端初始输入一致，MSTSC 不会因为“服务器提供的新凭据”而报错。
+综上，只有 “MSTSC + 无 RDSTLS” 会触发 use_system_credentials=true，流程上的本质差异是跳过一次性凭据生成/分发，改为向 handover 泄露 system 口令并额外提醒管理员，确保兼容老客户端但也暴露了更多凭据风险。
+```
+
+
+
 ### 单点登录
 CredSSP简介
 
@@ -139,3 +158,39 @@ libfreerdp3-server 与 CredSSP/PAM
   5. 安全注意：
       - TLS-only 模式下攻击者只要能劫持 TLS，就能重放凭据；没有 CredSSP 的二次保护，也没有 Kerberos/NTLM 的哈希校验，风险更高。
       - 必须确保服务器证书可信、TLS 配置严格（禁用 RC4/SSLv3 等），并在文档中明确该模式的限制和适用场景。
+
+
+### routing token和remoteid
+
+• 关系概览
+
+  - remote_id 本质是把 routing_token 加上 D-Bus 前缀 REMOTE_DESKTOP_CLIENT_OBJECT_PATH
+    形成的对象路径，例如 /org/gnome/RemoteDesktop/Clients/<token>；映射函数
+    get_id_from_routing_token() 与 get_routing_token_from_id() 直接互逆，确保两者一一对应
+    （src/grd-daemon-system.c:178、src/grd-daemon-system.c:185）。
+  - routing_token 是发送给客户端的负载均衡 Cookie，写入 Server Redirection PDU 的 Load
+    Balance Info 字段（src/grd-session-rdp.c:325），客户端随后会在下一次 TCP 握手中通过
+    Cookie: msts=<token> 头带回，该值被 get_routing_token_without_prefix() 截取出来（src/
+    grd-rdp-routing-token.c:152、src/grd-rdp-routing-token.c:247）。
+
+  交互流程
+
+  - 新连接第一次来到 system daemon 时尚未携带 token，on_incoming_new_connection() 会生成随机 routing_token，立即映射出 remote_id 并插入 remote_clients 表，同时用该 remote_id 去GDM 创建 RemoteDisplay（src/grd-daemon-system.c:537、src/grd-daemon-system.c:665、src/grd-daemon-system.c:676）。此时 remote_id 作为 D-Bus 对象路径被暴露给 UI/配置服务。
+  - 当任意 handover 控制器调用 StartHandover 时，daemon 通过 get_routing_token_from_id()再次取得数字 token，将其嵌入 grd_session_rdp_send_server_redirection() 所构造的 LB_LOAD_BALANCE_INFO，连同一次性用户密码/证书一起下发给客户端（src/grd-daemon-system.c:339、src/grd-session-rdp.c:325、src/grd-session-rdp.c:332）。
+  - D-Bus API 文档也说明 RedirectClient 信号需要携带 routing_token 和凭据（src/org.gnome.RemoteDesktop.xml:141、src/org.gnome.RemoteDesktop.xml:154）。
+  - 客户端收到 Server Redirection 后会断开并重新连入，此时 grd_routing_token_peek_async()在 socket 上 MSG_PEEK 读取 TPKT/x224/routingToken/rdpNegReq，若发现 token 就提前发出 incoming-redirected-connection 信号而不是创建新 session（src/grd-rdp-server.c:184、src/grd-rdp-routing-token.c:196）。若没有 token，则按初始连接路径继续创建 GrdSessionRdp（src/grd-rdp-server.c:190）。
+  - GrdDaemonSystem 订阅 incoming-redirected-connection，用 get_id_from_routing_token()推导出 remote_id 并查表定位原来的 remote_client，然后把新的 GSocketConnection 挂回，同时依据 token 带来的 requested_rdstls 决定是否可以自动使用系统凭据（src/grd-daemon-system.c:605、src/grd-daemon-system.c:644）。成功匹配后，daemon 在对应 handover 对象上发出 TakeClientReady，通知 dst 侧可以调用 TakeClient()，也就是把 remote_id 映射回具体的 socket（src/grd-daemon-system.c:651）。
+  - 整个过程中 remote_id 只在 GNOME 侧传播（GDM、D-Bus、日志），routing_token 只在 RDP 协议层传播。二者一一对应，因此 remote_id 是用户态/控制面的稳定键，而 routing_token 是线协议里的物理路由标签。
+
+  使用场景与作用
+
+  - remote_id 让 org.gnome.RemoteDesktop.Rdp.Handover 的调用者可以通过对象路
+    径唯一定位要操作的客户端（授权时还会校验 caller 是否在同一个 session，见
+    get_handover_object_path_for_call()，src/grd-daemon-system.c:236），而 routing_token
+    的值永远不需要暴露给上层 UI。
+  - routing_token 作为 Load Balancer Cookie 还承载了部分安全逻辑：如果客户端是 mstsc 且未
+    请求 RDSTLS，就允许目标端自动注入系统凭据（src/grd-daemon-system.c:645），从而保证一次
+    handover 过程中认证体验一致。
+  - 日志中“with/without routing token”两类记录直接对应 on_incoming_new_connection() 与
+    on_incoming_redirected_connection() 的路径，使问题定位时可以看出当前连接是否属于某个
+    remote_id（src/grd-daemon-system.c:631、src/grd-daemon-system.c:665）。
