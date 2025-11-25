@@ -1,0 +1,11 @@
+#!/usr/bin/make -f
+
+export DEB_BUILD_MAINT_OPTIONS = hardening=+all
+DEB_BUILD_GNU_TYPE ?= $(shell dpkg-architecture -qDEB_BUILD_GNU_TYPE)
+BUILD_DIR = obj-$(DEB_BUILD_GNU_TYPE)
+
+%:
+	dh $@ --buildsystem=meson
+
+override_dh_auto_install:
+	DESTDIR="$(CURDIR)/debian/tmp" meson install -C "$(BUILD_DIR)" --no-rebuild

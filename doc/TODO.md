@@ -23,6 +23,12 @@
 - handover进程需要一次性的用户名和密码，配置里面要移除用户名和密码；
 - 生成一个完整的配置文件，用于做示例和说明；
 - 使用系统凭据的场景：use_system_credentials = true;应该是对于不同客户端的兼容场景
+
+- 远程登录的时候需要一个抑制锁
+- config drop in
+- auto gen certs
+- 远程会话如何重入；
+
 ```markdown
 use_system_credentials 由 system 进程在解析带 routing token 的重连时决定：先根据首次连接采集到的客户端信息判断是否为 MSTSC（grd_session_rdp_is_client_mstsc() 检查 FreeRDP 报告的 OS 类型，src/grd-session-rdp.c (lines 203-212)），再解析 routing token 中的 rdpNegReq 是否启用了 RDSTLS（requested_rdstls，src/grd-rdp-routing-token.c (lines 254-272)）。若 客户端是 MSTSC 且未请求 RDSTLS，system 认为它无法安全接受服务器注入的新一次性凭据，于是把 remote_client->use_system_credentials 置为 TRUE 并在发 TakeClientReady 时携带该标记（src/grd-daemon-system.c (lines 605-654)）。
 
@@ -36,9 +42,7 @@ StartHandover 与 Server Redirection 输出：在 GetSystemCredentials 覆盖后
 综上，只有 “MSTSC + 无 RDSTLS” 会触发 use_system_credentials=true，流程上的本质差异是跳过一次性凭据生成/分发，改为向 handover 泄露 system 口令并额外提醒管理员，确保兼容老客户端但也暴露了更多凭据风险。
 ```
 
-- 远程登录的时候需要一个抑制锁
-- config drop in
-- auto gen certs
+
 
 ### 单点登录
 CredSSP简介

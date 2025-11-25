@@ -57,23 +57,13 @@ dbus_gen_lightdm = gnome.gdbus_codegen('drd-dbus-lightdm',
 core_sources += dbus_gen_remote_desktop
 core_sources += dbus_gen_lightdm
 
-drd_media = static_library(
-  'drd-media',
-  media_sources,
-  include_directories: src_inc,
-  dependencies: deps
-)
+exe_sources = []
+exe_sources += media_sources
+exe_sources += core_sources
+exe_sources += files('main.c')
 
-drd_core = static_library(
-  'drd-core',
-  core_sources,
-  include_directories: src_inc,
-  dependencies: deps,
-  link_with: drd_media
-)
-
-executable('deepin-remote-desktop', ['main.c'],
+executable('deepin-remote-desktop', exe_sources,
            include_directories: src_inc,
-           link_with: drd_core,
            dependencies: deps,
-           install: false)
+           install: true,
+           install_dir: get_option('bindir'))

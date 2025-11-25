@@ -28,7 +28,7 @@ flowchart LR
 ## 模块分层
 
 ### 1. 核心层
-- `core/drd_application`：负责命令行解析、GLib 主循环、信号处理与监听器启动，并在 CLI/配置合并后记录生效参数及配置来源，确保 TLS 凭据只实例化一次（打包进 `libdrd-core.a`）。
+- `core/drd_application`：负责命令行解析、GLib 主循环、信号处理与监听器启动，并在 CLI/配置合并后记录生效参数及配置来源，确保 TLS 凭据只实例化一次（由 Meson 直接链接进 `deepin-remote-desktop` 可执行文件，不再生成单独静态库）。
 - `core/drd_server_runtime`：聚合 Capture/Encoding/Input 子系统，`prepare_stream()` 配置三者后缓存 `DrdEncodingOptions`，`pull_encoded_frame()` 每次直接从 `DrdCaptureManager` 拉取最新帧并同步调用 `DrdEncodingManager` 编码，`set_transport()` 用于在 SurfaceBits 与 Rdpgfx 之间切换并强制关键帧；内部不再维护独立线程或 `GAsyncQueue`。
 - `core/drd_config`：解析 INI/CLI 配置，集中管理绑定地址、TLS 证书、捕获尺寸及 `enable_nla`/`pam_service` 等安全参数。
 - `security/drd_tls_credentials`：加载并缓存 TLS 证书/私钥，供运行时向 FreeRDP Settings 注入。
@@ -38,7 +38,7 @@ flowchart LR
 ### 2. 采集层
 - `capture/drd_capture_manager`：启动/停止屏幕捕获，维护帧队列。
 - `capture/drd_x11_capture`：X11/XShm 抓屏线程，侦听 XDamage 并推送帧。
-（以上与编码/输入/工具组成 `libdrd-media.a`，供核心库复用）
+（capture/encoding/input/utils 源文件直接编译进主程序，无需构建中间静态库）
 
 ### 3. 编码层
 - `encoding/drd_encoding_manager`：统一编码配置、调度；对外暴露帧编码接口，并在 Progressive 超出多片段限制时自动回退 RAW。
@@ -115,9 +115,11 @@ sequenceDiagram
 - **DBus 服务配置**：系统模式在启动时通过 `g_bus_own_name_on_connection()` 抢占 `org.deepin.RemoteDesktop`，对应的 policy (`data/org.deepin.RemoteDesktop.conf`) 会安装到 `$(sysconfdir)/dbus-1/system.d/`，只允许 `deepin-remote-desktop` 用户拥有该服务，同时开放 `Rdp.Dispatcher`/`Rdp.Handover` 等接口给默认 context。部署时需同步安装该 conf，否则 system bus 不会允许占用或导出 handover 对象。
 - **部署与安装布局**：`meson install` 默认遵循 `sysconfdir/datadir/prefix`，不直接写死 `/etc`/`/usr`，确保发行版可通过 `-Dprefix` 覆盖安装路径。当前数据/服务文件的落盘策略如下：
   - `data/config.d` 作为模板集合安装到 `${datadir}/deepin-remote-desktop/`（默认 `/usr/share/deepin-remote-desktop/`），保持多会话共享；
+  - `certs/` 中的开发证书会整体安装到 `${datadir}/deepin-remote-desktop/certs/`，用于本地测试或重新签发示例证书；
   - `data/11-deepin-remote-desktop-handover` 安装至 `${sysconfdir}/deepin/greeters.d/`（默认 `/etc/deepin/greeters.d/`），供 greeter 阶段自动触发 handover；
   - `deepin-remote-desktop-system.service` 部署到 `systemd_system_unit_dir`（通常 `/usr/lib/systemd/system/`），其余 handover/user unit 则统一进入 `systemd_user_unit_dir`（`/usr/lib/systemd/user/` 等）；
   - 如果打包环境暴露 `pkg-config systemd`，Meson 会自动读取 `systemdsystemunitdir/systemduserunitdir`，否则回退到 `prefix/lib/systemd/{system,user}`，便于 Debian/Fedora 等差异路径共存。
+- **Debian 打包流程**：`debian/` 目录使用 debhelper + Meson，`debian/rules` 通过 `meson install -C obj-$(DEB_BUILD_GNU_TYPE)`+`DESTDIR=$(CURDIR)/debian/tmp` 直接驱动安装，`deepin-remote-desktop` 可执行文件由 Meson `install_dir=bindir` 安装，其余 `.install` 文件负责归档 `/usr/share/deepin-remote-desktop`、system/systemd user unit、greeter drop-in 与 DBus policy。这样 `dpkg-buildpackage` 便能一次性收集二进制、配置与服务脚本，发行版无需额外拷贝步骤。
 
 ```mermaid
 flowchart TB
