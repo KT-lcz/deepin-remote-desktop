@@ -1,0 +1,17 @@
+[Unit]
+Description=Deepin Remote Desktop System Manager(TLS/PAM mode : Single sign-on and remote login)
+After=network.target
+
+[Service]
+Type=dbus
+ExecStart=/usr/bin/deepin-remote-desktop --system --config /usr/share/deepin-remote-desktop/config.d/default-system.ini
+User=root
+BusName=org.deepin.RemoteDesktop
+AmbientCapabilities=CAP_SYS_ADMIN
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+
+[Install]
+WantedBy=graphical.target

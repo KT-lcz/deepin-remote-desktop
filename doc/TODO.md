@@ -36,7 +36,9 @@ StartHandover 与 Server Redirection 输出：在 GetSystemCredentials 覆盖后
 综上，只有 “MSTSC + 无 RDSTLS” 会触发 use_system_credentials=true，流程上的本质差异是跳过一次性凭据生成/分发，改为向 handover 泄露 system 口令并额外提醒管理员，确保兼容老客户端但也暴露了更多凭据风险。
 ```
 
-
+- 远程登录的时候需要一个抑制锁
+- config drop in
+- auto gen certs
 
 ### 单点登录
 CredSSP简介

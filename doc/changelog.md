@@ -1,6 +1,15 @@
 # 变更记录
 # 变更记录
 
+## 2025-11-25：Meson 安装路径调整
+- **目的**：将 `data` 目录内的配置模板、greeter 脚本以及 systemd unit 在安装阶段投放到发行版要求的路径，避免包维护者手动复制。
+- **范围**：`data/meson.build`、`doc/architecture.md`、`.codex/plan/meson-install-layout.md`、`doc/changelog.md`。
+- **主要改动**：
+  1. `data/meson.build` 新增 `install_subdir('config.d', ${datadir}/deepin-remote-desktop)`，并分别将 `11-deepin-remote-desktop-handover`、system/user unit 按照 `${sysconfdir}` 与 systemd unit 目录安装；systemd 路径优先读取 `pkg-config systemd` 变量，不存在时回退到 `prefix/lib/systemd/{system,user}`。
+  2. 架构文档加入“部署与安装布局”小节，明确 config 模板、greeter drop-in 与 systemd unit 的落盘位置及 Meson 变量映射，同时补充数据流 mermaid 图。
+  3. 计划文件更新执行进度，记录路径策略演进，变更记录本身补档。
+- **影响**：发行版在运行 `meson install` 后即可拿到完整的配置模板与 service 单元，无需自定义脚本；路径与 `prefix/sysconfdir/datadir` 保持一致，方便 cross build 或根目录重定位。
+
 ## 2025-11-24：handover 模式动态凭据加载
 - **目的**：解除 handover 运行对配置文件/CLI 中 TLS 与 NLA 账号的强制依赖，改为运行时获取一次性凭据。
 - **范围**：`core/drd_config` 参数校验、`core/drd_application` 运行时准备、`system/drd_handover_daemon` 启动顺序、TLS 凭据管理。

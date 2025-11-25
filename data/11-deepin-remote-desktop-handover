@@ -1,0 +1,3 @@
+#!/bin/bash
+sleep 3;
+setsid -f /usr/bin/deepin-remote-desktop --mode handover --config /usr/share/deepin-remote-desktop/config.d/default-handover.ini &
