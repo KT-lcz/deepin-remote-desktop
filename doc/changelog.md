@@ -1,6 +1,24 @@
 # 变更记录
 # 变更记录
 
+## 2025-11-25：certs 安装与构建精简
+- **目的**：交付包需包含内置证书素材，同时减少中间静态库构建，缩短编译链路。
+- **范围**：`data/meson.build`、`src/meson.build`、`README.md`、`doc/architecture.md`、`doc/changelog.md`、`.codex/plan/install-certs-no-static-libs.md`。
+- **主要改动**：
+  1. 在 Meson data 安装脚本中新增 `certs/` 的 `install_subdir`，安装路径为 `${datadir}/deepin-remote-desktop/certs/`，方便打包示例证书。
+  2. 移除 `drd-media`/`drd-core` 静态库，`deepin-remote-desktop` 直接链接全部源文件，减少一次静态归档与链接步骤。
+  3. README/架构文档同步模块说明与安装布局（提及 certs 安装位置与“单二进制”产物）。
+- **影响**：安装产物包含所有默认证书和配置，构建阶段的目标数量下降，`meson compile` 直接产出主程序；打包脚本自动拾取新的数据目录，无需额外脚本。
+
+## 2025-11-25：README 与 Debian 打包
+- **目的**：向开发者说明最新的构建/安装路径，并提供官方 Debian 包装规则，方便交付或 CI 直接产出 `.deb`。
+- **范围**：`README.md`、`debian/*`、`doc/architecture.md`、`doc/changelog.md`、`.codex/plan/debian-packaging.md`。
+- **主要改动**：
+  1. README 补充依赖列表、构建/测试/安装步骤，以及使用 `dpkg-buildpackage` 构建 `.deb` 的流程；安装部分说明 `meson install` 会落盘配置模板与 systemd unit。
+  2. 新增 Debian 打包目录（`control/rules/changelog/install/docs/source/format`），并将 `debian/rules` 切换为 `DESTDIR=$(CURDIR)/debian/tmp) meson install -C obj-$(DEB_BUILD_GNU_TYPE)`，避免 Meson 默认把文件安装在 `obj-*/debian/tmp`。同时将可执行文件目标设为 `install: true`，不再手工复制。
+  3. `.install`/`.docs` 继续归档配置模板、greeter drop-in、systemd unit 与文档，架构文档记录新的 Meson 安装策略。变更记录同步本次任务。
+- **影响**：`dpkg-buildpackage` 可直接生成 `deepin-remote-desktop_0.1.0-1_*.deb`，内含服务单元/greeter drop-in/DBus policy 与 README/architecture/changelog 文档，部署无需额外脚本。
+
 ## 2025-11-25：Meson 安装路径调整
 - **目的**：将 `data` 目录内的配置模板、greeter 脚本以及 systemd unit 在安装阶段投放到发行版要求的路径，避免包维护者手动复制。
 - **范围**：`data/meson.build`、`doc/architecture.md`、`.codex/plan/meson-install-layout.md`、`doc/changelog.md`。

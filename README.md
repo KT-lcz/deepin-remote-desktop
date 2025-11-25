@@ -1,24 +1,60 @@
 # deepin-remote-desktop (drd)
 
 ## 模块划分
-- `src/capture`, `src/encoding`, `src/input`, `src/utils`: 组成 `libdrd-media.a`，负责屏幕采集、编码、输入与通用缓冲。
-- `src/core`, `src/session`, `src/transport`, `src/security`: 构成 `libdrd-core.a`，封装配置解析、运行时、FreeRDP 监听与 TLS。
-- `main.c`: 仅提供入口，链接 `drd-core`（间接包含 `drd-media`）。
+- `src/capture`, `src/encoding`, `src/input`, `src/utils`: 提供采集、编码、输入与通用缓冲实现。
+- `src/core`, `src/session`, `src/transport`, `src/security`: 负责配置解析、运行时、FreeRDP 监听与 TLS。
+- `main.c`: 应用入口。Meson 直接将上述源文件编译成单一的 `deepin-remote-desktop` 可执行文件，不再生成中间静态库。
 
 ## 构建与运行
-在 `glib-rewrite/` 内执行：
+
+### 依赖
+需要 Meson ≥ 0.60、Ninja、pkg-config，以及 GLib/FreeRDP/X11/PAM 头文件。在 Debian/Ubuntu 上可一次性安装：
+
 ```bash
-sudo apt install meson libpipewire-0.3-dev libsystemd-dev libpolkit-gobject-1-dev libglib2.0-dev freerdp3-dev libx11-dev libxext-dev libxdamage-dev libxfixes-dev libxtst-dev libpam0g-dev
-``` 
+sudo apt install meson ninja-build pkg-config libsystemd-dev libpolkit-gobject-1-dev \
+libglib2.0-dev libpam0g-dev libx11-dev libxext-dev libxdamage-dev libxfixes-dev libxtst-dev\
+freerdp3-dev libwinpr3-dev
+```
+
+### 构建/验证
 ```bash
-meson setup build              # 首次配置
-meson compile -C build         # 生成 deepin-remote-desktop 可执行文件
+meson setup build --prefix=/usr --buildtype=debugoptimized  # 首次配置
+meson compile -C build                                      # 生成可执行文件
+meson test -C build --suite unit                           # 可选：运行单元测试
 ./build/src/deepin-remote-desktop --config ./config/default-user.ini
 ```
-`default.ini` 内置自签名证书 (`certs/server.*`) 及 RemoteFX 配置，可直接用于本地测试。
+
+`config.d` 中提供了 NLA 固定账号、systemd handover、PAM system 模式等示例；`data/certs/server.*` 则内置了一套开发用 TLS 证书，可直接 smoke。
+
 - 默认启用 NLA：在 `[auth]` 中配置 `username/password` 或使用 `--nla-username/--nla-password`，CredSSP 通过一次性 SAM 文件完成认证，适合单账号嵌入式场景。
-- 如需关闭 NLA 并直接复用客户端凭据完成 PAM 登录（单点登录）：在 root/systemd 环境下运行 `--system`，于 `[auth]` 设置 `enable_nla=false`（或 CLI `--disable-nla`）并指定 `pam_service`，客户端 TLS 安全层中的用户名/密码会被转交给 PAM，详见 `config/deepin-remote-desktop.service`。
-- `--system` 模式仅执行 TLS/NLA 握手与 PAM 会话创建，不会启动 X11 捕获、编码或渲染线程，用于在系统服务里预先创建桌面会话。
+- `enable_nla=false` + `--system`：切换到 TLS-only + PAM 登录，客户端凭据会在 system 模式下交给 PAM，适合桌面 SSO。
+- `--system` 模式仅执行 TLS/NLA 握手与 PAM 会话创建，不会启动 X11 捕获、编码或渲染线程，真正的图像/输入在 handover 阶段启动。
+
+### 安装
+`meson install` 会把配置模板、certs 开发证书集以及 systemd/greeter drop-in 安装至 `/usr/share/deepin-remote-desktop/`、`/usr/lib/systemd/{system,user}` 和 `/etc/deepin/greeters.d/`。若要打包或预览，可执行：
+
+```bash
+meson install -C build --destdir="${PWD}/pkgdir"
+tree pkgdir
+```
+
+可执行文件可直接从 `./build/src/deepin-remote-desktop` 运行，或交由 systemd unit 托管。
+
+### Debian 打包
+仓库自带 `debian/` 目录（debhelper + Meson）。默认规则将：
+
+1. 以 `prefix=/usr` 配置 Meson，并开启 `DEB_BUILD_MAINT_OPTIONS=hardening=+all`;
+2. 调用 `meson install --destdir=debian/tmp` 并手动复制 `deepin-remote-desktop` 主程序；
+3. 收集 `/usr/share/deepin-remote-desktop/config.d`、greeter handover 脚本以及 system/systemd user unit。
+
+构建命令：
+
+```bash
+sudo apt install devscripts debhelper
+dpkg-buildpackage -us -uc
+```
+
+生成的 `.deb` 位于仓库上层，例如 `../deepin-remote-desktop_0.1.0-1_amd64.deb`。安装后可通过 `systemctl start deepin-remote-desktop-system.service` 或 `systemctl --user start deepin-remote-desktop-user.service` 进入实际部署。
 
 ## 样式与工具
 - C17 + GLib/GObject，4 空格缩进，类型 `PascalCase`（如 `DrdRdpSession`），函数与变量 `snake_case`。
@@ -52,4 +88,3 @@ meson compile -C build         # 生成 deepin-remote-desktop 可执行文件
 - 更严格的 TLS 策略（证书轮换、禁用弱密码套件、OCSP）。
 - PAM service 的多因素扩展与账号隔离策略。
 - 更完善的日志审计：记录每次 TLS/PAM 登录的来源、会话寿命与清理状态。
-

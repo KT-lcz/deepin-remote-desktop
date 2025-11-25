@@ -1,0 +1,7 @@
+usr/bin/deepin-remote-desktop
+usr/lib/systemd/system/deepin-remote-desktop-system.service
+usr/lib/systemd/user/deepin-remote-desktop-handover.service
+usr/lib/systemd/user/deepin-remote-desktop-user.service
+usr/share/deepin-remote-desktop/
+etc/dbus-1/system.d/org.deepin.RemoteDesktop.conf
+etc/deepin/greeters.d/11-deepin-remote-desktop-handover

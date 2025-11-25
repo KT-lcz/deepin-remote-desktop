@@ -27,6 +27,9 @@ install_data('org.deepin.RemoteDesktop.conf',
 install_subdir('config.d',
                install_dir: share_confdir)
 
+install_subdir('certs',
+               install_dir: share_confdir)
+
 install_data('11-deepin-remote-desktop-handover',
              install_dir: greeters_confdir)
 

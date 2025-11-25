@@ -1,0 +1,31 @@
+Source: deepin-remote-desktop
+Section: net
+Priority: optional
+Maintainer: Deepin Remote Desktop Team <deepin@uniontech.com>
+Build-Depends: debhelper-compat (= 13),
+               meson,
+               ninja-build,
+               pkg-config,
+               libsystemd-dev,
+               libpolkit-gobject-1-dev,
+               libglib2.0-dev,
+               libpam0g-dev,
+               libx11-dev,
+               libxext-dev,
+               libxdamage-dev,
+               libxfixes-dev,
+               libxtst-dev,
+               freerdp3-dev,
+               libwinpr3-dev
+Standards-Version: 4.7.0
+Rules-Requires-Root: no
+Homepage: https://github.com/linuxdeepin/deepin-remote-desktop
+
+Package: deepin-remote-desktop
+Architecture: any
+Depends: ${shlibs:Depends}, ${misc:Depends}
+Description: Deepin Remote Desktop RDP service
+ A GLib-based RDP service providing capture/encoding/input pipeline,
+ FreeRDP transport integration, and system/handover daemons for Deepin
+ desktop. It targets systemd-managed deployments and ships greeter
+ handover helpers plus sample configuration.
