@@ -360,21 +360,21 @@ drd_system_daemon_register_client(DrdSystemDaemon *self,
                     token_preview);
 
     // call lightdm create remote display
-    // if (!self->remote_display_factory)
-    //     self->remote_display_factory = drd_dbus_lightdm_remote_display_factory_proxy_new_for_bus_sync(G_BUS_TYPE_SYSTEM,
-    //         G_DBUS_PROXY_FLAGS_DO_NOT_AUTO_START,
-    //         DRD_LIGHTDM_REMOTE_FACTORY_BUS_NAME,
-    //         DRD_LIGHTDM_REMOTE_FACTORY_OBJECT_PATH,
-    //         NULL,
-    //         NULL);
-    // g_autofree gchar* session_path=NULL;
-    // g_autofree GError *error = NULL;
-    // if (!drd_dbus_lightdm_remote_display_factory_call_create_remote_greeter_display_sync(self->remote_display_factory,
-    //     g_random_int_range(0,128),1920,1080,"0.0.0.0",&session_path,NULL,&error)) {
-    //     DRD_LOG_WARNING("create remote display failed %s",error->message);
-    //     return FALSE;
-    // }
-    // DRD_LOG_MESSAGE("session_path=%s",session_path);
+    if (!self->remote_display_factory)
+        self->remote_display_factory = drd_dbus_lightdm_remote_display_factory_proxy_new_for_bus_sync(G_BUS_TYPE_SYSTEM,
+            G_DBUS_PROXY_FLAGS_DO_NOT_AUTO_START,
+            DRD_LIGHTDM_REMOTE_FACTORY_BUS_NAME,
+            DRD_LIGHTDM_REMOTE_FACTORY_OBJECT_PATH,
+            NULL,
+            NULL);
+    g_autofree gchar* session_path=NULL;
+    g_autofree GError *error = NULL;
+    if (!drd_dbus_lightdm_remote_display_factory_call_create_remote_greeter_display_sync(self->remote_display_factory,
+        g_random_int_range(0,128),1920,1080,"0.0.0.0",&session_path,NULL,&error)) {
+        DRD_LOG_WARNING("create remote display failed %s",error->message);
+        return FALSE;
+    }
+    DRD_LOG_MESSAGE("session_path=%s",session_path);
 
     return TRUE;
 }
@@ -911,8 +911,8 @@ drd_system_daemon_on_take_client(DrdDBusRemoteDesktopRdpHandover *interface,
     client->handover_count++;
     if (client->handover_count >= 2)
     {
-        DRD_LOG_MESSAGE("remove client %s", client->id);
-        drd_system_daemon_remove_client(self, client);
+        DRD_LOG_MESSAGE("TODO remove client %s", client->id);
+        // drd_system_daemon_remove_client(self, client);
     }
     else
     {

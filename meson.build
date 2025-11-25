@@ -11,7 +11,8 @@ add_project_arguments([
   '-DG_LOG_DOMAIN="drd"',
   '-D_GNU_SOURCE',
   '-Wno-deprecated-declarations',
-  '-Wno-error=pedantic'
+  '-Wno-error=pedantic',
+  '-Wno-unused-function'
 ], language: 'c')
 
 cc = meson.get_compiler('c')

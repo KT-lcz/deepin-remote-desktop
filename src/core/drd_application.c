@@ -150,6 +150,13 @@ drd_application_finalize(GObject *object)
     G_OBJECT_CLASS(drd_application_parent_class)->finalize(object);
 }
 
+static gboolean
+quit_loop(gpointer user_data)
+{
+    g_main_loop_quit(user_data);
+    return G_SOURCE_REMOVE;
+}
+
 /* 信号回调：收到终止信号时请求主循环退出。 */
 static gboolean
 drd_application_on_signal(gpointer user_data)
@@ -159,7 +166,7 @@ drd_application_on_signal(gpointer user_data)
     if (self->loop != NULL && g_main_loop_is_running(self->loop))
     {
         DRD_LOG_MESSAGE("Termination signal received, shutting down main loop");
-        g_main_loop_quit(self->loop);
+        g_timeout_add(10*1000,quit_loop,self->loop);
     }
 
     return G_SOURCE_CONTINUE;
