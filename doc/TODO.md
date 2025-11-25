@@ -25,9 +25,16 @@
 - 使用系统凭据的场景：use_system_credentials = true;应该是对于不同客户端的兼容场景
 
 - 远程登录的时候需要一个抑制锁
+- 可能桌面共享也需要
 - config drop in
 - auto gen certs
 - 远程会话如何重入；
+- 远程登录需要固定分辨率；
+- 配置文件应该放到/etc下
+- --user进程需要配置自启动
+
+
+- 远程登录注销后，lightdm不应该再次启动一个remote seat
 
 ```markdown
 use_system_credentials 由 system 进程在解析带 routing token 的重连时决定：先根据首次连接采集到的客户端信息判断是否为 MSTSC（grd_session_rdp_is_client_mstsc() 检查 FreeRDP 报告的 OS 类型，src/grd-session-rdp.c (lines 203-212)），再解析 routing token 中的 rdpNegReq 是否启用了 RDSTLS（requested_rdstls，src/grd-rdp-routing-token.c (lines 254-272)）。若 客户端是 MSTSC 且未请求 RDSTLS，system 认为它无法安全接受服务器注入的新一次性凭据，于是把 remote_client->use_system_credentials 置为 TRUE 并在发 TakeClientReady 时携带该标记（src/grd-daemon-system.c (lines 605-654)）。
@@ -200,3 +207,15 @@ libfreerdp3-server 与 CredSSP/PAM
   - 日志中“with/without routing token”两类记录直接对应 on_incoming_new_connection() 与
     on_incoming_redirected_connection() 的路径，使问题定位时可以看出当前连接是否属于某个
     remote_id（src/grd-daemon-system.c:631、src/grd-daemon-system.c:665）。
+
+
+lightdm 注销流程：
+1. Seat seat0: Session stopped
+2. Seat seat0: Stopping display server, no sessions require it
+3. Sending signal 15 to process 64615 (Xorg)
+4. Seat seat0 changes active session to
+5. Process 64615 exited with return value 0
+6. XServer 0: X server stopped
+7. Seat seat0: Display server stopped
+8. Active display server stopped, starting greeter
+9. Creating greeter session

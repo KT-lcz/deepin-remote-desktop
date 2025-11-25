@@ -162,9 +162,13 @@ static gboolean
 drd_application_on_signal(gpointer user_data)
 {
     DrdApplication *self = DRD_APPLICATION(user_data);
-
+    uid_t uid = getuid();
     if (self->loop != NULL && g_main_loop_is_running(self->loop))
     {
+        if (uid == 0) {
+            g_main_loop_quit(self->loop);
+            return G_SOURCE_CONTINUE;
+        }
         DRD_LOG_MESSAGE("Termination signal received, shutting down main loop");
         g_timeout_add(10*1000,quit_loop,self->loop);
     }
