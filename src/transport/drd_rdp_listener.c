@@ -794,9 +794,9 @@ drd_rdp_listener_accept_peer(DrdRdpListener *self,
     {
         rdpInput *input = peer->context->input;
         input->context = peer->context;
-        input->KeyboardEvent = drd_rdp_peer_keyboard_event;
-        input->UnicodeKeyboardEvent = drd_rdp_peer_unicode_event;
         if (!self->system_mode) {
+            input->KeyboardEvent = drd_rdp_peer_keyboard_event;
+            input->UnicodeKeyboardEvent = drd_rdp_peer_unicode_event;
             input->MouseEvent = drd_rdp_peer_pointer_event;
             input->ExtendedMouseEvent = drd_rdp_peer_pointer_event;
         }

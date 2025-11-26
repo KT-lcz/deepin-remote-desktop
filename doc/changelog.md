@@ -1,6 +1,16 @@
 # 变更记录
 # 变更记录
 
+## 2025-11-25：system TLS 重连崩溃修复
+- **目的**：system 监听器在一次 server redirection 后再次接受客户端时，FreeRDP 会访问上一段会话复用的 `rdpPrivateKey`，指针已经在前一次 `rdpSettings` 销毁时被释放，导致 `EVP_PKEY_up_ref()` 崩溃，需要确保每次握手都注入独立的证书/私钥对象。
+- **范围**：`src/security/drd_tls_credentials.c`、`doc/architecture.md`、`doc/changelog.md`、`.codex/plan/system-reconnect-crash.md`。
+- **主要改动**：
+  1. `drd_tls_credentials_apply()` 不再直接重用缓存的 `rdpCertificate`/`rdpPrivateKey` 指针，而是根据 PEM 文本重新构造一份副本，并通过 `freerdp_settings_set_pointer_len()` 注入当次 `rdpSettings`，保证 FreeRDP 后续销毁的是本次握手拥有的对象。
+  2. 失败路径补充错误信息，便于定位 TLS 物料缺失或 PEM 解析失败；system 端继续沿用同一份 PEM，但每次握手都会重新解析，避免跨会话共享 OpenSSL state。
+  3. 架构文档“TLS 继承与缓存”章节新增 per-session TLS 副本说明，强调 system listener 复用 PEM 而非指针。
+  4. 计划/变更记录同步当前修复进度，方便追踪 system 重连稳定性。
+- **影响**：system 模式可以连续为多次 handover 周期接受初始连接，后续客户端再次连接 3389 端口不再在 `freerdp_tls_accept()` 内崩溃；handshake 过程中产生的证书/私钥副本由 FreeRDP 自动释放，不会污染缓存。
+
 ## 2025-11-25：certs 安装与构建精简
 - **目的**：交付包需包含内置证书素材，同时减少中间静态库构建，缩短编译链路。
 - **范围**：`data/meson.build`、`src/meson.build`、`README.md`、`doc/architecture.md`、`doc/changelog.md`、`.codex/plan/install-certs-no-static-libs.md`。
