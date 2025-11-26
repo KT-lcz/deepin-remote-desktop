@@ -253,8 +253,43 @@ drd_tls_credentials_apply(DrdTlsCredentials *self, rdpSettings *settings, GError
     g_return_val_if_fail(DRD_IS_TLS_CREDENTIALS(self), FALSE);
     g_return_val_if_fail(settings != NULL, FALSE);
 
-    if (!freerdp_settings_set_pointer(settings, FreeRDP_RdpServerCertificate, self->certificate))
+    if (self->certificate_pem == NULL || self->private_key_pem == NULL)
     {
+        g_set_error_literal(error,
+                            G_IO_ERROR,
+                            G_IO_ERROR_FAILED,
+                            "TLS material unavailable for settings");
+        return FALSE;
+    }
+
+    rdpCertificate *certificate = freerdp_certificate_new_from_pem(self->certificate_pem);
+    if (certificate == NULL)
+    {
+        g_set_error_literal(error,
+                            G_IO_ERROR,
+                            G_IO_ERROR_FAILED,
+                            "Failed to parse TLS certificate material");
+        return FALSE;
+    }
+
+    rdpPrivateKey *key = freerdp_key_new_from_pem(self->private_key_pem);
+    if (key == NULL)
+    {
+        freerdp_certificate_free(certificate);
+        g_set_error_literal(error,
+                            G_IO_ERROR,
+                            G_IO_ERROR_FAILED,
+                            "Failed to parse TLS private key material");
+        return FALSE;
+    }
+
+    if (!freerdp_settings_set_pointer_len(settings,
+                                          FreeRDP_RdpServerCertificate,
+                                          certificate,
+                                          1))
+    {
+        freerdp_certificate_free(certificate);
+        freerdp_key_free(key);
         g_set_error_literal(error,
                             G_IO_ERROR,
                             G_IO_ERROR_FAILED,
@@ -262,8 +297,9 @@ drd_tls_credentials_apply(DrdTlsCredentials *self, rdpSettings *settings, GError
         return FALSE;
     }
 
-    if (!freerdp_settings_set_pointer(settings, FreeRDP_RdpServerRsaKey, self->private_key))
+    if (!freerdp_settings_set_pointer_len(settings, FreeRDP_RdpServerRsaKey, key, 1))
     {
+        freerdp_key_free(key);
         g_set_error_literal(error,
                             G_IO_ERROR,
                             G_IO_ERROR_FAILED,
