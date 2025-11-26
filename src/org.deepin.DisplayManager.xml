@@ -6,7 +6,7 @@
   </interface>
   <interface name="org.deepin.DisplayManager.RemoteDisplayFactory">
     <method name="CreateRemoteGreeterDisplay">
-      <arg name="remote_id" direction="in" type="y"/>
+      <arg name="remote_id" direction="in" type="u"/>
       <arg name="width" direction="in" type="u"/>
       <arg name="height" direction="in" type="u"/>
       <arg name="address" direction="in" type="s"/>
