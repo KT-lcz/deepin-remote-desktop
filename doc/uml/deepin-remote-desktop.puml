@@ -1,0 +1,69 @@
+@startuml
+skinparam backgroundColor #FFFFFF
+skinparam shadowing false
+skinparam packageStyle rectangle
+skinparam componentStyle rectangle
+skinparam ArrowLinetype polyline
+skinparam defaultFontSize 14
+skinparam nodesep 60
+skinparam ranksep 90
+left to right direction
+
+title Deepin Remote Desktop 组件交互
+
+legend right
+    交互步骤说明：
+    1-11. RDP 登录流程
+    a. 客户端发起桌面共享请求
+    pam_sso 用于远程单点登录场景,
+    认证后由lightdm直接启动对应用户会话
+endlegend
+
+package "RDP 客户端" {
+    [远程桌面客户端] as client
+}
+
+package "RDP 服务端" {
+    node "system 组件" {
+        [drd-system] as system
+        [systemd]
+        [pam_sso] as sso
+    }
+
+    node "用户 session 组件" {
+        [drd-handover] as uhand
+        [drd-user] as user
+        [xsession]
+    }
+
+    node "Greeter session 组件" {
+        [drd-handover] as ghand
+        [lightdm-deepin-greeter] as greeter
+    }
+
+    node "lightdm 组件" {
+        [pam_lightdm] as pam_l
+        [seat-rdp] as seat
+        [remote-display-factory] as factory
+    }
+
+    node "图形组件" {
+        [xorg]
+        [xserver-xorg-video-dummy] as dummy
+    }
+}
+
+client -down-> system   : 1. 请求远程登录
+system -down-> factory  : 2. 创建虚拟屏幕
+factory -down-> seat    : 3. 开启远程 Display 会话
+seat -down-> xorg       : 4. 启动图形服务器
+xorg --> dummy          : 5. 创建虚拟屏幕
+seat -down-> greeter    : 6. 启动 greeter
+greeter --> ghand       : 7. 捕获并传输 greeter 界面
+greeter --> pam_l       : 8. 用户身份认证
+pam_l -left-> systemd   : 9. 开启用户会话
+systemd -down-> uhand   : 10. 捕获并传输用户会话界面
+pam_l -down-> xsession  : 11. 启动 deepin 桌面
+client -down-> user     : a. 请求桌面共享
+
+@enduml
