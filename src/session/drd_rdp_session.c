@@ -275,12 +275,47 @@ drd_rdp_session_activate(DrdRdpSession *self)
         return FALSE;
     }
 
-    drd_rdp_session_set_peer_state(self, "activated");
-    self->is_activated = TRUE;
-    if (self->runtime != NULL)
+    if (self->runtime == NULL)
     {
+        return FALSE;
+    }
+    const gboolean stream_running = drd_server_runtime_is_stream_running(self->runtime);
+    DrdEncodingOptions encoding_opts;
+    if (!drd_server_runtime_get_encoding_options(self->runtime, &encoding_opts))
+    {
+        DRD_LOG_WARNING("Session %s missing encoding options before stream start",
+                        self->peer_address);
+        drd_rdp_session_set_peer_state(self, "encoding-opts-missing");
+        drd_rdp_session_disconnect(self, "encoding-opts-missing");
+        return FALSE;
+    }
+
+    gboolean started_stream = FALSE;
+    if (!stream_running) {
+        g_autoptr(GError) stream_error = NULL;
+        if (!drd_server_runtime_prepare_stream(self->runtime, &encoding_opts, &stream_error)) {
+            if (stream_error != NULL) {
+                DRD_LOG_WARNING("Session %s failed to prepare runtime stream: %s",
+                                self->peer_address,
+                                stream_error->message);
+            } else {
+                DRD_LOG_WARNING("Session %s failed to prepare runtime stream",
+                                self->peer_address);
+            }
+            drd_rdp_session_set_peer_state(self, "stream-prepare-failed");
+            drd_rdp_session_disconnect(self, "stream-prepare-failed");
+            return FALSE;
+        }
+        started_stream = TRUE;
+    }
+
+    if (started_stream) {
         drd_server_runtime_request_keyframe(self->runtime);
     }
+
+
+    drd_rdp_session_set_peer_state(self, "activated");
+    self->is_activated = TRUE;
     if (!drd_rdp_session_start_render_thread(self))
     {
         DRD_LOG_WARNING("Session %s failed to start renderer thread", self->peer_address);

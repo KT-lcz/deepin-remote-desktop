@@ -1,5 +1,15 @@
 # 变更记录
 # 变更记录
+# 变更记录
+
+## 2025-12-03：握手触发 capture/编码链路
+- **目的**：防止 handover/user 进程在没有客户端时就启动 `drd_x11_capture_thread`，并在断开后及时停止采集，保证重新连接能够重新拉起 capture/input/encoder。
+- **范围**：`src/core/drd_server_runtime.*`、`src/core/drd_application.c`、`src/session/drd_rdp_session.c`、`src/transport/drd_rdp_listener.c`、`doc/architecture.md`、`doc/changelog.md`、`.codex/plan/runtime-stream-handshake.md`。
+- **主要改动**：
+  1. `DrdServerRuntime` 新增编码参数写入接口与 `stream_running` 标记，`drd_server_runtime_stop()` 仅在流处于活跃状态时停止 capture/input/encoder，避免重复启动。
+  2. `drd_application_prepare_runtime()` 在 handover/user 模式下只写入编码参数，不再提前 `prepare_stream()`；`DrdRdpSession::Activate` 根据缓存的 `DrdEncodingOptions` 调用 `prepare_stream()`，失败会主动断开连接。
+  3. `drd_rdp_listener_session_closed()` 在最后一个会话释放后触发 `drd_server_runtime_stop()`，断开立即停止 `drd_x11_capture_thread`，下次激活时重新启动；架构文档新增握手触发/停止序列图并更新数据流描述。
+- **影响**：handover/user 进程在空闲时不再占用 XDamage/XShm 资源，断线后 capture 线程与编码状态都会释放，客户重新连接即可在下一次 Activate 时重新拉起流；日志也能清楚记录 “Runtime initialized without capture/encoding setup (awaiting session activation)”。
 
 ## 2025-12-03：Rdpgfx ACK suspend/resume 适配完善
 - **目的**：补全提交 27f02bc8 中对 `SUSPEND_FRAME_ACKNOWLEDGEMENT` 的处理，防止客户端暂停 ACK 时 `outstanding_frames` 无限增长或在恢复后仍跳过背压。

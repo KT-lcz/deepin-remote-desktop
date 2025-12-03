@@ -41,6 +41,9 @@ DrdFrameTransport drd_server_runtime_get_transport(DrdServerRuntime *self);
 DrdFrameCodec drd_server_runtime_get_codec(DrdServerRuntime *self);
 gboolean drd_server_runtime_get_encoding_options(DrdServerRuntime *self,
                                                   DrdEncodingOptions *out_options);
+void drd_server_runtime_set_encoding_options(DrdServerRuntime *self,
+                                              const DrdEncodingOptions *encoding_options);
+gboolean drd_server_runtime_is_stream_running(DrdServerRuntime *self);
 void drd_server_runtime_set_tls_credentials(DrdServerRuntime *self, DrdTlsCredentials *credentials);
 DrdTlsCredentials *drd_server_runtime_get_tls_credentials(DrdServerRuntime *self);
 void drd_server_runtime_request_keyframe(DrdServerRuntime *self);

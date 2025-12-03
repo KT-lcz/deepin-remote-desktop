@@ -87,7 +87,7 @@ flowchart LR
 
 ### 1. 核心层
 - `core/drd_application`：负责命令行解析、GLib 主循环、信号处理与监听器启动，并在 CLI/配置合并后记录生效参数及配置来源，确保 TLS 凭据只实例化一次（由 Meson 直接链接进 `deepin-remote-desktop` 可执行文件，不再生成单独静态库）。
-- `core/drd_server_runtime`：聚合 Capture/Encoding/Input 子系统，`prepare_stream()` 配置三者后缓存 `DrdEncodingOptions`，`pull_encoded_frame()` 每次直接从 `DrdCaptureManager` 拉取最新帧并同步调用 `DrdEncodingManager` 编码，`set_transport()` 用于在 SurfaceBits 与 Rdpgfx 之间切换并强制关键帧；内部不再维护独立线程或 `GAsyncQueue`。
+- `core/drd_server_runtime`：聚合 Capture/Encoding/Input 子系统，`drd_server_runtime_set_encoding_options()` 会在配置合并阶段写入分辨率/编码参数；`prepare_stream()` 仅在 `DrdRdpSession::Activate` 成功后被调用，一次性启动 capture/input/encoder 并标记 `stream_running`，使 `drd_rdp_listener_session_closed()` 能在会话全部断开时安全 `stop()`；`pull_encoded_frame()` 每次直接从 `DrdCaptureManager` 拉取最新帧并同步调用 `DrdEncodingManager` 编码，`set_transport()` 用于在 SurfaceBits 与 Rdpgfx 之间切换并强制关键帧。
 - `core/drd_config`：解析 INI/CLI 配置，集中管理绑定地址、TLS 证书、捕获尺寸及 `enable_nla`/`pam_service` 等安全参数。
 - `security/drd_tls_credentials`：加载并缓存 TLS 证书/私钥，供运行时向 FreeRDP Settings 注入。
 - `security/drd_nla_sam`：基于用户名/密码生成临时 SAM 文件，写入 `FreeRDP_NtlmSamFile`，允许 CredSSP 在 NLA 期间读取 NT 哈希。
@@ -373,16 +373,16 @@ rdp_sso=false
 ```
 
 ## 数据流简述
-1. 应用启动后创建 `DrdServerRuntime`，合并配置与 TLS 凭据，并在 `prepare_stream()` 中依次启动 capture/input/encoder。
-2. `DrdCaptureManager` 启动 `DrdX11Capture`，将最新 `DrdFrame` 写入只保留一帧的 `DrdFrameQueue`；不存在额外编码线程或队列，capture 线程只负责刷新画面。
-3. 会话激活后，`drd_rdp_session_render_thread()` 通过 `drd_server_runtime_pull_encoded_frame()` 同步等待帧并即时编码：若 Graphics Pipeline 就绪则走 Progressive（成功后将 runtime transport 设为 `DRD_FRAME_TRANSPORT_GRAPHICS_PIPELINE`），否则通过 `SurfaceBits` + `SurfaceFrameMarker` 推送，Raw 帧按行拆分以满足多片段上限。`drd_rdp_session_pump()` 仅在 renderer 尚未启动时退化为 SurfaceBits 发送。
+1. 应用启动后创建 `DrdServerRuntime`，合并配置与 TLS 凭据，调用 `drd_server_runtime_set_encoding_options()` 写入分辨率/编码模式，但不会立即启动 capture/input/encoder。
+2. 客户端完成 TLS/NLA→RDP 握手并触发 `DrdRdpSession::Activate` 后，session 会读取 runtime 中缓存的 `DrdEncodingOptions`，再调用 `prepare_stream()` 依次启动 capture/input/encoder；当所有 session 关闭时，`drd_rdp_listener_session_closed()` 会调 `drd_server_runtime_stop()` 停止 `drd_x11_capture_thread`。
+3. Renderer 线程通过 `drd_server_runtime_pull_encoded_frame()` 同步等待帧并即时编码：若 Graphics Pipeline 就绪则走 Progressive（成功后将 runtime transport 设为 `DRD_FRAME_TRANSPORT_GRAPHICS_PIPELINE`），否则通过 `SurfaceBits` + `SurfaceFrameMarker` 推送，Raw 帧按行拆分以满足多片段上限。`drd_rdp_session_pump()` 仅在 renderer 尚未启动时退化为 SurfaceBits 发送。
 
 ## 关键流程
 
 ### 桌面共享（user 模式）
-- user 模式直接运行在当前桌面会话，监听端口后立即启动 capture/input/encoder，并允许多个客户端同时连接（`DrdRdpSession` 队列管理）。
+- user 模式直接运行在当前桌面会话，监听端口但仅写入编码参数；真正的 capture/input/encoder 启动被延迟到 `DrdRdpSession::Activate`，确保只有在 TLS/NLA/RDP 握手成功且客户端准备接收画面时才拉起 `drd_x11_capture_thread`。
 - TLS+NLA 默认开启，也可针对桌面共享服务配置 view-only 模式。
-- 断线不会退出进程，systemd user service 仅在显式禁用时停止。
+- 当所有会话关闭后，由监听器回调触发 `drd_server_runtime_stop()`，`drd_x11_capture_thread` 与编码状态即时释放，再次连接会在下一次 Activate 时重新准备；systemd user service 只在显式禁用时退出。
 
 ```mermaid
 sequenceDiagram
@@ -391,13 +391,33 @@ sequenceDiagram
     participant Runtime as ServerRuntime
     participant Session as DrdRdpSession
     Client->>Listener: TCP/TLS + CredSSP
-    Listener->>Runtime: prepare_stream()
     Listener->>Session: drd_rdp_session_new()
+    Client->>Session: Activate
+    Session->>Runtime: drd_server_runtime_prepare_stream()
     Session->>Runtime: pull_encoded_frame()
     Runtime-->>Session: DrdEncodedFrame
-    Session->>Client: SurfaceBits / Rdpgfx Progressive
-    Client-->>Session: Input events
-    Session->>Runtime: dispatch input via XTest
+Session->>Client: SurfaceBits / Rdpgfx Progressive
+Client-->>Session: Input events
+Session->>Runtime: dispatch input via XTest
+Session-->>Runtime: stop() when closed
+```
+
+#### 流启动/停止时序
+- `DrdRdpSession::Activate` 只有在握手成功后才会调用 `prepare_stream()`，避免 handover/user 进程在无客户端时耗费资源。
+- `drd_rdp_listener_session_closed()` 仅在所有 session 释放后才触发 `stop()`，从而停止 `drd_x11_capture_thread` 并清空编码状态，确保重新连接会重新准备链路。
+
+```mermaid
+sequenceDiagram
+    participant Session as DrdRdpSession
+    participant Runtime as ServerRuntime
+    participant Capture as DrdX11Capture
+
+    Session->>Runtime: Activate → prepare_stream()
+    Runtime->>Capture: start capture/input/encoder
+    Session->>Runtime: request_keyframe()
+    Note right of Session: Renderer 拉帧/编码/发送
+    Session-->>Runtime: closed callback
+    Runtime->>Capture: stop capture/input/encoder
 ```
 
 ### 远程 Greeter 登录

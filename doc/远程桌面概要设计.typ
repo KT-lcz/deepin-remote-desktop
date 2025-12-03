@@ -397,6 +397,7 @@ runtime_mode=handover
 rdp_sso=false
 ```
 - LightDM 新增 DBus 接口：org.deepin.DisplayManager
+- TODO 需要支持多屏参数
 ```xml
 <!DOCTYPE node PUBLIC "-//freedesktop//DTD D-BUS Object Introspection 1.0//EN" "http://www.freedesktop.org/standards/dbus/1.0/introspect.dtd">
 <node>

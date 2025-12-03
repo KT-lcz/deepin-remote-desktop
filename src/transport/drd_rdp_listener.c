@@ -187,6 +187,11 @@ drd_rdp_listener_session_closed(DrdRdpListener *self, DrdRdpSession *session)
     DRD_LOG_MESSAGE("Detached session %p, %u session(s) remaining",
                     (void *)session,
                     self->sessions->len);
+
+    if (self->sessions->len == 0 && self->runtime != NULL)
+    {
+        drd_server_runtime_stop(self->runtime);
+    }
     return TRUE;
 }
 

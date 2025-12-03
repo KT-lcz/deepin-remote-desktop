@@ -16,6 +16,7 @@ struct _DrdServerRuntime
     DrdTlsCredentials *tls;
     DrdEncodingOptions encoding_options;
     gboolean has_encoding_options;
+    gboolean stream_running;
     gint transport_mode;
     GMutex transport_mutex;
 };
@@ -51,6 +52,7 @@ drd_server_runtime_init(DrdServerRuntime *self)
     self->input = drd_input_dispatcher_new();
     self->tls = NULL;
     self->has_encoding_options = FALSE;
+    self->stream_running = FALSE;
     g_atomic_int_set(&self->transport_mode, DRD_FRAME_TRANSPORT_SURFACE_BITS);
     g_mutex_init(&self->transport_mutex);
 }
@@ -89,6 +91,11 @@ drd_server_runtime_prepare_stream(DrdServerRuntime *self,
 {
     g_return_val_if_fail(DRD_IS_SERVER_RUNTIME(self), FALSE);
     g_return_val_if_fail(encoding_options != NULL, FALSE);
+    if (self->stream_running)
+    {
+        DRD_LOG_MESSAGE("Server runtime stream already running, skipping prepare");
+        return TRUE;
+    }
 
     self->encoding_options = *encoding_options;
     self->has_encoding_options = TRUE;
@@ -118,6 +125,7 @@ drd_server_runtime_prepare_stream(DrdServerRuntime *self,
         return FALSE;
     }
 
+    self->stream_running = TRUE;
     DRD_LOG_MESSAGE("Server runtime prepared stream with geometry %ux%u",
               encoding_options->width,
               encoding_options->height);
@@ -129,17 +137,17 @@ drd_server_runtime_stop(DrdServerRuntime *self)
 {
     g_return_if_fail(DRD_IS_SERVER_RUNTIME(self));
 
-    const gboolean had_stream = self->has_encoding_options;
+    if (!self->stream_running)
+    {
+        return;
+    }
+
+    self->stream_running = FALSE;
     drd_capture_manager_stop(self->capture);
     drd_encoding_manager_reset(self->encoder);
     drd_input_dispatcher_flush(self->input);
     drd_input_dispatcher_stop(self->input);
-    self->has_encoding_options = FALSE;
-
-    if (had_stream)
-    {
-        DRD_LOG_MESSAGE("Server runtime stopped and released capture/encoding resources");
-    }
+    DRD_LOG_MESSAGE("Server runtime stopped and released capture/encoding resources");
 }
 
 gboolean
@@ -214,6 +222,36 @@ drd_server_runtime_get_encoding_options(DrdServerRuntime *self,
 
     *out_options = self->encoding_options;
     return TRUE;
+}
+
+void
+drd_server_runtime_set_encoding_options(DrdServerRuntime *self,
+                                        const DrdEncodingOptions *encoding_options)
+{
+    g_return_if_fail(DRD_IS_SERVER_RUNTIME(self));
+    g_return_if_fail(encoding_options != NULL);
+
+    const gboolean had_options = self->has_encoding_options;
+    const gboolean geometry_changed =
+        had_options && (self->encoding_options.width != encoding_options->width ||
+                        self->encoding_options.height != encoding_options->height ||
+                        self->encoding_options.mode != encoding_options->mode ||
+                        self->encoding_options.enable_frame_diff != encoding_options->enable_frame_diff);
+
+    self->encoding_options = *encoding_options;
+    self->has_encoding_options = TRUE;
+
+    if (geometry_changed && self->stream_running)
+    {
+        DRD_LOG_WARNING("Server runtime encoding options changed while stream active, restart required");
+    }
+}
+
+gboolean
+drd_server_runtime_is_stream_running(DrdServerRuntime *self)
+{
+    g_return_val_if_fail(DRD_IS_SERVER_RUNTIME(self), FALSE);
+    return self->stream_running;
 }
 
 void

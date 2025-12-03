@@ -170,7 +170,7 @@ drd_application_on_signal(gpointer user_data)
             return G_SOURCE_CONTINUE;
         }
         DRD_LOG_MESSAGE("Termination signal received, shutting down main loop");
-        g_timeout_add(10*1000,quit_loop,self->loop);
+        g_timeout_add(5*1000,quit_loop,self->loop);
     }
 
     return G_SOURCE_CONTINUE;
@@ -178,7 +178,6 @@ drd_application_on_signal(gpointer user_data)
 
 static gboolean
 drd_application_prepare_runtime(DrdApplication *self,
-                                gboolean require_stream,
                                 DrdRuntimeContextSnapshot *snapshot,
                                 GError **error)
 {
@@ -264,19 +263,12 @@ drd_application_prepare_runtime(DrdApplication *self,
         return FALSE;
     }
 
-    if (require_stream)
-    {
-        if (!drd_server_runtime_prepare_stream(self->runtime, encoding_opts, error))
-        {
-            return FALSE;
-        }
-    }
-    else
-    {
-        DRD_LOG_MESSAGE("Runtime initialized without capture/encoding setup "
-                        "(runtime mode=%s)",
+    drd_server_runtime_set_encoding_options(self->runtime, encoding_opts);
+
+    DRD_LOG_MESSAGE("Runtime initialized without capture/encoding setup "
+                        "(runtime mode=%s, awaiting session activation)",
                         drd_application_runtime_mode_to_string(runtime_mode));
-    }
+
 
     if (snapshot != NULL)
     {
@@ -299,7 +291,7 @@ drd_application_start_listener(DrdApplication *self, GError **error)
     g_return_val_if_fail(DRD_IS_SERVER_RUNTIME(self->runtime), FALSE);
 
     DrdRuntimeContextSnapshot snapshot = {0};
-    if (!drd_application_prepare_runtime(self, TRUE, &snapshot, error))
+    if (!drd_application_prepare_runtime(self, &snapshot, error))
     {
         return FALSE;
     }
@@ -337,7 +329,7 @@ static gboolean
 drd_application_start_system_daemon(DrdApplication *self, GError **error)
 {
     DrdRuntimeContextSnapshot snapshot = {0};
-    if (!drd_application_prepare_runtime(self, FALSE, &snapshot, error))
+    if (!drd_application_prepare_runtime(self, &snapshot, error))
     {
         return FALSE;
     }
@@ -379,7 +371,7 @@ static gboolean
 drd_application_start_handover_daemon(DrdApplication *self, GError **error)
 {
     DrdRuntimeContextSnapshot snapshot = {0};
-    if (!drd_application_prepare_runtime(self, TRUE, &snapshot, error))
+    if (!drd_application_prepare_runtime(self, &snapshot, error))
     {
         return FALSE;
     }

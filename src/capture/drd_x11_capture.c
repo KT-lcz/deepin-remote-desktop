@@ -367,6 +367,7 @@ drd_x11_capture_thread(gpointer user_data)
 
         if (!running || display == NULL || image == NULL)
         {
+            DRD_LOG_MESSAGE("break x11 capture thread");
             break;
         }
 
