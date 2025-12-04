@@ -14,6 +14,9 @@
 
 #include "utils/drd_log.h"
 
+#define DRD_X11_KEYCODE_CACHE_SIZE 512
+#define DRD_X11_KEYCODE_CACHE_INVALID ((guint16) 0xFFFF)
+
 struct _DrdX11Input
 {
     GObject parent_instance;
@@ -27,6 +30,9 @@ struct _DrdX11Input
     guint stream_height;
     gboolean running;
     guint32 keyboard_layout;
+    guint16 keycode_cache[DRD_X11_KEYCODE_CACHE_SIZE];
+    gdouble stream_to_desktop_scale_x;
+    gdouble stream_to_desktop_scale_y;
 };
 
 G_DEFINE_TYPE(DrdX11Input, drd_x11_input, G_TYPE_OBJECT)
@@ -37,6 +43,17 @@ static void drd_x11_input_close_display(DrdX11Input * self);
 static KeyCode drd_x11_input_lookup_special_keycode(DrdX11Input *self,
                                                     guint8 scancode,
                                                     gboolean extended);
+
+static void drd_x11_input_reset_keycode_cache(DrdX11Input *self);
+
+static guint16 drd_x11_input_resolve_keycode(DrdX11Input *self,
+                                             guint8 base_scancode,
+                                             gboolean extended,
+                                             gboolean *out_cache_miss);
+
+static void drd_x11_input_refresh_pointer_scale(DrdX11Input *self);
+
+static KeySym drd_x11_input_keysym_from_codepoint(gunichar codepoint);
 
 /* 对象销毁时停止后台线程并释放互斥锁。 */
 static void
@@ -70,6 +87,9 @@ drd_x11_input_init(DrdX11Input *self)
     self->stream_height = 0;
     self->running = FALSE;
     self->keyboard_layout = 0;
+    drd_x11_input_reset_keycode_cache(self);
+    self->stream_to_desktop_scale_x = 1.0;
+    self->stream_to_desktop_scale_y = 1.0;
 }
 
 /* 构造输入后端。 */
@@ -139,6 +159,7 @@ drd_x11_input_open_display(DrdX11Input *self, GError **error)
         self->keyboard_layout = freerdp_keyboard_init(KBD_US);
     }
 
+    drd_x11_input_refresh_pointer_scale(self);
     return TRUE;
 }
 
@@ -190,6 +211,9 @@ drd_x11_input_stop(DrdX11Input *self)
 
     drd_x11_input_close_display(self);
     self->running = FALSE;
+    drd_x11_input_reset_keycode_cache(self);
+    self->stream_to_desktop_scale_x = 1.0;
+    self->stream_to_desktop_scale_y = 1.0;
     g_mutex_unlock(&self->lock);
 }
 
@@ -208,6 +232,7 @@ drd_x11_input_update_desktop_size(DrdX11Input *self, guint width, guint height)
     {
         self->stream_height = height;
     }
+    drd_x11_input_refresh_pointer_scale(self);
     g_mutex_unlock(&self->lock);
 }
 
@@ -243,19 +268,18 @@ drd_x11_input_inject_keyboard(DrdX11Input *self, guint16 flags, guint8 scancode,
     const gboolean extended = (flags & (KBD_FLAGS_EXTENDED | KBD_FLAGS_EXTENDED1)) != 0;
     const UINT32 rdp_scancode = MAKE_RDP_SCANCODE(scancode, extended);
     const guint8 base_scancode = (guint8) RDP_SCANCODE_CODE(rdp_scancode);
-    UINT32 x11_keycode = freerdp_keyboard_get_x11_keycode_from_rdp_scancode(
-        base_scancode, extended ? TRUE : FALSE);
+    gboolean cache_miss = FALSE;
+    guint16 x11_keycode =
+            drd_x11_input_resolve_keycode(self, base_scancode, extended, &cache_miss);
 
     if (x11_keycode == 0)
     {
-        x11_keycode = drd_x11_input_lookup_special_keycode(self, base_scancode, extended);
-    }
-
-    if (x11_keycode == 0)
-    {
-        DRD_LOG_DEBUG("Could not translate RDP scancode 0x%02X (extended=%s)",
-                      base_scancode,
-                      extended ? "true" : "false");
+        if (cache_miss)
+        {
+            DRD_LOG_DEBUG("Could not translate RDP scancode 0x%02X (extended=%s)",
+                          base_scancode,
+                          extended ? "true" : "false");
+        }
         g_mutex_unlock(&self->lock);
         return TRUE;
     }
@@ -275,10 +299,36 @@ gboolean
 drd_x11_input_inject_unicode(DrdX11Input *self, guint16 flags, guint16 codepoint, GError **error)
 {
     g_return_val_if_fail(DRD_IS_X11_INPUT(self), FALSE);
-    (void) flags;
-    (void) codepoint;
-    (void) error;
-    /* Unicode injection is not yet implemented; silently ignore for now. */
+
+    g_mutex_lock(&self->lock);
+    if (!drd_x11_input_check_running(self, error))
+    {
+        g_mutex_unlock(&self->lock);
+        return FALSE;
+    }
+
+    const gboolean release = (flags & KBD_FLAGS_RELEASE) != 0;
+    const gunichar ch = (gunichar) codepoint;
+    KeySym keysym = drd_x11_input_keysym_from_codepoint(ch);
+    if (keysym == NoSymbol)
+    {
+        DRD_LOG_DEBUG("Unsupported Unicode input U+%04X", codepoint);
+        g_mutex_unlock(&self->lock);
+        return TRUE;
+    }
+
+    KeyCode keycode = XKeysymToKeycode(self->display, keysym);
+    if (keycode == 0)
+    {
+        DRD_LOG_DEBUG("No X11 keycode mapped for Unicode U+%04X", codepoint);
+        g_mutex_unlock(&self->lock);
+        return TRUE;
+    }
+
+    XTestFakeKeyEvent(self->display, keycode, release ? False : True, CurrentTime);
+    XFlush(self->display);
+
+    g_mutex_unlock(&self->lock);
     return TRUE;
 }
 
@@ -326,8 +376,7 @@ drd_x11_input_inject_pointer(DrdX11Input *self,
     guint16 target_y = clamped_stream_y;
     if (stream_width != desktop_width)
     {
-        const gdouble scale_x = (gdouble) desktop_width / (gdouble) stream_width;
-        guint scaled = (guint)((gdouble) clamped_stream_x * scale_x + 0.5);
+        guint scaled = (guint)((gdouble) clamped_stream_x * self->stream_to_desktop_scale_x + 0.5);
         if (scaled >= desktop_width)
         {
             scaled = desktop_width - 1;
@@ -336,8 +385,7 @@ drd_x11_input_inject_pointer(DrdX11Input *self,
     }
     if (stream_height != desktop_height)
     {
-        const gdouble scale_y = (gdouble) desktop_height / (gdouble) stream_height;
-        guint scaled = (guint)((gdouble) clamped_stream_y * scale_y + 0.5);
+        guint scaled = (guint)((gdouble) clamped_stream_y * self->stream_to_desktop_scale_y + 0.5);
         if (scaled >= desktop_height)
         {
             scaled = desktop_height - 1;
@@ -429,4 +477,98 @@ drd_x11_input_lookup_special_keycode(DrdX11Input *self, guint8 scancode, gboolea
 
     KeyCode keycode = XKeysymToKeycode(self->display, keysym);
     return keycode;
+}
+
+static void
+drd_x11_input_reset_keycode_cache(DrdX11Input *self)
+{
+    for (guint i = 0; i < DRD_X11_KEYCODE_CACHE_SIZE; ++i)
+    {
+        self->keycode_cache[i] = DRD_X11_KEYCODE_CACHE_INVALID;
+    }
+}
+
+static guint16
+drd_x11_input_resolve_keycode(DrdX11Input *self,
+                              guint8 base_scancode,
+                              gboolean extended,
+                              gboolean *out_cache_miss)
+{
+    g_return_val_if_fail(DRD_IS_X11_INPUT(self), 0);
+
+    const guint index = base_scancode + (extended ? 256u : 0u);
+    g_return_val_if_fail(index < DRD_X11_KEYCODE_CACHE_SIZE, 0);
+
+    guint16 cached = self->keycode_cache[index];
+    gboolean cache_miss = FALSE;
+
+    if (cached == DRD_X11_KEYCODE_CACHE_INVALID)
+    {
+        cache_miss = TRUE;
+        guint16 keycode = (guint16) freerdp_keyboard_get_x11_keycode_from_rdp_scancode(
+                base_scancode, extended ? TRUE : FALSE);
+        if (keycode == 0)
+        {
+            keycode = (guint16) drd_x11_input_lookup_special_keycode(self,
+                                                                     base_scancode,
+                                                                     extended);
+        }
+        self->keycode_cache[index] = keycode;
+        cached = keycode;
+    }
+
+    if (out_cache_miss != NULL)
+    {
+        *out_cache_miss = cache_miss;
+    }
+
+    return cached;
+}
+
+static void
+drd_x11_input_refresh_pointer_scale(DrdX11Input *self)
+{
+    const guint32 stream_width = self->stream_width > 0 ? self->stream_width : 1u;
+    const guint32 stream_height = self->stream_height > 0 ? self->stream_height : 1u;
+    const guint32 desktop_width = self->desktop_width > 0 ? self->desktop_width : 1u;
+    const guint32 desktop_height = self->desktop_height > 0 ? self->desktop_height : 1u;
+
+    self->stream_to_desktop_scale_x =
+            (stream_width == desktop_width)
+                ? 1.0
+                : ((gdouble) desktop_width / (gdouble) stream_width);
+    self->stream_to_desktop_scale_y =
+            (stream_height == desktop_height)
+                ? 1.0
+                : ((gdouble) desktop_height / (gdouble) stream_height);
+}
+
+static KeySym
+drd_x11_input_keysym_from_codepoint(gunichar codepoint)
+{
+    switch (codepoint)
+    {
+        case '\r':
+            return XK_Return;
+        case '\n':
+            return XK_Linefeed;
+        case '\t':
+            return XK_Tab;
+        case '\b':
+            return XK_BackSpace;
+        default:
+            break;
+    }
+
+    if (codepoint <= 0xFF)
+    {
+        return (KeySym) codepoint;
+    }
+
+    if (codepoint > 0 && codepoint <= 0x10FFFF)
+    {
+        return (KeySym) (codepoint | 0x01000000);
+    }
+
+    return NoSymbol;
 }

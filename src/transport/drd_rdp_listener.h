@@ -44,4 +44,6 @@ void drd_rdp_listener_set_session_callback(DrdRdpListener *self,
                                            DrdRdpListenerSessionFunc func,
                                            gpointer user_data);
 
+gboolean drd_rdp_listener_is_handover_mode(DrdRdpListener *self);
+
 G_END_DECLS

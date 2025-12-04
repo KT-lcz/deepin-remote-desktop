@@ -18,7 +18,6 @@ struct _DrdServerRuntime
     gboolean has_encoding_options;
     gboolean stream_running;
     gint transport_mode;
-    GMutex transport_mutex;
 };
 
 G_DEFINE_TYPE(DrdServerRuntime, drd_server_runtime, G_TYPE_OBJECT)
@@ -32,7 +31,6 @@ drd_server_runtime_dispose(GObject *object)
     g_clear_object(&self->encoder);
     g_clear_object(&self->input);
     g_clear_object(&self->tls);
-    g_mutex_clear(&self->transport_mutex);
 
     G_OBJECT_CLASS(drd_server_runtime_parent_class)->dispose(object);
 }
@@ -54,7 +52,6 @@ drd_server_runtime_init(DrdServerRuntime *self)
     self->has_encoding_options = FALSE;
     self->stream_running = FALSE;
     g_atomic_int_set(&self->transport_mode, DRD_FRAME_TRANSPORT_SURFACE_BITS);
-    g_mutex_init(&self->transport_mutex);
 }
 
 DrdServerRuntime *
@@ -180,18 +177,24 @@ drd_server_runtime_set_transport(DrdServerRuntime *self, DrdFrameTransport trans
 {
     g_return_if_fail(DRD_IS_SERVER_RUNTIME(self));
 
-    g_mutex_lock(&self->transport_mutex);
-    DrdFrameTransport current =
-            (DrdFrameTransport) g_atomic_int_get(&self->transport_mode);
-    if (current == transport)
+    const gint desired = (gint) transport;
+    while (TRUE)
     {
-        g_mutex_unlock(&self->transport_mutex);
-        return;
+        const gint current = g_atomic_int_get(&self->transport_mode);
+        if (current == desired)
+        {
+            return;
+        }
+        /*
+         * CAS 确保只有实际完成模式切换的线程触发关键帧，
+         * 避免原来的互斥锁带来的不必要竞争。
+         */
+        if (g_atomic_int_compare_and_exchange(&self->transport_mode, current, desired))
+        {
+            drd_encoding_manager_force_keyframe(self->encoder);
+            return;
+        }
     }
-
-    g_atomic_int_set(&self->transport_mode, transport);
-    drd_encoding_manager_force_keyframe(self->encoder);
-    g_mutex_unlock(&self->transport_mutex);
 }
 
 DrdFrameTransport

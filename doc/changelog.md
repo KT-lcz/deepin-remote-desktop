@@ -1,6 +1,30 @@
 # 变更记录
-# 变更记录
-# 变更记录
+
+## 2025-12-05：system handover 队列限流
+- **目的**：及时清理长期无人领取的 handover 对象，并限制 pending 队列规模，降低 system 模式遭遇连接洪泛时的内存与 DBus 资源压力。
+- **范围**：`src/system/drd_system_daemon.c`、`doc/architecture.md`、`.codex/plan/multi-module-optimization.md`。
+- **主要改动**：
+  1. `DrdRemoteClient` 的 `last_activity_us` 统一在 delegate 重连、RequestHandover、StartHandover、TakeClient、SessionReady 等事件中刷新，`drd_system_daemon_prune_stale_pending_clients()` 会清理静默超过 30 秒 (`DRD_SYSTEM_CLIENT_STALE_TIMEOUT_US`) 的 pending 对象并打印日志。
+  2. `drd_system_daemon_queue_client()` 在入队前执行过期清理，并依据 `DRD_SYSTEM_MAX_PENDING_CLIENTS` 限制排队数量为 32，超过上限时拒绝手头的连接、释放 DBus 对象并提示管理员。
+  3. `RequestHandover` 在派发对象前同样执行一次过期清理，文档同步记录“队列保护”策略，计划文件标记 system 阶段的执行进度与 PAM 优化延后。
+- **影响**：system 守护在无人领取 handover 时不再无限积压对象，恶意连接无法占满 pending 队列，dispatcher/handover 可以稳定服务活跃用户。
+
+## 2025-12-05：核心运行时与 system D-Bus 优化
+- **目的**：降低传输模式切换与 SurfaceBits 回退的开销，并让 system 守护在失去 DBus 名称时自动降级退出，避免进程悬挂。
+- **范围**：`src/core/drd_server_runtime.c`、`src/session/drd_rdp_session.c`、`src/system/drd_system_daemon.c`、`doc/architecture.md`、`doc/changelog.md`、`.codex/plan/project-module-optimization.md`。
+- **主要改动**：
+  1. `drd_server_runtime_set_transport()` 删除 `GMutex`，改用原子 CAS 判定实际发生的模式切换，仅在状态变化时触发关键帧，避免渲染/事件线程互斥。
+  2. `DrdRdpSession` 缓存 `FreeRDP_MultifragMaxRequestSize`，渲染线程读取原子值即可决定 SurfaceBits 分片大小；退回日志降为 `DRD_LOG_DEBUG` 并附带 payload 限制。
+  3. system 守护的 `g_bus_own_name_on_connection()` 现在附带 acquired/lost 回调并引用计数 `self`，丢失名称时立即请求主循环退出，同时移除多余的 `g_bus_own_name()` 调用。
+  4. 架构文档新增“传输模式与 SurfaceBits 回退”小节及状态图，记录 CAS/缓存策略；计划文件同步最新步骤状态。
+  5. `DrdX11Input` 内部增加 512 槽位的键码缓存与重置逻辑，同时将指针缩放比例改为在尺寸更新时预计算，减少高频键鼠事件路径上的重复查表与除法。
+  6. `DrdEncodingManager` 在连续触发 SurfaceBits payload 超限后进入“raw grace” 周期，暂时跳过 RFX 压缩并直接输出 Raw，若客户端提高 `MultifragMaxRequestSize` 则自动清除并记录日志，同时累计回退次数以便定位带宽瓶颈。
+  7. `DrdX11Input` 补齐 Unicode 注入能力，直接将 RDP Unicode 事件映射到 KeySym/KeyCode 并通过 XTest 注入，常见控制字符也能正确落地。
+  8. `DrdX11Capture` 引入 wakeup pipe + `g_poll()`，stop 时写入管道即可唤醒捕获线程并快速退出，避免 `XNextEvent` 长时间阻塞；文档同步补充该机制。
+  9. `DrdRdpSession` 渲染线程在 Rdpgfx 等待时加入 1 秒超时，超时即自动回退 SurfaceBits，并统计 `drd_server_runtime_pull_encoded_frame()` 的错误次数，在断开时输出累计值，便于定位 capture/encoding 瓶颈。
+  10. `DrdFrameQueue` 从单帧缓存改为 3 帧环形缓冲，记录丢帧次数并提供查询函数，push 时超限会丢弃最旧帧，减少 encoder 赶不上 capture 时的刷新压力；文档同步说明该机制。
+  11. `DrdSystemDaemon` 新增 pending/client 数量统计接口，并在注册 handover 客户端时输出当前总数，后续可用于限流和观测。
+- **影响**：切换 Rdpgfx/SurfaceBits 时不再因为互斥锁阻塞编码，SurfaceBits 回退不再刷屏；system 守护失去 DBus 名称后会主动下线，由 systemd 自动重启，确保 Dispatcher/Handover 始终一致。
 
 ## 2025-12-04：RDP 监听器运行模式统一
 - **目的**：消除 `DrdRdpListener` 内部的 `system_mode`/`handover_mode` 布尔散落点，统一由 `DrdRuntimeMode` 描述运行模式，降低调用方与监听器之间的状态组合复杂度。

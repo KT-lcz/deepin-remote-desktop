@@ -6,9 +6,12 @@ struct _DrdFrameQueue
 
     GMutex mutex;
     GCond cond;
-    DrdFrame *frame;
-    gboolean has_frame;
+    DrdFrame *frames[DRD_FRAME_QUEUE_MAX_FRAMES];
+    guint head;
+    guint tail;
+    guint size;
     gboolean running;
+    guint64 dropped_frames;
 };
 
 G_DEFINE_TYPE(DrdFrameQueue, drd_frame_queue, G_TYPE_OBJECT)
@@ -19,8 +22,11 @@ drd_frame_queue_dispose(GObject *object)
     DrdFrameQueue *self = DRD_FRAME_QUEUE(object);
 
     g_mutex_lock(&self->mutex);
-    g_clear_object(&self->frame);
-    self->has_frame = FALSE;
+    for (guint i = 0; i < DRD_FRAME_QUEUE_MAX_FRAMES; ++i)
+    {
+        g_clear_object(&self->frames[i]);
+    }
+    self->size = 0;
     g_mutex_unlock(&self->mutex);
 
     G_OBJECT_CLASS(drd_frame_queue_parent_class)->dispose(object);
@@ -48,9 +54,15 @@ drd_frame_queue_init(DrdFrameQueue *self)
 {
     g_mutex_init(&self->mutex);
     g_cond_init(&self->cond);
-    self->frame = NULL;
-    self->has_frame = FALSE;
+    for (guint i = 0; i < DRD_FRAME_QUEUE_MAX_FRAMES; ++i)
+    {
+        self->frames[i] = NULL;
+    }
+    self->head = 0;
+    self->tail = 0;
+    self->size = 0;
     self->running = TRUE;
+    self->dropped_frames = 0;
 }
 
 DrdFrameQueue *
@@ -66,8 +78,15 @@ drd_frame_queue_reset(DrdFrameQueue *self)
 
     g_mutex_lock(&self->mutex);
     self->running = TRUE;
-    self->has_frame = FALSE;
-    g_clear_object(&self->frame);
+    for (guint i = 0; i < DRD_FRAME_QUEUE_MAX_FRAMES; ++i)
+    {
+        g_clear_object(&self->frames[i]);
+        self->frames[i] = NULL;
+    }
+    self->head = 0;
+    self->tail = 0;
+    self->size = 0;
+    self->dropped_frames = 0;
     g_mutex_unlock(&self->mutex);
 }
 
@@ -84,9 +103,18 @@ drd_frame_queue_push(DrdFrameQueue *self, DrdFrame *frame)
         return;
     }
 
-    g_clear_object(&self->frame);
-    self->frame = g_object_ref(frame);
-    self->has_frame = TRUE;
+    if (self->size == DRD_FRAME_QUEUE_MAX_FRAMES)
+    {
+        g_clear_object(&self->frames[self->head]);
+        self->frames[self->head] = NULL;
+        self->head = (self->head + 1) % DRD_FRAME_QUEUE_MAX_FRAMES;
+        self->size--;
+        self->dropped_frames++;
+    }
+
+    self->frames[self->tail] = g_object_ref(frame);
+    self->tail = (self->tail + 1) % DRD_FRAME_QUEUE_MAX_FRAMES;
+    self->size++;
     g_cond_broadcast(&self->cond);
     g_mutex_unlock(&self->mutex);
 }
@@ -112,7 +140,7 @@ drd_frame_queue_wait(DrdFrameQueue *self, gint64 timeout_us, DrdFrame **out_fram
         deadline = g_get_monotonic_time() + timeout_us;
     }
 
-    while (self->running && !self->has_frame)
+    while (self->running && self->size == 0)
     {
         if (timeout_us == 0)
         {
@@ -133,10 +161,21 @@ drd_frame_queue_wait(DrdFrameQueue *self, gint64 timeout_us, DrdFrame **out_fram
         }
     }
 
-    if (self->running && self->has_frame && self->frame != NULL)
+    if (self->running && self->size > 0)
     {
-        *out_frame = g_object_ref(self->frame);
-        self->has_frame = FALSE;
+        DrdFrame *frame = self->frames[self->head];
+        self->frames[self->head] = NULL;
+        self->head = (self->head + 1) % DRD_FRAME_QUEUE_MAX_FRAMES;
+        self->size--;
+        if (frame != NULL)
+        {
+            *out_frame = g_object_ref(frame);
+            g_clear_object(&frame);
+        }
+        else
+        {
+            *out_frame = NULL;
+        }
         result = TRUE;
     }
 
@@ -153,4 +192,15 @@ drd_frame_queue_stop(DrdFrameQueue *self)
     self->running = FALSE;
     g_cond_broadcast(&self->cond);
     g_mutex_unlock(&self->mutex);
+}
+
+guint64
+drd_frame_queue_get_dropped_frames(DrdFrameQueue *self)
+{
+    g_return_val_if_fail(DRD_IS_FRAME_QUEUE(self), 0);
+
+    g_mutex_lock(&self->mutex);
+    guint64 dropped = self->dropped_frames;
+    g_mutex_unlock(&self->mutex);
+    return dropped;
 }

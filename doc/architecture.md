@@ -66,7 +66,7 @@ flowchart LR
 ## 当前能力概览
 - **显示/编码**：X11/XDamage 抓屏 + 单帧队列，RFX Progressive（默认 RLGR1）与 Raw 回退，关键帧/上下文管理齐备。
 - **传输**：FreeRDP 监听 + TLS/NLA 强制，渲染线程串行“等待帧→编码→Rdpgfx/SurfaceBits 发送”，具备 ACK 背压与自动回退逻辑。
-- **输入**：XTest 键鼠注入，扩展扫描码拆分，支持指针缩放；Unicode 注入仍未实现。
+- **输入**：XTest 键鼠注入，扩展扫描码拆分，指针缩放改为预计算比例减少每次浮点除法，并在 RDP → X11 键码转换环节新增缓存避免重复查表；Unicode 注入通过 `XKeysymToKeycode` 直接构造 KeySym 并注入，常见控制字符（Tab/Enter/Backspace）同样可用。
 - **配置/安全**：INI/CLI 合并，TLS 凭据集中加载，NLA SAM 临时文件确保 CredSSP，拒绝回退纯 TLS/RDP。
 - **可观测性**：关键路径日志保持英语，文档/计划与源码同步更新，便于跟踪 renderer、Rdpgfx、会话生命周期。
 
@@ -95,13 +95,14 @@ flowchart LR
 
 ### 2. 采集层
 - `capture/drd_capture_manager`：启动/停止屏幕捕获，维护帧队列。
-- `capture/drd_x11_capture`：X11/XShm 抓屏线程，侦听 XDamage 并推送帧。
+- `capture/drd_x11_capture`：X11/XShm 抓屏线程，侦听 XDamage 并推送帧；线程使用 `g_poll()` 同时监听 X11 连接与 wakeup pipe，`drd_x11_capture_stop()` 会写入 pipe 唤醒线程，避免 `XNextEvent()` 长时间阻塞导致 stop 卡死。
+- `utils/drd_frame_queue`：帧队列由单帧缓存升级为 3 帧环形缓冲，push 时若满会丢弃最旧帧并计数，可通过 `drd_frame_queue_get_dropped_frames()` 获取累计丢帧数，帮助诊断 encoder 背压。
 （capture/encoding/input/utils 源文件直接编译进主程序，无需构建中间静态库）
 
 ### 3. 编码层
 - `encoding/drd_encoding_manager`：统一编码配置、调度；对外暴露帧编码接口，并在 Progressive 超出多片段限制时自动回退 RAW。
 - `encoding/drd_raw_encoder`：原始帧编码器（BGRX → bottom-up），兼容旧客户端。
-- `encoding/drd_rfx_encoder`：基于 RemoteFX 的压缩实现，支持帧差分与底图缓存；Progressive 路径固定使用 RLGR1（`rfx_context_set_mode(RLGR1)`）保持与 mstsc/gnome-remote-desktop 一致，SurfaceBits 仍以 RLGR3 为主。其 `collect_dirty_rects()` 采用“tile 哈希 + 按需逐行校验”收集脏矩形，并直接生成 `RFX_RECT` 输入，详见 `doc/collect_dirty_rects.md`。
+- `encoding/drd_rfx_encoder`：基于 RemoteFX 的压缩实现，支持帧差分与底图缓存；Progressive 路径固定使用 RLGR1（`rfx_context_set_mode(RLGR1)`）保持与 mstsc/gnome-remote-desktop 一致，SurfaceBits 仍以 RLGR3 为主。其 `collect_dirty_rects()` 采用“tile 哈希 + 按需逐行校验”收集脏矩形，并直接生成 `RFX_RECT` 输入，详见 `doc/collect_dirty_rects.md`。为避免客户端 `MultifragMaxRequestSize` 过小导致每帧都先压缩再回退原始帧，`DrdEncodingManager` 会在检测到多片段超限后进入一段“raw grace” 周期，直接输出原始帧并跳过 RFX 压缩，待若干帧或上限增大后再尝试 RFX，减少重复编码开销。
 
 ### 4. 输入层
 - `input/drd_input_dispatcher`：键鼠事件注入入口，管理 X11 注入后端与 FreeRDP 回调。
@@ -109,7 +110,7 @@ flowchart LR
 
 ### 5. 传输层
 - `transport/drd_rdp_listener`：直接继承 `GSocketService`，通过 `g_socket_listener_add_*` 绑定端口，`incoming` 信号里将 `GSocketConnection` 的 fd 复制给 `freerdp_peer`，再复用既有 TLS/NLA/输入配置流程，整个监听循环交由 GLib 主循环驱动；运行模式改为 `DrdRuntimeMode` 三态驱动：system 模式触发被动会话/输入屏蔽 + delegate/cancellable，handover 模式自动启用 RDSTLS，其余场景按 user 模式执行。
-- `session/drd_rdp_session`：会话状态机，维护 peer/runtime 引用、虚拟通道、事件线程与 renderer 线程。`drd_rdp_session_render_thread()` 在激活后循环：等待 Rdpgfx 容量 → 调用 `drd_server_runtime_pull_encoded_frame()`（同步等待并编码）→ 优先提交 Progressive，失败则回退 SurfaceBits（Raw 帧按行分片避免超限 payload），并负责 transport 切换、关键帧请求与桌面大小校验。
+- `session/drd_rdp_session`：会话状态机，维护 peer/runtime 引用、虚拟通道、事件线程与 renderer 线程。`drd_rdp_session_render_thread()` 在激活后循环：等待 Rdpgfx 容量（带 1 秒超时，无法及时 ACK 时自动回退 SurfaceBits）→ 调用 `drd_server_runtime_pull_encoded_frame()`（同步等待并编码，累计错误次数）→ 优先提交 Progressive，失败则回退 SurfaceBits（Raw 帧按行分片避免超限 payload），并负责 transport 切换、关键帧请求与桌面大小校验。
 - `session/drd_rdp_graphics_pipeline`：Rdpgfx server 适配器，负责与客户端交换 `CapsAdvertise/CapsConfirm`，在虚拟通道上执行 `ResetGraphics`/Surface 创建/帧提交；内部用 `needs_keyframe` 防止增量帧越级，并用 `capacity_cond`/`outstanding_frames` 控制 ACK 背压，当 Progressive 管线就绪时驱动运行时切换编码模式。
 - `frame_acks_suspended` 状态机：当客户端发送 `queueDepth = SUSPEND_FRAME_ACKNOWLEDGEMENT` 时立刻清空未确认帧并广播 `capacity_cond`，编码线程不再累积 `outstanding_frames`；下一个普通 ACK 抵达后自动恢复背压。这样避免长时间不 ACK 时 `outstanding_frames` 无上限膨胀，也保证 resume 后重新以 0 起步。
 
@@ -148,6 +149,7 @@ sequenceDiagram
 - **system delegate 行为**：只有当客户端带着既有 routing token（二次连接）时，`drd_system_daemon_delegate()` 才会拦截 `incoming`，替换 `DrdRemoteClient::connection` 并立即通过 `TakeClientReady` 通知 handover；对于首次接入的客户端，delegate 注册 handover 对象后会让默认监听器继续创建 `freerdp_peer`，以便 system 端持有 `DrdRdpSession` 并在 `StartHandover` 阶段发送 Server Redirection PDU。
 - **监听短路**：`drd_rdp_listener_incoming()` 一旦检测到 delegate 已处理连接（或 delegate 自身返回错误）就会提前返回，确保 handover 重连的 socket 不会被默认监听逻辑再次创建 `freerdp_peer`，避免在 `peer->CheckFileDescriptor()` 等路径访问失效会话。
 - **多阶段 handover 队列**：`drd_system_daemon_on_take_client()` 在第一次 `TakeClient()` 完成后不会移除 `DrdRemoteClient`，而是重置 `assigned` 并重新压入 pending 队列；待第二段 handover 领取对象后再次 `TakeClient()` 才真正移除，确保用户会话能够复用相同 object path 并触发后续 `RedirectClient`。
+- **队列保护**：`DrdRemoteClient` 记录 `last_activity_us`（使用 `g_get_monotonic_time()`，不受系统时间回拨影响），在 `queue/request/start/take/session_ready` 等事件中刷新；`drd_system_daemon_queue_client()` 每次入队前会调用 `drd_system_daemon_prune_stale_pending_clients()`，踢出静默超过 30 秒 (`DRD_SYSTEM_CLIENT_STALE_TIMEOUT_US`) 的 handover 对象，并依据 `DRD_SYSTEM_MAX_PENDING_CLIENTS` 将排队数量限制在 32。若队列已满，system 守护会拒绝新 handover 并写入 `DRD_LOG_WARNING`，防止恶意或遗留连接撑爆 DBus 对象及内存；被拒绝的连接也会立即关闭，等待客户端重新发起连接。
 - **RedirectClient 执行链**：当 system 端检测到 `StartHandover` 发起方已经不是自身（`client->session == NULL`）时，会通过 handover DBus 对象广播 `RedirectClient(token, username, password)`；仍持有活跃会话的 handover 守护在 `drd_handover_daemon_on_redirect_client()` 中调用 `drd_rdp_session_send_server_redirection()` 并断开本地连接，客户端随即携带 routing token 重连 system，system delegate 再次发出 `TakeClientReady` 供下一段 handover 领取 FD。
 - **连接关闭职责**：向客户端发送 Server Redirection PDU 后，由 `DrdRdpSession` 内部驱动连接关闭；handover 进程不再保存或直接操作 `GSocketConnection`，避免手动 `g_io_stream_close()` 与 FreeRDP 生命周期冲突。RedirectClient 成功后 handover 会立即调用 `drd_handover_daemon_stop()` 并请求主循环退出，以便 system/handover 链路在下一阶段交由新的进程接力。system 守护也会缓存 `GMainLoop` 引用，`drd_system_daemon_stop()` 发生时会自动 `g_main_loop_quit()`，确保以 system 模式运行的进程能够在致命错误或外部触发下优雅退出。
 - **连接引用管理**：`drd_handover_daemon_take_client()` 在把 `GSocketConnection` 交给 `DrdRdpListener` 前会窃取引用，listener 在 `drd_rdp_listener_handle_connection()` 里负责最终 `g_object_unref()`，防止自动变量离开作用域时重复释放，解决早前 `g_object_unref: assertion 'G_IS_OBJECT (object)' failed` 的告警及潜在 use-after-free。
@@ -181,7 +183,7 @@ sequenceDiagram
 
 > 更完整的远程登录/Server Redirection 时序、二次 handover 细节，请参考仓库根目录的《02-远程登录实现流程与机制.md》。
 
-- **DBus 服务配置**：系统模式在启动时通过 `g_bus_own_name_on_connection()` 抢占 `org.deepin.RemoteDesktop`，对应的 policy (`data/org.deepin.RemoteDesktop.conf`) 会安装到 `$(sysconfdir)/dbus-1/system.d/`，只允许 `deepin-remote-desktop` 用户拥有该服务，同时开放 `Rdp.Dispatcher`/`Rdp.Handover` 等接口给默认 context。部署时需同步安装该 conf，否则 system bus 不会允许占用或导出 handover 对象。
+- **DBus 服务配置**：系统模式在启动时通过 `g_bus_own_name_on_connection()` 抢占 `org.deepin.RemoteDesktop`，并注册 acquired/lost 回调：成功占用时记录日志，若 bus/name 丢失则立即请求主循环退出，交由 systemd 拉起新进程，确保 DBus 状态与监听器保持一致。对应的 policy (`data/org.deepin.RemoteDesktop.conf`) 会安装到 `$(sysconfdir)/dbus-1/system.d/`，只允许 `deepin-remote-desktop` 用户拥有该服务，同时开放 `Rdp.Dispatcher`/`Rdp.Handover` 等接口给默认 context；旧版为了兼容性额外调用 `g_bus_own_name()` 的冗余逻辑已移除。部署时需同步安装 conf，否则 system bus 不会允许占用或导出 handover 对象。
 - **部署与安装布局**：`meson install` 默认遵循 `sysconfdir/datadir/prefix`，不直接写死 `/etc`/`/usr`，确保发行版可通过 `-Dprefix` 覆盖安装路径。当前数据/服务文件的落盘策略如下：
   - `data/config.d` 作为模板集合安装到 `${datadir}/deepin-remote-desktop/`（默认 `/usr/share/deepin-remote-desktop/`），保持多会话共享；
   - `certs/` 中的开发证书会整体安装到 `${datadir}/deepin-remote-desktop/certs/`，用于本地测试或重新签发示例证书；
@@ -420,11 +422,26 @@ sequenceDiagram
     Runtime->>Capture: stop capture/input/encoder
 ```
 
+#### 传输模式与 SurfaceBits 回退
+- `drd_server_runtime_set_transport()` 由 `GMutex` 切换为原子 CAS：只有真正完成模式切换的线程才会调用 `drd_encoding_manager_force_keyframe()`，避免渲染与事件线程在切换 SurfaceBits/Rdpgfx 时互相阻塞。
+- `DrdRdpSession` 激活后会缓存 `FreeRDP_MultifragMaxRequestSize`，渲染线程只需读取原子值即可得知 SurfaceBits 的 payload 限制；若缓存缺失，再次访问 FreeRDP settings 后写回缓存。
+- SurfaceBits 退回改用 `DRD_LOG_DEBUG`，仅在图形管线不可用时输出一行“fallback + limit”日志，避免逐帧刷屏；同时行分片逻辑继续遵守协商的 payload 上限。
+
+```mermaid
+stateDiagram-v2
+    [*] --> SurfaceBits
+    SurfaceBits --> Graphics: drd_rdp_session_maybe_init_graphics
+    Graphics --> Graphics: FrameAck < max_outstanding
+    Graphics --> SurfaceBits: Rdpgfx needs keyframe / submit failure
+    SurfaceBits --> Graphics: transport=CMPXCHG\n+ request_keyframe
+```
+
 ### 远程 Greeter 登录
 - system 监听端口 → 生成 client_id/routing_token → 导出 handover session。
 - LightDM RemoteDisplayFactory 创建 remote session，greeter handover 请求 handover 对象并发起 `StartHandover`，system 发送 Server Redirection，客户端携带 routing token 重连。
 - system 匹配 token 后通知 greeter handover `TakeClientReady`，handover 抢占 fd、完成握手并推流虚拟屏幕。
 - 用户输入凭据后，LightDM open session，session_id 更新，system 监听 signal，等待下一阶段 handover。
+- System daemon 现在可通过 `drd_system_daemon_get_pending_client_count()` / `get_remote_client_count()` 获取当前排队的 handover 数和总注册客户端数，日志会在新客户端注册时输出这两个指标，便于后续限流和监控。
 
 ```mermaid
 sequenceDiagram
@@ -592,7 +609,7 @@ sequenceDiagram
 - 如果在超时时间内一直得不到 ACK，会话会调用 `drd_rdp_session_disable_graphics_pipeline()` 回退 SurfaceBits，并通过 `drd_server_runtime_request_keyframe()` 在恢复时强制全量帧，保证客户端状态重新对齐。
 
 ## Renderer & Capture 线程协作
-- **捕获线程**：`drd_x11_capture_thread()` 监听 XDamage 事件，更新 `DrdFrameQueue` 中的最新帧；队列只存一帧，保证 renderer 线程消费时永远拿到最新画面。
+- **捕获线程**：`drd_x11_capture_thread()` 监听 XDamage 事件，将像素写入 `DrdFrameQueue` 环形缓冲（当前容量 3 帧，超限会丢弃最旧帧并记录计数），renderer 线程消费时仍能尽量拿到最新的画面，同时可根据丢帧指标判断是否存在背压。
 - **Renderer 线程**：`drd_rdp_session_render_thread()` 在 `render_running` 标志下循环：等待 Rdpgfx 容量 → 调用 `drd_server_runtime_pull_encoded_frame()`（同步等待并编码）→ 优先提交 Progressive，失败则退回 SurfaceBits；过程中持续维护 `frame_sequence`、关键帧状态和 `needs_keyframe` 标志，且无需额外 `DrdRdpRenderer` 模块。
 - **生命周期**：renderer 线程在会话 `Activate` 时启动，`drd_rdp_session_stop_event_thread()`/`drd_rdp_session_disable_graphics_pipeline()` 会在断开或切换时停止线程并重置状态，确保 capture/renderer 不会引用失效的 `freerdp_peer`。
 

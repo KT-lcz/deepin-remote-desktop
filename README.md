@@ -88,3 +88,7 @@ dpkg-buildpackage -us -uc
 - 更严格的 TLS 策略（证书轮换、禁用弱密码套件、OCSP）。
 - PAM service 的多因素扩展与账号隔离策略。
 - 更完善的日志审计：记录每次 TLS/PAM 登录的来源、会话寿命与清理状态。
+
+## 调试
+1. drd 日志: export G_MESSAGES_DEBUG=all
+2. freerdp 日志: export WLOG_LEVEL=debug

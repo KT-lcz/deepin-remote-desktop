@@ -162,10 +162,9 @@ static gboolean
 drd_application_on_signal(gpointer user_data)
 {
     DrdApplication *self = DRD_APPLICATION(user_data);
-    uid_t uid = getuid();
     if (self->loop != NULL && g_main_loop_is_running(self->loop))
     {
-        if (uid == 0)
+        if (!drd_rdp_listener_is_handover_mode(self->listener))
         {
             g_main_loop_quit(self->loop);
             return G_SOURCE_CONTINUE;

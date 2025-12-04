@@ -89,6 +89,13 @@ drd_capture_manager_stop(DrdCaptureManager *self)
     drd_x11_capture_stop(self->x11_capture);
     drd_frame_queue_stop(self->queue);
 
+    const guint64 dropped = drd_frame_queue_get_dropped_frames(self->queue);
+    if (dropped > 0)
+    {
+        DRD_LOG_WARNING("Capture manager dropped %" G_GUINT64_FORMAT " frame(s) due to backpressure",
+                        dropped);
+    }
+
     DRD_LOG_MESSAGE("Capture manager leaving running state");
     self->running = FALSE;
 }

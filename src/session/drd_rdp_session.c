@@ -42,6 +42,7 @@ struct _DrdRdpSession
     DrdRdpGraphicsPipeline *graphics_pipeline;
     gboolean graphics_pipeline_ready;
     guint32 frame_sequence;
+    gint max_surface_payload;
     gboolean is_activated;
     GThread *event_thread;
     HANDLE stop_event;
@@ -54,6 +55,7 @@ struct _DrdRdpSession
     DrdLocalSession *local_session;
     gboolean passive_mode;
     DrdRdpSessionError last_error;
+    guint64 frame_pull_errors;
 };
 
 G_DEFINE_TYPE(DrdRdpSession, drd_rdp_session, G_TYPE_OBJECT)
@@ -88,6 +90,8 @@ static gpointer drd_rdp_session_render_thread(gpointer user_data);
 static void drd_rdp_session_notify_closed(DrdRdpSession *self);
 
 gboolean drd_rdp_session_client_is_mstsc(DrdRdpSession *self);
+
+static void drd_rdp_session_refresh_surface_payload_limit(DrdRdpSession *self);
 
 static WCHAR *drd_rdp_session_get_utf16_string(const char *str, size_t *size);
 
@@ -151,6 +155,7 @@ drd_rdp_session_init(DrdRdpSession *self)
     self->graphics_pipeline = NULL;
     self->graphics_pipeline_ready = FALSE;
     self->frame_sequence = 1;
+    g_atomic_int_set(&self->max_surface_payload, 0);
     self->is_activated = FALSE;
     self->event_thread = NULL;
     self->stop_event = NULL;
@@ -163,6 +168,7 @@ drd_rdp_session_init(DrdRdpSession *self)
     self->local_session = NULL;
     self->passive_mode = FALSE;
     self->last_error = DRD_RDP_SESSION_ERROR_NONE;
+    self->frame_pull_errors = 0;
 }
 
 DrdRdpSession *
@@ -333,6 +339,7 @@ drd_rdp_session_activate(DrdRdpSession *self)
         drd_server_runtime_request_keyframe(self->runtime);
     }
 
+    drd_rdp_session_refresh_surface_payload_limit(self);
 
     drd_rdp_session_set_peer_state(self, "activated");
     self->is_activated = TRUE;
@@ -946,6 +953,22 @@ drd_rdp_session_enforce_peer_desktop_size(DrdRdpSession *self)
     return TRUE;
 }
 
+static void
+drd_rdp_session_refresh_surface_payload_limit(DrdRdpSession *self)
+{
+    g_return_if_fail(DRD_IS_RDP_SESSION(self));
+
+    guint32 max_payload = 0;
+    if (self->peer != NULL && self->peer->context != NULL &&
+        self->peer->context->settings != NULL)
+    {
+        max_payload = freerdp_settings_get_uint32(self->peer->context->settings,
+                                                  FreeRDP_MultifragMaxRequestSize);
+    }
+    /* 缓存通道协商出的多片段上限，渲染线程读取时无需再访问 settings。 */
+    g_atomic_int_set(&self->max_surface_payload, (gint) max_payload);
+}
+
 static gpointer
 drd_rdp_session_render_thread(gpointer user_data)
 {
@@ -972,7 +995,7 @@ drd_rdp_session_render_thread(gpointer user_data)
              * 直到客户端发送 RDPGFX_FRAME_ACKNOWLEDGE 释放槽位，保证不会编码无限多
              * Progressive 帧。
              */
-            if (!drd_rdp_session_wait_for_graphics_capacity(self, -1))
+            if (!drd_rdp_session_wait_for_graphics_capacity(self, G_USEC_PER_SEC))
             {
                 drd_rdp_session_disable_graphics_pipeline(self, "Rdpgfx capacity wait aborted");
             }
@@ -993,9 +1016,11 @@ drd_rdp_session_render_thread(gpointer user_data)
 
             if (error != NULL)
             {
-                DRD_LOG_WARNING("Session %s failed to pull encoded frame: %s",
+                self->frame_pull_errors++;
+                DRD_LOG_WARNING("Session %s failed to pull encoded frame: %s (errors=%" G_GUINT64_FORMAT ")",
                                 self->peer_address,
-                                error->message);
+                                error->message,
+                                self->frame_pull_errors);
             }
             continue;
         }
@@ -1005,15 +1030,18 @@ drd_rdp_session_render_thread(gpointer user_data)
         gboolean sent_via_graphics = drd_rdp_session_try_submit_graphics(self, owned_frame);
         if (!sent_via_graphics)
         {
-            guint32 negotiated_max_payload = 0;
-            if (self->peer != NULL && self->peer->context != NULL &&
-                self->peer->context->settings != NULL)
+            guint32 negotiated_max_payload =
+                    (guint32) g_atomic_int_get(&self->max_surface_payload);
+            if (negotiated_max_payload == 0)
             {
+                drd_rdp_session_refresh_surface_payload_limit(self);
                 negotiated_max_payload =
-                        freerdp_settings_get_uint32(self->peer->context->settings,
-                                                    FreeRDP_MultifragMaxRequestSize);
+                        (guint32) g_atomic_int_get(&self->max_surface_payload);
             }
-            DRD_LOG_MESSAGE("try to send surface bit");
+
+            DRD_LOG_DEBUG("Session %s sending SurfaceBits fallback (limit=%u)",
+                          self->peer_address,
+                          negotiated_max_payload);
             g_autoptr(GError) send_error = NULL;
             if (!drd_rdp_session_send_surface_bits(self,
                                                    owned_frame,

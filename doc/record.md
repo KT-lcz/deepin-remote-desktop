@@ -351,3 +351,46 @@ peer->GetEventHandles(peer, &events[n_events], 32 - n_events) 填充剩余槽位
 - JWT：header+signature 之外，claims 部分是 payload。
 
 
+
+• 以下模块仍存在可优化空间，按子系统给出分析与后续可行方向：
+
+transport
+
+- src/transport/drd_rdp_listener.c:220-360：incoming 回调中为每个连接重复调用 drd_rdp_listener_ensure_nla_hash()；可缓存哈希生成状态并在 NLA 关闭后立即清零，避免每次连接都重新派生密码
+  哈希。
+- drd_rdp_listener_peer_from_connection() 在 dup(fd) 后未设置 FD_CLOEXEC，可通过 fcntl() 立即添加，防止派生进程遗留连接。
+
+capture
+
+- src/capture/drd_x11_capture.c:270-380：XDamage 循环中大量 XSync/XPending，目前所有 wake-up 都走 busy loop；可引入 g_main_context_iteration() 或使用 g_source_add_unix_fd 将 X11 fd 纳
+  入 GLib 主循环，降低空闲 CPU。
+- 线程退出路径缺少 pthread_cancel 安全点，XNextEvent 长时间阻塞时无法在 stop() 里快速退出，可通过 XWakeupDisplay 或自建 pipe 中断。
+
+encoding
+
+- src/encoding/drd_rfx_encoder.c:400+：RFX 编码过程中 collect_dirty_rects() 对每个 tile 逐行 memcmp；可考虑引入 SSE/AVX128 加速或对大块 tile 先使用 g_checksum_update 预判，再在 hash
+  失败时逐行比对。
+- Progressive 编码目前固定 keyframe 间隔，缺乏根据 ACK/带宽动态调整的逻辑；可在 drd_rdp_graphics_pipeline 中记录 queueDepth 变化并反馈给 encoder。
+
+session
+
+- src/session/drd_rdp_session.c:380-550：render 线程对 drd_server_runtime_pull_encoded_frame 的错误处理仅记录日志而不统计，可增加计数器并在 session 关闭时输出，以便定位 capture/
+  encoding 瓶颈。
+- drd_rdp_session_render_thread 在 Rdpgfx 等待永远传 timeout=-1，若客户端长期无 ACK 将导致线程卡死且无法触发 fallback，可引入最大等待时间并在超时后自动回退 SurfaceBits。
+
+system
+
+- src/system/drd_system_daemon.c:400-520：routing token 探测 drd_routing_token_peek 每次都新建 GCancellable，可复用单例或延迟创建；同时 delegate 没有速率限制，一旦短时间大量失败连接可
+  能耗尽线程，可引入 g_thread_pool 或队列限流。
+- DBus dispatcher 在 start_bus() 失败后缺少分段日志，建议将 g_dbus_interface_skeleton_export 等关键步骤包裹错误信息，便于排查 bus 权限。
+
+security
+
+- src/security/drd_local_session.c：PAM 相关错误日志包含敏感凭据路径，可统一用匿名描述（如 pam_conv 返回码），避免泄漏用户输入。
+- NLA SAM 文件使用 g_mkdir_with_parents + chmod，但未调用 g_file_set_contents 时确保覆盖写入模式，可能留下旧密码；可在写入后调用 g_file_set_contents_full 设置
+  G_FILE_SET_CONTENTS_CONSISTENT.
+
+utils
+
+- src/utils/drd_frame_queue.c：队列仅存储最后一帧，无历史；在高速 capture、低速编码时会丢帧。可将 DrdFrameQueue 扩展为环形缓冲（如 2–3 帧）并记录丢弃次数，让上层了解背压情况。
+

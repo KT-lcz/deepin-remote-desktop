@@ -7,11 +7,14 @@
 
 #include <gio/gio.h>
 #include <glib.h>
+#include <glib-unix.h>
 
 #include <errno.h>
 #include <string.h>
+#include <poll.h>
 #include <sys/ipc.h>
 #include <sys/shm.h>
+#include <unistd.h>
 
 #include "utils/drd_frame.h"
 #include "utils/drd_log.h"
@@ -43,6 +46,7 @@ struct _DrdX11Capture
 
     guint width;
     guint height;
+    int wakeup_pipe[2];
 };
 
 G_DEFINE_TYPE(DrdX11Capture, drd_x11_capture, G_TYPE_OBJECT)
@@ -50,6 +54,12 @@ G_DEFINE_TYPE(DrdX11Capture, drd_x11_capture, G_TYPE_OBJECT)
 static gpointer drd_x11_capture_thread(gpointer user_data);
 
 static void drd_x11_capture_cleanup_locked(DrdX11Capture *self);
+
+static gboolean drd_x11_capture_setup_wakeup_pipe(DrdX11Capture *self, GError **error);
+
+static void drd_x11_capture_close_wakeup_pipe(DrdX11Capture *self);
+
+static void drd_x11_capture_drain_wakeup_pipe(int fd);
 
 static void
 drd_x11_capture_dispose(GObject *object)
@@ -87,6 +97,8 @@ drd_x11_capture_init(DrdX11Capture *self)
     memset(&self->shm.info, 0, sizeof(self->shm.info));
     self->shm.info.shmid = -1;
     self->running = FALSE;
+    self->wakeup_pipe[0] = -1;
+    self->wakeup_pipe[1] = -1;
 }
 
 DrdX11Capture *
@@ -232,6 +244,12 @@ drd_x11_capture_start(DrdX11Capture *self,
         self->display_name = g_strdup(display_name);
     }
 
+    if (!drd_x11_capture_setup_wakeup_pipe(self, error))
+    {
+        g_mutex_unlock(&self->state_mutex);
+        return FALSE;
+    }
+
     if (!drd_x11_capture_prepare_display(self,
                                          self->display_name,
                                          requested_width,
@@ -239,6 +257,7 @@ drd_x11_capture_start(DrdX11Capture *self,
                                          error))
     {
         drd_x11_capture_cleanup_locked(self);
+        drd_x11_capture_close_wakeup_pipe(self);
         g_mutex_unlock(&self->state_mutex);
         return FALSE;
     }
@@ -314,6 +333,15 @@ drd_x11_capture_stop(DrdX11Capture *self)
         XSync(display, False);
     }
 
+    if (self->wakeup_pipe[1] >= 0)
+    {
+        const gchar signal_byte = 'x';
+        if (write(self->wakeup_pipe[1], &signal_byte, 1) < 0)
+        {
+            (void) signal_byte;
+        }
+    }
+
     if (self->thread != NULL)
     {
         g_thread_join(self->thread);
@@ -322,6 +350,7 @@ drd_x11_capture_stop(DrdX11Capture *self)
 
     g_mutex_lock(&self->state_mutex);
     drd_x11_capture_cleanup_locked(self);
+    drd_x11_capture_close_wakeup_pipe(self);
     g_mutex_unlock(&self->state_mutex);
 
     DRD_LOG_MESSAGE("X11 capture stopped");
@@ -355,6 +384,7 @@ drd_x11_capture_thread(gpointer user_data)
         guint width = 0;
         guint height = 0;
         gboolean running;
+        int wake_fd = -1;
 
         g_mutex_lock(&self->state_mutex);
         running = self->running;
@@ -364,6 +394,7 @@ drd_x11_capture_thread(gpointer user_data)
         damage_event_base = self->damage_event_base;
         width = self->width;
         height = self->height;
+        wake_fd = self->wakeup_pipe[0];
         g_mutex_unlock(&self->state_mutex);
 
         if (!running || display == NULL || image == NULL)
@@ -387,21 +418,50 @@ drd_x11_capture_thread(gpointer user_data)
         gint64 now = g_get_monotonic_time();
         if (!has_damage && last_capture != 0 && (now - last_capture) < target_interval)
         {
-            gint64 sleep_us = target_interval - (now - last_capture);
-            if (sleep_us > 0)
+            gint64 remaining = target_interval - (now - last_capture);
+            if (remaining < 1000)
             {
-                if (sleep_us < 1000)
-                {
-                    sleep_us = 1000;
-                }
-                else if (sleep_us > target_interval)
-                {
-                    sleep_us = target_interval;
-                }
-
-                g_usleep((gulong) sleep_us);
+                remaining = 1000;
             }
-            continue;
+            else if (remaining > target_interval)
+            {
+                remaining = target_interval;
+            }
+
+            GPollFD pfds[2];
+            nfds_t poll_count = 0;
+            int wake_index = -1;
+            const int connection_fd = XConnectionNumber(display);
+            pfds[poll_count].fd = connection_fd;
+            pfds[poll_count].events = G_IO_IN;
+            pfds[poll_count].revents = 0;
+            poll_count++;
+            if (wake_fd >= 0)
+            {
+                wake_index = poll_count;
+                pfds[poll_count].fd = wake_fd;
+                pfds[poll_count].events = G_IO_IN;
+                pfds[poll_count].revents = 0;
+                poll_count++;
+            }
+
+            gint timeout_ms = (gint) (remaining / 1000);
+            if (timeout_ms < 1)
+            {
+                timeout_ms = 1;
+            }
+
+            gint poll_result = g_poll(pfds, poll_count, timeout_ms);
+            if (poll_result < 0)
+            {
+                continue;
+            }
+            if (poll_result > 0 && wake_index >= 0 && (pfds[wake_index].revents & G_IO_IN))
+            {
+                drd_x11_capture_drain_wakeup_pipe(wake_fd);
+            }
+
+        continue;
         }
 
         if (!XShmGetImage(display, root, image, 0, 0, AllPlanes))
@@ -431,4 +491,50 @@ drd_x11_capture_thread(gpointer user_data)
 
     g_object_unref(self);
     return NULL;
+}
+
+static gboolean
+drd_x11_capture_setup_wakeup_pipe(DrdX11Capture *self, GError **error)
+{
+    if (self->wakeup_pipe[0] >= 0 && self->wakeup_pipe[1] >= 0)
+    {
+        return TRUE;
+    }
+
+    int fds[2] = {-1, -1};
+    if (!g_unix_open_pipe(fds, FD_CLOEXEC, error))
+    {
+        return FALSE;
+    }
+
+    self->wakeup_pipe[0] = fds[0];
+    self->wakeup_pipe[1] = fds[1];
+    return TRUE;
+}
+
+static void
+drd_x11_capture_close_wakeup_pipe(DrdX11Capture *self)
+{
+    for (int i = 0; i < 2; ++i)
+    {
+        if (self->wakeup_pipe[i] >= 0)
+        {
+            close(self->wakeup_pipe[i]);
+            self->wakeup_pipe[i] = -1;
+        }
+    }
+}
+
+static void
+drd_x11_capture_drain_wakeup_pipe(int fd)
+{
+    if (fd < 0)
+    {
+        return;
+    }
+
+    char buffer[64];
+    while (read(fd, buffer, sizeof(buffer)) > 0)
+    {
+    }
 }

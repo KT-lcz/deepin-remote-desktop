@@ -18,7 +18,12 @@ struct _DrdEncodingManager
     DrdRfxEncoder *rfx_encoder;
     DrdEncodedFrame *scratch_frame;
     gboolean enable_diff;
+    guint rfx_fallback_grace;
+    gsize last_fallback_payload;
+    guint rfx_fallback_count;
 };
+
+#define DRD_RFX_FALLBACK_GRACE_FRAMES 30
 
 G_DEFINE_TYPE(DrdEncodingManager, drd_encoding_manager, G_TYPE_OBJECT)
 
@@ -50,6 +55,9 @@ drd_encoding_manager_init(DrdEncodingManager *self)
     self->raw_encoder = drd_raw_encoder_new();
     self->rfx_encoder = drd_rfx_encoder_new();
     self->scratch_frame = drd_encoded_frame_new();
+    self->rfx_fallback_grace = 0;
+    self->last_fallback_payload = 0;
+    self->rfx_fallback_count = 0;
 }
 
 DrdEncodingManager *
@@ -80,6 +88,9 @@ drd_encoding_manager_prepare(DrdEncodingManager *self,
     self->frame_height = options->height;
     self->mode = options->mode;
     self->enable_diff = options->enable_frame_diff;
+    self->rfx_fallback_grace = 0;
+    self->last_fallback_payload = 0;
+    self->rfx_fallback_count = 0;
 
     gboolean ok = FALSE;
     gboolean raw_ok = drd_raw_encoder_configure(self->raw_encoder,
@@ -152,6 +163,9 @@ drd_encoding_manager_reset(DrdEncodingManager *self)
         drd_rfx_encoder_reset(self->rfx_encoder);
     }
     self->ready = FALSE;
+    self->rfx_fallback_grace = 0;
+    self->last_fallback_payload = 0;
+    self->rfx_fallback_count = 0;
 }
 
 gboolean
@@ -191,7 +205,17 @@ drd_encoding_manager_encode(DrdEncodingManager *self,
         return FALSE;
     }
 
+    if (max_payload > 0 && self->last_fallback_payload > 0 &&
+        max_payload > self->last_fallback_payload)
+    {
+        DRD_LOG_MESSAGE("RFX raw fallback cleared, peer payload limit increased to %zu", max_payload);
+        self->rfx_fallback_grace = 0;
+        self->last_fallback_payload = 0;
+    }
+
     gboolean ok = FALSE;
+    const gboolean prefer_raw =
+            (desired_codec == DRD_FRAME_CODEC_RFX && max_payload > 0 && self->rfx_fallback_grace > 0);
 
     switch (desired_codec)
     {
@@ -199,6 +223,22 @@ drd_encoding_manager_encode(DrdEncodingManager *self,
             ok = drd_raw_encoder_encode(self->raw_encoder, input, self->scratch_frame, error);
             break;
         case DRD_FRAME_CODEC_RFX:
+            if (prefer_raw)
+            {
+                DRD_LOG_DEBUG("RFX raw grace active (%u frame(s) remaining, limit=%zu)",
+                              self->rfx_fallback_grace,
+                              self->last_fallback_payload);
+                if (self->rfx_fallback_grace > 0)
+                {
+                    self->rfx_fallback_grace--;
+                    if (self->rfx_fallback_grace == 0)
+                    {
+                        self->last_fallback_payload = 0;
+                    }
+                }
+                ok = drd_raw_encoder_encode(self->raw_encoder, input, self->scratch_frame, error);
+                break;
+            }
             ok = drd_rfx_encoder_encode(self->rfx_encoder,
                                         input,
                                         self->scratch_frame,
@@ -210,9 +250,14 @@ drd_encoding_manager_encode(DrdEncodingManager *self,
                 drd_encoded_frame_get_data(self->scratch_frame, &payload_len);
                 if (payload_len > max_payload)
                 {
-                    DRD_LOG_MESSAGE("RFX payload %zu exceeds peer limit %zu, falling back to raw frame",
+                    self->rfx_fallback_count++;
+                    self->rfx_fallback_grace = DRD_RFX_FALLBACK_GRACE_FRAMES;
+                    self->last_fallback_payload = max_payload;
+                    DRD_LOG_WARNING("RFX payload %zu exceeds peer limit %zu, falling back to raw frame (count=%u, grace=%u)",
                                     payload_len,
-                                    max_payload);
+                                    max_payload,
+                                    self->rfx_fallback_count,
+                                    self->rfx_fallback_grace);
                     ok = drd_raw_encoder_encode(self->raw_encoder,
                                                 input,
                                                 self->scratch_frame,

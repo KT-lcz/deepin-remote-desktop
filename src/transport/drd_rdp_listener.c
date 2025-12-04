@@ -78,9 +78,22 @@ struct _DrdRdpListener
 
 G_DEFINE_TYPE(DrdRdpListener, drd_rdp_listener, G_TYPE_SOCKET_SERVICE)
 
+static gboolean
+drd_rdp_listener_is_system_mode(DrdRdpListener *self)
+{
+    return self != NULL && self->runtime_mode == DRD_RUNTIME_MODE_SYSTEM;
+}
+
+gboolean
+drd_rdp_listener_is_handover_mode(DrdRdpListener *self)
+{
+    return self != NULL && self->runtime_mode == DRD_RUNTIME_MODE_HANDOVER;
+}
+
 static void drd_rdp_listener_stop_internal(DrdRdpListener *self);
 
-static gboolean drd_rdp_listener_ensure_nla_hash(DrdRdpListener *self, GError **error)
+static gboolean
+drd_rdp_listener_ensure_nla_hash(DrdRdpListener *self, GError **error)
 {
     if (!self->nla_enabled)
     {
@@ -726,9 +739,16 @@ drd_configure_peer_settings(DrdRdpListener *self, freerdp_peer *client, GError *
             return FALSE;
         }
     }
-    if (self->runtime_mode == DRD_RUNTIME_MODE_HANDOVER)
+    if (drd_rdp_listener_is_handover_mode(self))
     {
-        freerdp_settings_set_bool(settings, FreeRDP_RdstlsSecurity, TRUE);
+        if (!freerdp_settings_set_bool(settings, FreeRDP_RdstlsSecurity, TRUE))
+        {
+            g_set_error_literal(error,
+                                G_IO_ERROR,
+                                G_IO_ERROR_FAILED,
+                                "Failed to enable RDSTLS security flags");
+            return FALSE;
+        }
     }
     return TRUE;
 }
@@ -804,8 +824,7 @@ drd_rdp_listener_accept_peer(DrdRdpListener *self,
 
     ctx->runtime = g_object_ref(self->runtime);
     drd_rdp_session_set_runtime(ctx->session, self->runtime);
-    drd_rdp_session_set_passive_mode(ctx->session,
-                                     self->runtime_mode == DRD_RUNTIME_MODE_SYSTEM);
+    drd_rdp_session_set_passive_mode(ctx->session, drd_rdp_listener_is_system_mode(self));
 
     if (!drd_rdp_session_start_event_thread(ctx->session))
     {
@@ -824,7 +843,7 @@ drd_rdp_listener_accept_peer(DrdRdpListener *self,
     {
         rdpInput *input = peer->context->input;
         input->context = peer->context;
-        if (self->runtime_mode != DRD_RUNTIME_MODE_SYSTEM)
+        if (!drd_rdp_listener_is_system_mode(self))
         {
             input->KeyboardEvent = drd_rdp_peer_keyboard_event;
             input->UnicodeKeyboardEvent = drd_rdp_peer_unicode_event;
@@ -895,7 +914,7 @@ drd_rdp_listener_incoming(GSocketService *service,
     g_autoptr(GError) accept_error = NULL;
     DRD_LOG_MESSAGE("drd_rdp_listener_incoming");
 
-    if (self->runtime_mode == DRD_RUNTIME_MODE_SYSTEM && self->delegate_func != NULL)
+    if (drd_rdp_listener_is_system_mode(self) && self->delegate_func != NULL)
     {
         const gboolean handled =
                 self->delegate_func(self, connection, self->delegate_data, &accept_error);
@@ -1026,7 +1045,7 @@ drd_rdp_listener_start(DrdRdpListener *self, GError **error)
         return FALSE;
     }
 
-    if (self->runtime_mode == DRD_RUNTIME_MODE_SYSTEM && self->cancellable == NULL)
+    if (drd_rdp_listener_is_system_mode(self) && self->cancellable == NULL)
     {
         self->cancellable = g_cancellable_new();
     }

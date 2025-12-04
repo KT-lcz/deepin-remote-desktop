@@ -14,6 +14,9 @@
 
 typedef struct _DrdSystemDaemon DrdSystemDaemon;
 
+#define DRD_SYSTEM_MAX_PENDING_CLIENTS 32
+#define DRD_SYSTEM_CLIENT_STALE_TIMEOUT_US (30 * G_USEC_PER_SEC)
+
 typedef struct _DrdRemoteClient
 {
     DrdSystemDaemon *daemon;
@@ -26,6 +29,7 @@ typedef struct _DrdRemoteClient
     gboolean assigned;
     gboolean use_system_credentials;
     guint handover_count;
+    gint64 last_activity_us;
 } DrdRemoteClient;
 
 typedef struct
@@ -135,7 +139,7 @@ drd_system_daemon_generate_remote_identity(DrdSystemDaemon *self,
 
 static void drd_system_daemon_remove_client(DrdSystemDaemon *self, DrdRemoteClient *client);
 
-static void drd_system_daemon_queue_client(DrdSystemDaemon *self, DrdRemoteClient *client);
+static gboolean drd_system_daemon_queue_client(DrdSystemDaemon *self, DrdRemoteClient *client);
 
 static void drd_system_daemon_unqueue_client(DrdSystemDaemon *self, DrdRemoteClient *client);
 
@@ -171,7 +175,60 @@ static gboolean drd_system_daemon_on_get_system_credentials(DrdDBusRemoteDesktop
                                                             GDBusMethodInvocation *invocation,
                                                             gpointer user_data);
 
+static void drd_system_daemon_on_bus_name_acquired(GDBusConnection *connection,
+                                                   const gchar *name,
+                                                   gpointer user_data);
+
+static void drd_system_daemon_on_bus_name_lost(GDBusConnection *connection,
+                                               const gchar *name,
+                                               gpointer user_data);
+
 G_DEFINE_TYPE(DrdSystemDaemon, drd_system_daemon, G_TYPE_OBJECT)
+
+static gint64
+drd_system_daemon_now_us(void)
+{
+    return g_get_monotonic_time();
+}
+
+static void
+drd_system_daemon_touch_client(DrdRemoteClient *client)
+{
+    if (client == NULL)
+    {
+        return;
+    }
+
+    client->last_activity_us = drd_system_daemon_now_us();
+}
+
+static void
+drd_system_daemon_prune_stale_pending_clients(DrdSystemDaemon *self, gint64 now_us)
+{
+    if (self->pending_clients == NULL || self->pending_clients->length == 0)
+    {
+        return;
+    }
+
+    GList *link = self->pending_clients->head;
+    while (link != NULL)
+    {
+        GList *next = link->next;
+        DrdRemoteClient *candidate = link->data;
+        if (candidate != NULL && !candidate->assigned && candidate->last_activity_us > 0)
+        {
+            gint64 idle_us = now_us - candidate->last_activity_us;
+            if (idle_us >= DRD_SYSTEM_CLIENT_STALE_TIMEOUT_US)
+            {
+                DRD_LOG_WARNING("Expiring stale handover %s after %.0f seconds in queue",
+                                candidate->id != NULL ? candidate->id : "unknown",
+                                idle_us / (gdouble) G_USEC_PER_SEC);
+                drd_system_daemon_remove_client(self, candidate);
+            }
+        }
+        link = next;
+    }
+}
 
 static void
 drd_remote_client_free(DrdRemoteClient *client)
@@ -221,17 +278,33 @@ drd_system_daemon_find_client_by_token(DrdSystemDaemon *self, const gchar *routi
     return g_hash_table_lookup(self->remote_clients, remote_id);
 }
 
-static void
+static gboolean
 drd_system_daemon_queue_client(DrdSystemDaemon *self, DrdRemoteClient *client)
 {
-    g_return_if_fail(DRD_IS_SYSTEM_DAEMON(self));
-    g_return_if_fail(client != NULL);
+    g_return_val_if_fail(DRD_IS_SYSTEM_DAEMON(self), FALSE);
+    g_return_val_if_fail(client != NULL, FALSE);
 
-    if (!client->assigned)
+    if (client->assigned)
     {
-        DRD_LOG_MESSAGE("g_queue_push_tail client run");
-        g_queue_push_tail(self->pending_clients, client);
+        return TRUE;
     }
+
+    gint64 now_us = drd_system_daemon_now_us();
+    drd_system_daemon_prune_stale_pending_clients(self, now_us);
+
+    guint pending = drd_system_daemon_get_pending_client_count(self);
+    if (pending >= DRD_SYSTEM_MAX_PENDING_CLIENTS)
+    {
+        DRD_LOG_WARNING("Pending handover queue full (%u >= %u), cannot enqueue %s",
+                        pending,
+                        DRD_SYSTEM_MAX_PENDING_CLIENTS,
+                        client->id != NULL ? client->id : "unknown");
+        return FALSE;
+    }
+
+    client->last_activity_us = now_us;
+    g_queue_push_tail(self->pending_clients, client);
+    return TRUE;
 }
 
 static void
@@ -359,8 +432,12 @@ drd_system_daemon_register_client(DrdSystemDaemon *self,
     g_object_set_data(G_OBJECT(connection), "drd-system-keep-open", GINT_TO_POINTER(1));
 
     g_hash_table_replace(self->remote_clients, g_strdup(client->id), client);
-    DRD_LOG_MESSAGE("drd_system_daemon_queue_client run");
-    drd_system_daemon_queue_client(self, client);
+    if (!drd_system_daemon_queue_client(self, client))
+    {
+        DRD_LOG_WARNING("Rejecting handover client %s because pending queue is full", client->id);
+        drd_system_daemon_remove_client(self, client);
+        return FALSE;
+    }
 
     const gchar *token_preview = client->routing != NULL && client->routing->routing_token != NULL
                                      ? client->routing->routing_token
@@ -424,6 +501,7 @@ drd_system_daemon_delegate(DrdRdpListener *listener,
             existing->connection = g_object_ref(connection);
             g_object_set_data(G_OBJECT(connection), "drd-system-client", existing);
             g_object_set_data(G_OBJECT(connection), "drd-system-keep-open", GINT_TO_POINTER(1));
+            drd_system_daemon_touch_client(existing);
 
             drd_dbus_remote_desktop_rdp_handover_emit_take_client_ready(
                 existing->handover_iface,
@@ -433,13 +511,15 @@ drd_system_daemon_delegate(DrdRdpListener *listener,
         }
     }
 
-    DRD_LOG_MESSAGE("drd_system_daemon_register_client run");
     if (!drd_system_daemon_register_client(self, connection, info))
     {
         g_clear_pointer(&info, drd_routing_token_info_free);
         g_object_unref(connection);
         return TRUE;
     }
+    DRD_LOG_MESSAGE("Registered new handover client (total=%u, pending=%u)",
+                    drd_system_daemon_get_remote_client_count(self),
+                    drd_system_daemon_get_pending_client_count(self));
 
     /* Allow the default listener to accept the connection so FreeRDP can build a session and send redirection. */
     g_object_unref(connection);
@@ -475,6 +555,7 @@ drd_system_daemon_on_session_ready(DrdRdpListener *listener,
         client->use_system_credentials =
                 drd_rdp_session_client_is_mstsc(session) && !client->routing->requested_rdstls;
     }
+    drd_system_daemon_touch_client(client);
 }
 
 static gboolean
@@ -502,6 +583,7 @@ drd_system_daemon_handle_request_handover(DrdDBusRemoteDesktopRdpDispatcher *int
                                           gpointer user_data)
 {
     DrdSystemDaemon *self = DRD_SYSTEM_DAEMON(user_data);
+    drd_system_daemon_prune_stale_pending_clients(self, drd_system_daemon_now_us());
     DrdRemoteClient *client = g_queue_pop_head(self->pending_clients);
     if (client == NULL)
     {
@@ -514,6 +596,7 @@ drd_system_daemon_handle_request_handover(DrdDBusRemoteDesktopRdpDispatcher *int
     }
 
     client->assigned = TRUE;
+    drd_system_daemon_touch_client(client);
     drd_dbus_remote_desktop_rdp_dispatcher_complete_request_handover(interface,
                                                                      invocation,
                                                                      client->id);
@@ -553,6 +636,39 @@ drd_system_daemon_stop_listener(DrdSystemDaemon *self)
         drd_rdp_listener_stop(self->listener);
         g_clear_object(&self->listener);
     }
+}
+
+static void
+drd_system_daemon_on_bus_name_acquired(GDBusConnection *connection,
+                                       const gchar *name,
+                                       gpointer user_data)
+{
+    (void) connection;
+    DrdSystemDaemon *self = DRD_SYSTEM_DAEMON(user_data);
+    if (self == NULL)
+    {
+        return;
+    }
+    DRD_LOG_MESSAGE("System daemon acquired bus name %s", name);
+}
+
+static void
+drd_system_daemon_on_bus_name_lost(GDBusConnection *connection,
+                                   const gchar *name,
+                                   gpointer user_data)
+{
+    (void) connection;
+    DrdSystemDaemon *self = DRD_SYSTEM_DAEMON(user_data);
+    if (self == NULL)
+    {
+        return;
+    }
+    DRD_LOG_WARNING("System daemon lost bus name %s, requesting shutdown", name);
+    /*
+     * 丢失总线名称通常意味着总线重启或权限问题，直接触发主循环退出
+     * 让 systemd 重新拉起服务，确保状态一致。
+     */
+    drd_system_daemon_request_shutdown(self);
 }
 
 static void
@@ -668,6 +784,20 @@ drd_system_daemon_set_main_loop(DrdSystemDaemon *self, GMainLoop *loop)
     return TRUE;
 }
 
+guint
+drd_system_daemon_get_pending_client_count(DrdSystemDaemon *self)
+{
+    g_return_val_if_fail(DRD_IS_SYSTEM_DAEMON(self), 0);
+    return self->pending_clients != NULL ? self->pending_clients->length : 0;
+}
+
+guint
+drd_system_daemon_get_remote_client_count(DrdSystemDaemon *self)
+{
+    g_return_val_if_fail(DRD_IS_SYSTEM_DAEMON(self), 0);
+    return self->remote_clients != NULL ? g_hash_table_size(self->remote_clients) : 0;
+}
+
 static gboolean
 drd_system_daemon_start_listener(DrdSystemDaemon *self, GError **error)
 {
@@ -731,17 +861,19 @@ drd_system_daemon_start_bus(DrdSystemDaemon *self, GError **error)
         return FALSE;
     }
 
+    g_object_ref(self);
     self->bus.bus_name_owner_id =
             g_bus_own_name_on_connection(self->bus.connection,
                                          DRD_REMOTE_DESKTOP_BUS_NAME,
                                          G_BUS_NAME_OWNER_FLAGS_REPLACE,
-                                         NULL,
-                                         NULL,
-                                         NULL,
-                                         NULL);
+                                         drd_system_daemon_on_bus_name_acquired,
+                                         drd_system_daemon_on_bus_name_lost,
+                                         self,
+                                         g_object_unref);
 
     if (self->bus.bus_name_owner_id == 0)
     {
+        g_object_unref(self);
         g_set_error_literal(error,
                             G_IO_ERROR,
                             G_IO_ERROR_FAILED,
@@ -754,15 +886,6 @@ drd_system_daemon_start_bus(DrdSystemDaemon *self, GError **error)
                      "handle-request-handover",
                      G_CALLBACK(drd_system_daemon_handle_request_handover),
                      self);
-
-    // TODO
-    g_bus_own_name(G_BUS_TYPE_SYSTEM,
-                   "org.deepin.RemoteDesktop",
-                   G_BUS_NAME_OWNER_FLAGS_NONE,
-                   NULL,
-                   NULL,
-                   NULL,
-                   self, NULL);
 
     if (!g_dbus_interface_skeleton_export(G_DBUS_INTERFACE_SKELETON(self->bus.dispatcher),
                                           self->bus.connection,
@@ -821,6 +944,7 @@ drd_system_daemon_on_start_handover(DrdDBusRemoteDesktopRdpHandover *interface,
     gboolean redirected_locally = FALSE;
     const gboolean has_routing_token =
             client->routing != NULL && client->routing->routing_token != NULL;
+    drd_system_daemon_touch_client(client);
 
     g_autoptr(GError)
     io_error = NULL;
@@ -895,6 +1019,7 @@ drd_system_daemon_on_take_client(DrdDBusRemoteDesktopRdpHandover *interface,
     (void) fd_list;
     DrdRemoteClient *client = user_data;
     DrdSystemDaemon *self = client->daemon;
+    drd_system_daemon_touch_client(client);
     GSocket *socket = g_socket_connection_get_socket(client->connection);
     if (!G_IS_SOCKET(socket))
     {
@@ -936,8 +1061,15 @@ drd_system_daemon_on_take_client(DrdDBusRemoteDesktopRdpHandover *interface,
     else
     {
         client->assigned = FALSE;
-        drd_system_daemon_queue_client(self, client);
-        DRD_LOG_MESSAGE("Client %s ready for next handover stage", client->id);
+        if (!drd_system_daemon_queue_client(self, client))
+        {
+            DRD_LOG_WARNING("Failed to requeue handover client %s, removing entry", client->id);
+            drd_system_daemon_remove_client(self, client);
+        }
+        else
+        {
+            DRD_LOG_MESSAGE("Client %s ready for next handover stage", client->id);
+        }
     }
 
     return TRUE;
