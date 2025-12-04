@@ -2,6 +2,15 @@
 # 变更记录
 # 变更记录
 
+## 2025-12-04：RDP 监听器运行模式统一
+- **目的**：消除 `DrdRdpListener` 内部的 `system_mode`/`handover_mode` 布尔散落点，统一由 `DrdRuntimeMode` 描述运行模式，降低调用方与监听器之间的状态组合复杂度。
+- **范围**：`src/transport/drd_rdp_listener.[ch]`、`src/core/drd_application.c`、`src/system/drd_system_daemon.c`、`src/system/drd_handover_daemon.c`、`src/core/drd_config.{c,h}`、`doc/architecture.md`、`doc/changelog.md`、`.codex/plan/runtime-mode-listener.md`。
+- **主要改动**：
+  1. `DrdRdpListener` 结构体新增 `runtime_mode` 字段，`drd_rdp_listener_new()` 直接接收 `DrdRuntimeMode`，并据此控制被动会话、输入回调、delegate/cancellable 以及 handover 模式下的 RDSTLS 开关。
+  2. `DrdApplication`、system/handover daemon 统一传入枚举值，避免自行维护布尔组合；旧的 `drd_config_get_system_mode()` API 被移除，保持配置层面对运行模式的单一来源。
+  3. 架构/变更文档更新监听器职责描述，计划文件记录分析→重构→文档同步的执行情况。
+- **影响**：监听器与外部控制器之间仅需记忆 `DrdRuntimeMode` 三态即可推导行为，后续扩展 handover 细分模式或新增测试模式时只需扩展枚举，不会再出现“布尔组合缺失/重复”的分支，system/handover 场景更易维护。
+
 ## 2025-12-03：握手触发 capture/编码链路
 - **目的**：防止 handover/user 进程在没有客户端时就启动 `drd_x11_capture_thread`，并在断开后及时停止采集，保证重新连接能够重新拉起 capture/input/encoder。
 - **范围**：`src/core/drd_server_runtime.*`、`src/core/drd_application.c`、`src/session/drd_rdp_session.c`、`src/transport/drd_rdp_listener.c`、`doc/architecture.md`、`doc/changelog.md`、`.codex/plan/runtime-stream-handshake.md`。

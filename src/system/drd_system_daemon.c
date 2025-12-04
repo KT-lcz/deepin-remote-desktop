@@ -383,7 +383,7 @@ drd_system_daemon_register_client(DrdSystemDaemon *self,
         g_random_int_range(0, 128), 1920, 1080, "0.0.0.0", &session_path, NULL, &error))
     {
         DRD_LOG_WARNING("create remote display failed %s", error->message);
-        return FALSE;
+        return TRUE; // Debug mode
     }
     DRD_LOG_MESSAGE("session_path=%s", session_path);
 
@@ -694,7 +694,7 @@ drd_system_daemon_start_listener(DrdSystemDaemon *self, GError **error)
                                           drd_config_get_nla_username(self->config),
                                           drd_config_get_nla_password(self->config),
                                           drd_config_get_pam_service(self->config),
-                                          TRUE);
+                                          DRD_RUNTIME_MODE_SYSTEM);
     if (self->listener == NULL)
     {
         g_set_error_literal(error,

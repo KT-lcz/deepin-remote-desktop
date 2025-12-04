@@ -30,7 +30,7 @@ DrdRdpListener *drd_rdp_listener_new(const gchar *bind_address,
                                      const gchar *nla_username,
                                      const gchar *nla_password,
                                      const gchar *pam_service,
-                                     gboolean system_mode);
+                                     DrdRuntimeMode runtime_mode);
 gboolean drd_rdp_listener_start(DrdRdpListener *self, GError **error);
 void drd_rdp_listener_stop(DrdRdpListener *self);
 DrdServerRuntime *drd_rdp_listener_get_runtime(DrdRdpListener *self);

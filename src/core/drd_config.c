@@ -694,13 +694,6 @@ drd_config_is_nla_enabled(DrdConfig *self)
     return self->nla_enabled;
 }
 
-gboolean
-drd_config_get_system_mode(DrdConfig *self)
-{
-    g_return_val_if_fail(DRD_IS_CONFIG(self), FALSE);
-    return drd_config_get_runtime_mode(self) == DRD_RUNTIME_MODE_SYSTEM;
-}
-
 DrdRuntimeMode
 drd_config_get_runtime_mode(DrdConfig *self)
 {

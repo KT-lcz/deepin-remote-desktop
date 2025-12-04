@@ -541,7 +541,7 @@ drd_handover_daemon_start(DrdHandoverDaemon *self, GError **error)
                                      self->nla_username,
                                      self->nla_password,
                                      drd_config_get_pam_service(self->config),
-                                     FALSE);
+                                     DRD_RUNTIME_MODE_HANDOVER);
         if (self->listener == NULL)
         {
             g_set_error_literal(error,

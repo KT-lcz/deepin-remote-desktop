@@ -305,7 +305,7 @@ drd_application_start_listener(DrdApplication *self, GError **error)
                                           snapshot.nla_username,
                                           snapshot.nla_password,
                                           snapshot.pam_service,
-                                          snapshot.runtime_mode == DRD_RUNTIME_MODE_SYSTEM);
+                                          snapshot.runtime_mode);
     if (self->listener == NULL)
     {
         g_set_error_literal(error,

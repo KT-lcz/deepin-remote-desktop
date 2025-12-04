@@ -66,7 +66,7 @@ struct _DrdRdpListener
     gchar *nla_hash;
     gboolean nla_enabled;
     gchar *pam_service;
-    gboolean system_mode;
+    DrdRuntimeMode runtime_mode;
     DrdEncodingOptions encoding_options;
     gboolean is_bound;
     GCancellable *cancellable;
@@ -225,10 +225,14 @@ drd_rdp_listener_new(const gchar *bind_address,
                      const gchar *nla_username,
                      const gchar *nla_password,
                      const gchar *pam_service,
-                     gboolean system_mode)
+                     DrdRuntimeMode runtime_mode)
 {
     g_return_val_if_fail(DRD_IS_SERVER_RUNTIME(runtime), NULL);
     g_return_val_if_fail(pam_service != NULL && *pam_service != '\0', NULL);
+    g_return_val_if_fail(runtime_mode == DRD_RUNTIME_MODE_USER ||
+                                 runtime_mode == DRD_RUNTIME_MODE_SYSTEM ||
+                                 runtime_mode == DRD_RUNTIME_MODE_HANDOVER,
+                         NULL);
     if (nla_enabled)
     {
         g_return_val_if_fail(nla_username != NULL && *nla_username != '\0', NULL);
@@ -244,7 +248,7 @@ drd_rdp_listener_new(const gchar *bind_address,
     self->nla_password = nla_enabled ? g_strdup(nla_password) : NULL;
     self->nla_hash = NULL;
     self->pam_service = g_strdup(pam_service);
-    self->system_mode = system_mode;
+    self->runtime_mode = runtime_mode;
     if (encoding_options != NULL)
     {
         self->encoding_options = *encoding_options;
@@ -722,7 +726,10 @@ drd_configure_peer_settings(DrdRdpListener *self, freerdp_peer *client, GError *
             return FALSE;
         }
     }
-
+    if (self->runtime_mode == DRD_RUNTIME_MODE_HANDOVER)
+    {
+        freerdp_settings_set_bool(settings, FreeRDP_RdstlsSecurity, TRUE);
+    }
     return TRUE;
 }
 
@@ -797,7 +804,8 @@ drd_rdp_listener_accept_peer(DrdRdpListener *self,
 
     ctx->runtime = g_object_ref(self->runtime);
     drd_rdp_session_set_runtime(ctx->session, self->runtime);
-    drd_rdp_session_set_passive_mode(ctx->session, self->system_mode);
+    drd_rdp_session_set_passive_mode(ctx->session,
+                                     self->runtime_mode == DRD_RUNTIME_MODE_SYSTEM);
 
     if (!drd_rdp_session_start_event_thread(ctx->session))
     {
@@ -816,7 +824,7 @@ drd_rdp_listener_accept_peer(DrdRdpListener *self,
     {
         rdpInput *input = peer->context->input;
         input->context = peer->context;
-        if (!self->system_mode)
+        if (self->runtime_mode != DRD_RUNTIME_MODE_SYSTEM)
         {
             input->KeyboardEvent = drd_rdp_peer_keyboard_event;
             input->UnicodeKeyboardEvent = drd_rdp_peer_unicode_event;
@@ -887,7 +895,7 @@ drd_rdp_listener_incoming(GSocketService *service,
     g_autoptr(GError) accept_error = NULL;
     DRD_LOG_MESSAGE("drd_rdp_listener_incoming");
 
-    if (self->system_mode && self->delegate_func != NULL)
+    if (self->runtime_mode == DRD_RUNTIME_MODE_SYSTEM && self->delegate_func != NULL)
     {
         const gboolean handled =
                 self->delegate_func(self, connection, self->delegate_data, &accept_error);
@@ -1018,7 +1026,7 @@ drd_rdp_listener_start(DrdRdpListener *self, GError **error)
         return FALSE;
     }
 
-    if (self->system_mode && self->cancellable == NULL)
+    if (self->runtime_mode == DRD_RUNTIME_MODE_SYSTEM && self->cancellable == NULL)
     {
         self->cancellable = g_cancellable_new();
     }
