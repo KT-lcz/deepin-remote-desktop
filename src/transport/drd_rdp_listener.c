@@ -79,12 +79,24 @@ struct _DrdRdpListener
 
 G_DEFINE_TYPE(DrdRdpListener, drd_rdp_listener, G_TYPE_SOCKET_SERVICE)
 
+/*
+ * 功能：判断监听器是否运行在 system 模式。
+ * 逻辑：检查实例非空且 runtime_mode 为 DRD_RUNTIME_MODE_SYSTEM。
+ * 参数：self 监听器。
+ * 外部接口：无。
+ */
 static gboolean
 drd_rdp_listener_is_system_mode(DrdRdpListener *self)
 {
     return self != NULL && self->runtime_mode == DRD_RUNTIME_MODE_SYSTEM;
 }
 
+/*
+ * 功能：判断监听器是否处于 handover 模式。
+ * 逻辑：检查实例非空且 runtime_mode 为 HANDOVER。
+ * 参数：self 监听器。
+ * 外部接口：无。
+ */
 gboolean
 drd_rdp_listener_is_handover_mode(DrdRdpListener *self)
 {
@@ -93,6 +105,12 @@ drd_rdp_listener_is_handover_mode(DrdRdpListener *self)
 
 static void drd_rdp_listener_stop_internal(DrdRdpListener *self);
 
+/*
+ * 功能：确保 NLA 使用的 NT hash 已就绪。
+ * 逻辑：若未启用 NLA 或已有 hash 直接返回；否则用存储的密码生成 hash，清零原始密码存储。
+ * 参数：self 监听器；error 输出错误。
+ * 外部接口：调用 drd_nla_sam_hash_password 派生 NTLM hash；GLib g_set_error。
+ */
 static gboolean
 drd_rdp_listener_ensure_nla_hash(DrdRdpListener *self, GError **error)
 {
@@ -130,6 +148,12 @@ drd_rdp_listener_ensure_nla_hash(DrdRdpListener *self, GError **error)
     return TRUE;
 }
 
+/*
+ * 功能：释放监听器持有的运行时资源。
+ * 逻辑：调用内部 stop，释放 runtime 引用，交由父类 dispose。
+ * 参数：object GObject 指针。
+ * 外部接口：GLib g_clear_object，父类 GObject dispose。
+ */
 static void
 drd_rdp_listener_dispose(GObject *object)
 {
@@ -139,6 +163,12 @@ drd_rdp_listener_dispose(GObject *object)
     G_OBJECT_CLASS(drd_rdp_listener_parent_class)->dispose(object);
 }
 
+/*
+ * 功能：释放监听器中分配的字符串、数组与敏感信息。
+ * 逻辑：清理地址、session 数组、NLA 用户名/密码/hash 等，并交由父类 finalize。
+ * 参数：object GObject 指针。
+ * 外部接口：GLib g_clear_pointer/g_free；对密码/hash 做 memset 清零。
+ */
 static void
 drd_rdp_listener_finalize(GObject *object)
 {
@@ -160,6 +190,12 @@ drd_rdp_listener_finalize(GObject *object)
     G_OBJECT_CLASS(drd_rdp_listener_parent_class)->finalize(object);
 }
 
+/*
+ * 功能：注册监听器的生命周期与 incoming 回调。
+ * 逻辑：设置 dispose/finalize，并将 incoming 指针指向 drd_rdp_listener_incoming。
+ * 参数：klass 类结构指针。
+ * 外部接口：GLib GSocketServiceClass 挂载 incoming 回调。
+ */
 static void
 drd_rdp_listener_class_init(DrdRdpListenerClass *klass)
 {
@@ -171,6 +207,12 @@ drd_rdp_listener_class_init(DrdRdpListenerClass *klass)
     service_class->incoming = drd_rdp_listener_incoming;
 }
 
+/*
+ * 功能：初始化监听器实例的集合与默认标志。
+ * 逻辑：创建 session 数组并清零绑定/回调相关状态。
+ * 参数：self 监听器。
+ * 外部接口：GLib g_ptr_array_new_with_free_func。
+ */
 static void
 drd_rdp_listener_init(DrdRdpListener *self)
 {
@@ -183,6 +225,12 @@ drd_rdp_listener_init(DrdRdpListener *self)
     self->session_cb_data = NULL;
 }
 
+/*
+ * 功能：检查是否存在活跃会话。
+ * 逻辑：若 sessions 数组为空或未初始化返回 FALSE，否则根据长度判断。
+ * 参数：self 监听器。
+ * 外部接口：无。
+ */
 static gboolean
 drd_rdp_listener_has_active_session(DrdRdpListener *self)
 {
@@ -194,6 +242,12 @@ drd_rdp_listener_has_active_session(DrdRdpListener *self)
     return self->sessions->len > 0;
 }
 
+/*
+ * 功能：从会话列表中移除关闭的会话并在空闲时停止 runtime。
+ * 逻辑：从 sessions 数组移除匹配会话并记录日志；若列表为空则调用 runtime 停止。
+ * 参数：self 监听器；session 已关闭的会话。
+ * 外部接口：drd_server_runtime_stop 停止流。
+ */
 static gboolean
 drd_rdp_listener_session_closed(DrdRdpListener *self, DrdRdpSession *session)
 {
@@ -218,6 +272,12 @@ drd_rdp_listener_session_closed(DrdRdpListener *self, DrdRdpSession *session)
     return TRUE;
 }
 
+/*
+ * 功能：作为关闭回调，将会话从监听器列表移除。
+ * 逻辑：转换 user_data 为监听器并调用 session_closed。
+ * 参数：session 关闭的会话；user_data 监听器。
+ * 外部接口：无。
+ */
 static void
 drd_rdp_listener_on_session_closed(DrdRdpSession *session, gpointer user_data)
 {
@@ -230,6 +290,14 @@ drd_rdp_listener_on_session_closed(DrdRdpSession *session, gpointer user_data)
     drd_rdp_listener_session_closed(self, session);
 }
 
+/*
+ * 功能：创建并初始化 RDP 监听器。
+ * 逻辑：校验参数（NLA/PAM/模式），复制绑定地址与凭据，保存编码配置与运行时引用。
+ * 参数：bind_address 监听地址；port 端口；runtime 运行时；encoding_options 编码配置；
+ *       nla_enabled 是否启用 NLA；nla_username/password NLA 凭据；pam_service PAM 服务名；
+ *       runtime_mode 运行模式。
+ * 外部接口：GLib g_object_new/g_strdup；drd_server_runtime 由调用方提供。
+ */
 DrdRdpListener *
 drd_rdp_listener_new(const gchar *bind_address,
                      guint16 port,
@@ -274,6 +342,12 @@ drd_rdp_listener_new(const gchar *bind_address,
     return self;
 }
 
+/*
+ * 功能：获取监听器绑定的运行时实例。
+ * 逻辑：校验类型后返回 runtime。
+ * 参数：self 监听器。
+ * 外部接口：无。
+ */
 DrdServerRuntime *
 drd_rdp_listener_get_runtime(DrdRdpListener *self)
 {
@@ -281,6 +355,12 @@ drd_rdp_listener_get_runtime(DrdRdpListener *self)
     return self->runtime;
 }
 
+/*
+ * 功能：将 socket 连接转换为可读的“IP:端口”字符串。
+ * 逻辑：提取远端地址，若为 IPv4/IPv6 则格式化输出，否则返回 unknown。
+ * 参数：connection 套接字连接。
+ * 外部接口：GLib GSocketConnection/GInetAddress API。
+ */
 static gchar *
 drd_rdp_listener_describe_connection(GSocketConnection *connection)
 {
@@ -313,6 +393,12 @@ drd_rdp_listener_describe_connection(GSocketConnection *connection)
     return g_strdup_printf("%s:%u", ip, port);
 }
 
+/*
+ * 功能：从 GLib socket 连接构造 FreeRDP peer。
+ * 逻辑：获取底层 fd，dup 一份并设置 CLOEXEC，传入 freerdp_peer_new 创建 peer，失败时设置错误。
+ * 参数：connection 套接字连接；error 输出错误。
+ * 外部接口：GLib GSocket API 获取 fd，POSIX dup/fcntl 设置标志，FreeRDP freerdp_peer_new 创建 peer。
+ */
 static freerdp_peer *
 drd_rdp_listener_peer_from_connection(GSocketConnection *connection, GError **error)
 {
@@ -373,6 +459,13 @@ drd_rdp_listener_peer_from_connection(GSocketConnection *connection, GError **er
     return peer;
 }
 
+/*
+ * 功能：分配 peer 上下文并创建对应的会话。
+ * 逻辑：将 context 转为 DrdRdpPeerContext，初始化 session/runtime/nla/vcm 等字段，
+ *       创建 DrdRdpSession 绑定到 peer。
+ * 参数：client FreeRDP peer；context FreeRDP 上下文。
+ * 外部接口：调用 drd_rdp_session_new 创建会话。
+ */
 static BOOL
 drd_peer_context_new(freerdp_peer *client, rdpContext *context)
 {
@@ -385,6 +478,12 @@ drd_peer_context_new(freerdp_peer *client, rdpContext *context)
     return ctx->session != NULL;
 }
 
+/*
+ * 功能：释放 peer 上下文中的资源。
+ * 逻辑：在 listener 中移除 session，释放 session/runtime 引用，释放 NLA SAM 文件，关闭 VCM。
+ * 参数：client peer（未使用）；context 上下文。
+ * 外部接口：WTSCloseServer 关闭虚拟通道管理器，drd_nla_sam_file_free 释放 SAM。
+ */
 static void
 drd_peer_context_free(freerdp_peer *client G_GNUC_UNUSED, rdpContext *context)
 {
@@ -414,6 +513,12 @@ drd_peer_context_free(freerdp_peer *client G_GNUC_UNUSED, rdpContext *context)
     ctx->listener = NULL;
 }
 
+/*
+ * 功能：处理 FreeRDP PostConnect 回调。
+ * 逻辑：调用会话 post_connect，释放 NLA SAM 文件；在非 NLA 模式下执行 TLS/PAM 登录校验。
+ * 参数：client peer。
+ * 外部接口：FreeRDP 回调机制；drd_rdp_listener_authenticate_tls_login 验证凭据。
+ */
 static BOOL
 drd_peer_post_connect(freerdp_peer *client)
 {
@@ -440,6 +545,12 @@ drd_peer_post_connect(freerdp_peer *client)
     return result;
 }
 
+/*
+ * 功能：处理 FreeRDP Activate 阶段。
+ * 逻辑：直接调用 drd_rdp_session_activate。
+ * 参数：client peer。
+ * 外部接口：无额外外部库调用。
+ */
 static BOOL
 drd_peer_activate(freerdp_peer *client)
 {
@@ -451,6 +562,12 @@ drd_peer_activate(freerdp_peer *client)
     return drd_rdp_session_activate(ctx->session);
 }
 
+/*
+ * 功能：处理 peer 断开事件，更新状态并移除会话。
+ * 逻辑：记录日志，更新会话状态为 disconnected，调用 session_closed 移除。
+ * 参数：client peer。
+ * 外部接口：DRD_LOG_MESSAGE 输出日志。
+ */
 static void
 drd_peer_disconnected(freerdp_peer *client)
 {
@@ -466,6 +583,12 @@ drd_peer_disconnected(freerdp_peer *client)
     }
 }
 
+/*
+ * 功能：校验客户端能力并确保 DRDYNVC/桌面尺寸配置满足要求。
+ * 逻辑：读取客户端桌面尺寸与 DesktopResize 能力；确认 VCM 加入 DRDYNVC；不符合条件则拒绝。
+ * 参数：client peer。
+ * 外部接口：freerdp_settings_get_uint32/get_bool 读取能力，DRDYNVC/WTS API 检查通道。
+ */
 static BOOL
 drd_peer_capabilities(freerdp_peer *client)
 {
@@ -519,6 +642,12 @@ drd_peer_capabilities(freerdp_peer *client)
     return TRUE;
 }
 
+/*
+ * 功能：从 FreeRDP input 上下文获取输入分发器。
+ * 逻辑：验证 context 与 runtime 存在后返回 runtime 持有的输入调度器。
+ * 参数：input FreeRDP 输入接口。
+ * 外部接口：drd_server_runtime_get_input 返回 DrdInputDispatcher。
+ */
 static DrdInputDispatcher *
 drd_peer_get_dispatcher(rdpInput *input)
 {
@@ -536,6 +665,12 @@ drd_peer_get_dispatcher(rdpInput *input)
     return drd_server_runtime_get_input(ctx->runtime);
 }
 
+/*
+ * 功能：处理客户端键盘事件并转发到输入分发器。
+ * 逻辑：获取 dispatcher 后调用 drd_input_dispatcher_handle_keyboard，失败时记录警告。
+ * 参数：input FreeRDP 输入接口；flags 按键标志；code 扫码。
+ * 外部接口：drd_input_dispatcher_handle_keyboard 负责注入输入；日志 DRD_LOG_WARNING。
+ */
 static BOOL
 drd_rdp_peer_keyboard_event(rdpInput *input, UINT16 flags, UINT8 code)
 {
@@ -553,6 +688,12 @@ drd_rdp_peer_keyboard_event(rdpInput *input, UINT16 flags, UINT8 code)
     return TRUE;
 }
 
+/*
+ * 功能：处理客户端 Unicode 键盘事件。
+ * 逻辑：获取 dispatcher，调用 drd_input_dispatcher_handle_unicode，失败时记录调试日志。
+ * 参数：input 输入接口；flags 标志；code Unicode 码点。
+ * 外部接口：drd_input_dispatcher_handle_unicode；DRD_LOG_DEBUG 记录不支持提示。
+ */
 static BOOL
 drd_rdp_peer_unicode_event(rdpInput *input, UINT16 flags, UINT16 code)
 {
@@ -570,6 +711,12 @@ drd_rdp_peer_unicode_event(rdpInput *input, UINT16 flags, UINT16 code)
     return TRUE;
 }
 
+/*
+ * 功能：处理鼠标事件并转发给输入分发器。
+ * 逻辑：调用 drd_input_dispatcher_handle_pointer 注入鼠标事件，失败记录警告。
+ * 参数：input 输入接口；flags 鼠标标志；x/y 坐标。
+ * 外部接口：drd_input_dispatcher_handle_pointer；DRD_LOG_WARNING。
+ */
 static BOOL
 drd_rdp_peer_pointer_event(rdpInput *input, UINT16 flags, UINT16 x, UINT16 y)
 {
@@ -587,6 +734,14 @@ drd_rdp_peer_pointer_event(rdpInput *input, UINT16 flags, UINT16 x, UINT16 y)
     return TRUE;
 }
 
+/*
+ * 功能：根据运行时配置初始化 FreeRDP peer 设置（TLS/NLA/编码模式等）。
+ * 逻辑：应用 TLS 证书，配置 NLA SAM 文件或 TLS-only 安全模式，设置桌面尺寸/色深/管线能力，
+ *       禁用不需要的功能，按照 handover 模式打开 RDSTLS。
+ * 参数：self 监听器；client peer；error 错误输出。
+ * 外部接口：大量使用 freerdp_settings_set_* API，drd_tls_credentials_apply 应用证书，
+ *           drd_nla_sam_file_new 配置 SAM。
+ */
 static BOOL
 drd_configure_peer_settings(DrdRdpListener *self, freerdp_peer *client, GError **error)
 {
@@ -764,6 +919,14 @@ drd_configure_peer_settings(DrdRdpListener *self, freerdp_peer *client, GError *
     return TRUE;
 }
 
+/*
+ * 功能：接受新的 FreeRDP peer，配置上下文与输入回调。
+ * 逻辑：为 peer 分配自定义 context，确保无其他会话占用；配置 peer settings、回调与 VCM，
+ *       启动会话事件线程并将会话加入列表，设置输入回调（非 system 模式）。
+ * 参数：self 监听器；peer FreeRDP peer；peer_name 日志用对端描述。
+ * 外部接口：freerdp_peer_context_new/Initialize、WTSOpenServerA 打开 VCM，
+ *           会话相关 drd_rdp_session_* 调用。
+ */
 static gboolean
 drd_rdp_listener_accept_peer(DrdRdpListener *self,
                              freerdp_peer *peer,
@@ -868,6 +1031,13 @@ drd_rdp_listener_accept_peer(DrdRdpListener *self,
     return TRUE;
 }
 
+/*
+ * 功能：处理新的 socket 连接，构造 peer 并交由 accept_peer。
+ * 逻辑：生成对端描述，按需求保持连接打开，创建 FreeRDP peer；若接受成功可调用 session 回调；
+ *       根据 keep_open 决定是否立即关闭 GLib 连接。
+ * 参数：self 监听器；connection 套接字连接；error 错误输出。
+ * 外部接口：drd_rdp_listener_peer_from_connection 创建 peer，drd_rdp_listener_accept_peer 完成配置。
+ */
 static gboolean
 drd_rdp_listener_handle_connection(DrdRdpListener *self,
                                    GSocketConnection *connection,
@@ -916,6 +1086,13 @@ drd_rdp_listener_handle_connection(DrdRdpListener *self,
     return TRUE;
 }
 
+/*
+ * 功能：GSocketService incoming 回调，处理系统模式委托或直接接受连接。
+ * 逻辑：若 system 模式且有 delegate 则先交给 delegate 处理；否则调用 handle_connection，
+ *       并在失败时记录日志。
+ * 参数：service 套接字服务（监听器自身）；connection 新连接；source_object 未使用。
+ * 外部接口：GLib GSocketService 回调机制；日志 DRD_LOG_*。
+ */
 static gboolean
 drd_rdp_listener_incoming(GSocketService *service,
                           GSocketConnection *connection,
@@ -964,6 +1141,12 @@ drd_rdp_listener_incoming(GSocketService *service,
     return TRUE;
 }
 
+/*
+ * 功能：绑定监听地址并准备 socket listener。
+ * 逻辑：防止重复绑定；若绑定到任意地址则 add_inet_port，否则构造指定地址并绑定。
+ * 参数：self 监听器；error 输出错误。
+ * 外部接口：GLib g_socket_listener_add_inet_port/add_address 完成绑定。
+ */
 static gboolean
 drd_rdp_listener_bind(DrdRdpListener *self, GError **error)
 {
@@ -1022,6 +1205,12 @@ drd_rdp_listener_bind(DrdRdpListener *self, GError **error)
     return TRUE;
 }
 
+/*
+ * 功能：内部停止监听器并清理资源。
+ * 逻辑：停止 socket service、关闭 listener、清空 session 列表、停止 runtime、取消 cancellable。
+ * 参数：self 监听器。
+ * 外部接口：GLib g_socket_service_stop/g_socket_listener_close，drd_server_runtime_stop 停止流。
+ */
 static void
 drd_rdp_listener_stop_internal(DrdRdpListener *self)
 {
@@ -1046,6 +1235,12 @@ drd_rdp_listener_stop_internal(DrdRdpListener *self)
     }
 }
 
+/*
+ * 功能：启动监听器，绑定端口并激活 socket service。
+ * 逻辑：调用 bind，必要时创建 cancellable（system 模式），最后启动服务并记录日志。
+ * 参数：self 监听器；error 输出错误。
+ * 外部接口：GLib g_socket_service_start。
+ */
 gboolean
 drd_rdp_listener_start(DrdRdpListener *self, GError **error)
 {
@@ -1069,6 +1264,12 @@ drd_rdp_listener_start(DrdRdpListener *self, GError **error)
     return TRUE;
 }
 
+/*
+ * 功能：停止监听器（公开接口）。
+ * 逻辑：调用内部 stop 清理绑定与 runtime。
+ * 参数：self 监听器。
+ * 外部接口：无。
+ */
 void
 drd_rdp_listener_stop(DrdRdpListener *self)
 {
@@ -1076,6 +1277,12 @@ drd_rdp_listener_stop(DrdRdpListener *self)
     drd_rdp_listener_stop_internal(self);
 }
 
+/*
+ * 功能：设置系统模式下的委托回调。
+ * 逻辑：保存 delegate 函数与用户数据。
+ * 参数：self 监听器；func 委托；user_data 用户数据。
+ * 外部接口：无。
+ */
 void
 drd_rdp_listener_set_delegate(DrdRdpListener *self,
                               DrdRdpListenerDelegateFunc func,
@@ -1086,6 +1293,12 @@ drd_rdp_listener_set_delegate(DrdRdpListener *self,
     self->delegate_data = user_data;
 }
 
+/*
+ * 功能：注册新会话建立时的回调。
+ * 逻辑：保存回调函数与上下文。
+ * 参数：self 监听器；func 回调；user_data 用户数据。
+ * 外部接口：无。
+ */
 void
 drd_rdp_listener_set_session_callback(DrdRdpListener *self,
                                       DrdRdpListenerSessionFunc func,
@@ -1096,6 +1309,12 @@ drd_rdp_listener_set_session_callback(DrdRdpListener *self,
     self->session_cb_data = user_data;
 }
 
+/*
+ * 功能：将外部传入的 socket 连接纳入监听器处理流程。
+ * 逻辑：校验参数后调用 handle_connection。
+ * 参数：self 监听器；connection 套接字；error 错误输出。
+ * 外部接口：无额外外部库调用。
+ */
 gboolean
 drd_rdp_listener_adopt_connection(DrdRdpListener *self,
                                   GSocketConnection *connection,
@@ -1107,6 +1326,13 @@ drd_rdp_listener_adopt_connection(DrdRdpListener *self,
     return drd_rdp_listener_handle_connection(self, connection, error);
 }
 
+/*
+ * 功能：在 TLS-only 模式下使用 PAM 验证客户端凭据并生成本地会话。
+ * 逻辑：读取 FreeRDP settings 中的用户名/密码/域，调用 drd_local_session_new 进行 PAM 认证，
+ *       成功后附加到会话并清空密码；失败时记录警告。
+ * 参数：ctx peer 上下文；client FreeRDP peer。
+ * 外部接口：drd_local_session_new 进行 PAM/NSS 登录；freerdp_settings_get_string 读取凭据。
+ */
 static gboolean
 drd_rdp_listener_authenticate_tls_login(DrdRdpPeerContext *ctx, freerdp_peer *client)
 {
@@ -1161,6 +1387,12 @@ drd_rdp_listener_authenticate_tls_login(DrdRdpPeerContext *ctx, freerdp_peer *cl
     return TRUE;
 }
 
+/*
+ * 功能：判断系统模式下的连接是否需要保持打开（交由 delegate 继续使用）。
+ * 逻辑：检查连接对象上是否存在标记数据 drd-system-keep-open。
+ * 参数：connection 套接字连接。
+ * 外部接口：GLib g_object_get_data。
+ */
 static gboolean
 drd_rdp_listener_connection_keep_open(GSocketConnection *connection)
 {

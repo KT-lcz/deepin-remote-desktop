@@ -1,5 +1,14 @@
 # 变更记录
 
+## 2025-12-05：编码/会话/传输模块注释完善
+- **目的**：为编码、会话、传输模块的全部函数补充中文注释，便于后续维护和排查跨库调用细节。
+- **范围**：`src/encoding/*.c`、`src/session/*.c`、`src/transport/*.c`、`.codex/plan/encoding-session-transport-comments.md`。
+- **主要改动**：
+  1. `DrdEncodingManager`、Raw/RFX 编码器补充功能、逻辑、参数与 FreeRDP/WinPR 交互说明，覆盖关键帧、回退策略及差分 tile 处理。
+  2. `DrdRdpSession` 与 `DrdRdpGraphicsPipeline` 全量注释生命周期、线程、Rdpgfx/SurfaceBits 传输路径及关键帧/背压处理，并标注 FreeRDP/WinPR 事件与流接口。
+  3. `DrdRdpListener`、路由令牌工具新增连接接入、NLA/TLS 认证、输入分发、RDSTLS 握手窥探等流程说明，明确依赖的 GLib/FreeRDP/WTS/WinPR API。
+- **影响**：提升代码可读性与交接效率，无功能行为变更。
+
 ## 2025-12-05：X11 捕获帧率节流
 - **目的**：当 `target_interval` 调低（如 24fps）时，damage 风暴不再把实际帧率推到显示刷新频率，降低带宽占用。
 - **范围**：`src/capture/drd_x11_capture.c`、`doc/architecture.md`、`.codex/plan/x11-capture-throttle.md`。

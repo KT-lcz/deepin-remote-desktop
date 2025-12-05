@@ -14,12 +14,24 @@ struct _DrdRawEncoder
 
 G_DEFINE_TYPE(DrdRawEncoder, drd_raw_encoder, G_TYPE_OBJECT)
 
+/*
+ * 功能：Raw 编码器类初始化，当前无额外类级行为。
+ * 逻辑：仅占位，保持 GObject 默认实现。
+ * 参数：klass Raw 编码器类指针。
+ * 外部接口：无外部库调用。
+ */
 static void
 drd_raw_encoder_class_init(DrdRawEncoderClass *klass)
 {
     (void) klass;
 }
 
+/*
+ * 功能：初始化 Raw 编码器实例字段。
+ * 逻辑：清零宽高并标记未准备。
+ * 参数：self Raw 编码器实例。
+ * 外部接口：无。
+ */
 static void
 drd_raw_encoder_init(DrdRawEncoder *self)
 {
@@ -28,12 +40,24 @@ drd_raw_encoder_init(DrdRawEncoder *self)
     self->ready = FALSE;
 }
 
+/*
+ * 功能：创建 Raw 编码器实例。
+ * 逻辑：调用 g_object_new 分配对象。
+ * 参数：无。
+ * 外部接口：使用 GLib GObject 工厂。
+ */
 DrdRawEncoder *
 drd_raw_encoder_new(void)
 {
     return g_object_new(DRD_TYPE_RAW_ENCODER, NULL);
 }
 
+/*
+ * 功能：配置 Raw 编码器的输出分辨率。
+ * 逻辑：校验宽高非零，否则设置错误；保存宽高并标记 ready。
+ * 参数：self Raw 编码器；width/height 目标分辨率；error 输出错误。
+ * 外部接口：GLib g_set_error 报告参数异常。
+ */
 gboolean
 drd_raw_encoder_configure(DrdRawEncoder *self, guint width, guint height, GError **error)
 {
@@ -56,6 +80,12 @@ drd_raw_encoder_configure(DrdRawEncoder *self, guint width, guint height, GError
     return TRUE;
 }
 
+/*
+ * 功能：重置 Raw 编码器配置。
+ * 逻辑：清除 ready 标记并将宽高置零。
+ * 参数：self Raw 编码器实例。
+ * 外部接口：无。
+ */
 void
 drd_raw_encoder_reset(DrdRawEncoder *self)
 {
@@ -65,6 +95,14 @@ drd_raw_encoder_reset(DrdRawEncoder *self)
     self->height = 0;
 }
 
+/*
+ * 功能：将原始帧转为底层 SurfaceBits 所需的底朝上的 BGRA 缓冲。
+ * 逻辑：校验准备状态与尺寸一致性 -> 分配输出 payload -> 按行翻转复制输入数据 ->
+ *       配置编码帧元数据与质量。
+ * 参数：self Raw 编码器；input 输入帧；output 编码结果；error 输出错误。
+ * 外部接口：使用 GLib g_set_error 报告错误，依赖 C 标准库 memcpy 拷贝行数据，
+ *           调用 drd_encoded_frame_* API 写入帧元数据。
+ */
 gboolean
 drd_raw_encoder_encode(DrdRawEncoder *self,
                        DrdFrame *input,

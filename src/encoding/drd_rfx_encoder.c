@@ -28,12 +28,24 @@ struct _DrdRfxEncoder
 
 G_DEFINE_TYPE(DrdRfxEncoder, drd_rfx_encoder, G_TYPE_OBJECT)
 
+/*
+ * 功能：对 64 位整数执行左循环位移，作为简易 hash 辅助。
+ * 逻辑：将值左移指定位数并与右移互补位或运算。
+ * 参数：value 原始数；shift 左移位数（0-63）。
+ * 外部接口：无外部库调用。
+ */
 static inline guint64
 drd_rotl64(guint64 value, guint shift)
 {
     return (value << shift) | (value >> (64 - shift));
 }
 
+/*
+ * 功能：将 64 位块混入 hash，模仿 splitmix64 的扰动。
+ * 逻辑：对 chunk 做数轮 xor/乘法/移位，再与 hash 异或与循环左移，提升熵。
+ * 参数：hash 当前 hash 值；chunk 待混入数据。
+ * 外部接口：无外部库调用。
+ */
 static inline guint64
 drd_mix_chunk(guint64 hash, guint64 chunk)
 {
@@ -50,6 +62,13 @@ drd_mix_chunk(guint64 hash, guint64 chunk)
 }
 
 /* 对每个 tile 采用 16/8 字节块混合，避免逐字节 FNV 乘法带来的 CPU 压力。 */
+/*
+ * 功能：计算指定 tile 的哈希，用于检测差分编码的 dirty tile。
+ * 逻辑：遍历 tile 行，将每行数据按 16/8 字节块混入 hash，处理尾部剩余字节时附加长度，
+ *       返回滚动后的 64 位哈希。
+ * 参数：data 帧线性缓冲；stride 帧步长；x/y tile 左上角；width/height tile 尺寸。
+ * 外部接口：使用 C 标准库 memcpy 拷贝块数据。
+ */
 static guint64
 hash_tile(const guint8 *data,
           guint stride,
@@ -98,6 +117,13 @@ hash_tile(const guint8 *data,
     return hash;
 }
 
+/*
+ * 功能：释放 RFX 编码器持有的 FreeRDP 上下文与缓存。
+ * 逻辑：若 context 存在则调用 rfx_context_free；释放底朝上帧、前一帧、tile 哈希数组；
+ *       最后委托父类 dispose。
+ * 参数：object GObject 指针。
+ * 外部接口：调用 FreeRDP 的 rfx_context_free 释放 RFX 上下文；使用 GLib g_clear_pointer。
+ */
 static void
 drd_rfx_encoder_dispose(GObject *object)
 {
@@ -116,6 +142,12 @@ drd_rfx_encoder_dispose(GObject *object)
     G_OBJECT_CLASS(drd_rfx_encoder_parent_class)->dispose(object);
 }
 
+/*
+ * 功能：设置 RFX 编码器类的 dispose 回调。
+ * 逻辑：将自定义 dispose 赋给 GObjectClass。
+ * 参数：klass 类结构指针。
+ * 外部接口：GLib GObject 类型系统。
+ */
 static void
 drd_rfx_encoder_class_init(DrdRfxEncoderClass *klass)
 {
@@ -123,6 +155,12 @@ drd_rfx_encoder_class_init(DrdRfxEncoderClass *klass)
     object_class->dispose = drd_rfx_encoder_dispose;
 }
 
+/*
+ * 功能：初始化 RFX 编码器实例的内部状态。
+ * 逻辑：清零尺寸与差分开关，创建底朝上帧/上一帧 buffer、tile hash 数组并设置初始标志位。
+ * 参数：self RFX 编码器实例。
+ * 外部接口：使用 GLib g_byte_array_new/g_array_new 分配缓存。
+ */
 static void
 drd_rfx_encoder_init(DrdRfxEncoder *self)
 {
@@ -138,12 +176,26 @@ drd_rfx_encoder_init(DrdRfxEncoder *self)
     self->progressive_header_sent = FALSE;
 }
 
+/*
+ * 功能：创建 RFX 编码器实例。
+ * 逻辑：调用 g_object_new 分配对象。
+ * 参数：无。
+ * 外部接口：GLib GObject 工厂。
+ */
 DrdRfxEncoder *
 drd_rfx_encoder_new(void)
 {
     return g_object_new(DRD_TYPE_RFX_ENCODER, NULL);
 }
 
+/*
+ * 功能：根据分辨率和差分开关配置 RFX 编码器上下文。
+ * 逻辑：校验宽高 -> 若旧 context 存在则释放 -> 通过 FreeRDP rfx_context_new 创建并设定像素格式、
+ *       rfx_context_reset 重置尺寸、rfx_context_set_mode 设置编码模式 -> 初始化缓冲与 tile hash。
+ * 参数：self 编码器；width/height 分辨率；enable_diff 是否开启 tile 哈希差分；error 输出错误。
+ * 外部接口：调用 FreeRDP 的 rfx_context_new/rfx_context_reset/rfx_context_set_pixel_format/
+ *           rfx_context_set_mode；使用 GLib g_set_error 报错，g_byte_array_set_size 初始化缓存。
+ */
 gboolean
 drd_rfx_encoder_configure(DrdRfxEncoder *self,
                           guint width,
@@ -217,6 +269,12 @@ drd_rfx_encoder_configure(DrdRfxEncoder *self,
     return TRUE;
 }
 
+/*
+ * 功能：重置 RFX 编码器状态，释放上下文与缓存。
+ * 逻辑：释放 rfx_context，清空底朝上帧/上一帧/tile hash，重置尺寸、差分、标志位。
+ * 参数：self RFX 编码器。
+ * 外部接口：FreeRDP rfx_context_free 释放上下文；GLib g_byte_array_set_size/g_array_set_size 清空缓存。
+ */
 void
 drd_rfx_encoder_reset(DrdRfxEncoder *self)
 {
@@ -241,6 +299,12 @@ drd_rfx_encoder_reset(DrdRfxEncoder *self)
     self->progressive_header_sent = FALSE;
 }
 
+/*
+ * 功能：将帧数据按行拷贝为无翻转的线性缓冲。
+ * 逻辑：按 frame stride 逐行 memcpy 到目标 GByteArray，便于 RFX 编码消费。
+ * 参数：frame 输入帧；buffer 目标缓冲。
+ * 外部接口：C 标准库 memcpy。
+ */
 static const guint8 *
 copy_frame_linear(DrdFrame *frame, GByteArray *buffer)
 {
@@ -262,24 +326,51 @@ copy_frame_linear(DrdFrame *frame, GByteArray *buffer)
     return dst;
 }
 
+/*
+ * 功能：向 WinPR wStream 写入 32 位无符号整数。
+ * 逻辑：直接调用 Stream_Write_UINT32_unchecked 写入到当前写指针。
+ * 参数：stream 目标流；value 写入值。
+ * 外部接口：WinPR Stream_Write_UINT32_unchecked。
+ */
 static inline void
 drd_stream_write_uint32(wStream *stream, UINT32 value)
 {
     Stream_Write_UINT32_unchecked(stream, value);
 }
 
+/*
+ * 功能：向 WinPR wStream 写入 16 位无符号整数。
+ * 逻辑：调用 Stream_Write_UINT16_unchecked 直接写入。
+ * 参数：stream 目标流；value 写入值。
+ * 外部接口：WinPR Stream_Write_UINT16_unchecked。
+ */
 static inline void
 drd_stream_write_uint16(wStream *stream, UINT16 value)
 {
     Stream_Write_UINT16_unchecked(stream, value);
 }
 
+/*
+ * 功能：向 WinPR wStream 写入 8 位无符号整数。
+ * 逻辑：调用 Stream_Write_UINT8_unchecked。
+ * 参数：stream 目标流；value 写入值。
+ * 外部接口：WinPR Stream_Write_UINT8_unchecked。
+ */
 static inline void
 drd_stream_write_uint8(wStream *stream, UINT8 value)
 {
     Stream_Write_UINT8_unchecked(stream, value);
 }
 
+/*
+ * 功能：按照 RFX Progressive 协议将编码结果序列化到 wStream。
+ * 逻辑：提取 rect/quant/tile 信息 -> 可选写入 SYNC/CONTEXT 头 -> 写 FrameBegin/Region/Tiles/FrameEnd
+ *       各段数据，过程中确保容量并填充字段。
+ * 参数：rfx_message FreeRDP 编码生成的消息；stream WinPR 流；needs_progressive_header 是否需要头部；
+ *       error 输出错误。
+ * 外部接口：大量使用 WinPR Stream_EnsureRemainingCapacity/Stream_Write* 写入，读取 RFX_MESSAGE
+ *           结构由 FreeRDP rfx_message_get_* 提供。
+ */
 static gboolean
 drd_rfx_encoder_write_progressive_message(RFX_MESSAGE *rfx_message,
                                           wStream *stream,
@@ -444,6 +535,13 @@ drd_rfx_encoder_write_progressive_message(RFX_MESSAGE *rfx_message,
     return TRUE;
 }
 
+/*
+ * 功能：根据编码模式将 RFX 消息写入 wStream。
+ * 逻辑：SurfaceBits 模式直接调用 FreeRDP rfx_write_message；Progressive 模式调用自定义
+ *       drd_rfx_encoder_write_progressive_message 并标记头部已发送。
+ * 参数：self 编码器；kind 模式；stream 目标流；message RFX_MESSAGE；error 输出错误。
+ * 外部接口：FreeRDP rfx_write_message 完成 SurfaceBits 序列化。
+ */
 static gboolean
 drd_rfx_encoder_write_stream(DrdRfxEncoder *self,
                              DrdRfxEncoderKind kind,
@@ -487,6 +585,13 @@ drd_rfx_encoder_write_stream(DrdRfxEncoder *self,
     }
 }
 
+/*
+ * 功能：基于 tile 哈希检测脏矩形以支持差分编码。
+ * 逻辑：遍历 64x64 tile，计算 hash 与缓存比较；若 hash 变化再按行精细比较以剔除哈希碰撞，
+ *       将变化 tile 作为 RFX_RECT 追加到 rects。
+ * 参数：self 编码器；data 当前帧线性缓冲；previous 上一帧数据；stride 行步长；rects 输出脏矩形数组。
+ * 外部接口：C 标准库 memcmp；GLib g_array_append_val/g_array_index 维护数组。
+ */
 static gboolean
 collect_dirty_rects(DrdRfxEncoder *self,
                     const guint8 *data,
@@ -542,6 +647,16 @@ collect_dirty_rects(DrdRfxEncoder *self,
     return has_dirty;
 }
 
+/*
+ * 功能：执行 RFX 或 RFX Progressive 编码，支持关键帧/增量与差分 tile。
+ * 逻辑：校验上下文与尺寸 -> 重置 context -> 拷贝帧为线性 buffer -> 通过差分检测决定编码全部或脏块；
+ *       调用 FreeRDP rfx_encode_message 生成消息 -> 根据模式写入 wStream -> 填充 DrdEncodedFrame，
+ *       更新 previous_frame 并维护关键帧标志。
+ * 参数：self 编码器；frame 输入帧；output 编码结果；kind 编码模式；error 输出错误。
+ * 外部接口：使用 FreeRDP rfx_encode_message/rfx_message_free 进行编码，
+ *           WinPR Stream_New/Stream_GetPosition/Stream_Buffer/Stream_Free 管理缓冲，
+ *           通过 DRD_LOG_MESSAGE 输出关键帧日志。
+ */
 gboolean
 drd_rfx_encoder_encode(DrdRfxEncoder *self,
                        DrdFrame *frame,
@@ -689,6 +804,12 @@ drd_rfx_encoder_encode(DrdRfxEncoder *self,
     return TRUE;
 }
 
+/*
+ * 功能：强制下一帧编码为关键帧并重置 progressive 头状态。
+ * 逻辑：置 force_keyframe 和 progressive_header_sent 标志，促使后续编码包含完整头。
+ * 参数：self RFX 编码器。
+ * 外部接口：无额外外部库调用。
+ */
 void
 drd_rfx_encoder_force_keyframe(DrdRfxEncoder *self)
 {

@@ -50,6 +50,12 @@ struct _DrdRdpGraphicsPipeline
 
 G_DEFINE_TYPE(DrdRdpGraphicsPipeline, drd_rdp_graphics_pipeline, G_TYPE_OBJECT)
 
+/*
+ * 功能：返回 Rdpgfx 管线的错误域 quark。
+ * 逻辑：使用 g_quark_from_static_string 注册静态错误域名。
+ * 参数：无。
+ * 外部接口：GLib g_quark_from_static_string。
+ */
 GQuark
 drd_rdp_graphics_pipeline_error_quark(void)
 {
@@ -64,6 +70,12 @@ static UINT drd_rdpgfx_caps_advertise(RdpgfxServerContext *context,
 static UINT drd_rdpgfx_frame_ack(RdpgfxServerContext *context,
                                  const RDPGFX_FRAME_ACKNOWLEDGE_PDU *ack);
 
+/*
+ * 功能：生成符合 Rdpgfx 要求的 32 位时间戳。
+ * 逻辑：获取本地时间，按小时/分钟/秒/毫秒编码到 32 位整数。
+ * 参数：无。
+ * 外部接口：GLib GDateTime API 获取时间。
+ */
 static guint32
 drd_rdp_graphics_pipeline_build_timestamp(void)
 {
@@ -82,6 +94,13 @@ drd_rdp_graphics_pipeline_build_timestamp(void)
     return timestamp;
 }
 
+/*
+ * 功能：在持有锁的情况下重置 Rdpgfx surface 与上下文。
+ * 逻辑：发送 ResetGraphics、CreateSurface、MapSurfaceToOutput 三个 PDU，重置帧计数、背压与标志位。
+ * 参数：self 图形管线。
+ * 外部接口：调用 RdpgfxServerContext 的 ResetGraphics/CreateSurface/MapSurfaceToOutput 函数，
+ *           这些接口由 FreeRDP 提供。
+ */
 static gboolean
 drd_rdp_graphics_pipeline_reset_locked(DrdRdpGraphicsPipeline *self)
 {
@@ -140,6 +159,12 @@ drd_rdp_graphics_pipeline_reset_locked(DrdRdpGraphicsPipeline *self)
     return TRUE;
 }
 
+/*
+ * 功能：释放 Rdpgfx 管线持有的上下文与 surface。
+ * 逻辑：若 surface 已创建则发送 DeleteSurface；若通道已打开则调用 Close；最后交给父类 dispose。
+ * 参数：object GObject 指针。
+ * 外部接口：调用 RdpgfxServerContext->DeleteSurface/Close（FreeRDP）关闭资源。
+ */
 static void
 drd_rdp_graphics_pipeline_dispose(GObject *object)
 {
@@ -166,6 +191,12 @@ drd_rdp_graphics_pipeline_dispose(GObject *object)
     G_OBJECT_CLASS(drd_rdp_graphics_pipeline_parent_class)->dispose(object);
 }
 
+/*
+ * 功能：释放同步原语与 Rdpgfx 上下文。
+ * 逻辑：清理条件变量/互斥量，释放 Rdpgfx server context，委托父类 finalize。
+ * 参数：object GObject 指针。
+ * 外部接口：GLib g_cond_clear/g_mutex_clear；FreeRDP rdpgfx_server_context_free。
+ */
 static void
 drd_rdp_graphics_pipeline_finalize(GObject *object)
 {
@@ -178,6 +209,12 @@ drd_rdp_graphics_pipeline_finalize(GObject *object)
     G_OBJECT_CLASS(drd_rdp_graphics_pipeline_parent_class)->finalize(object);
 }
 
+/*
+ * 功能：初始化图形管线实例的同步与默认参数。
+ * 逻辑：初始化互斥与条件变量，设置 surface/codec/frame 计数默认值与标志位。
+ * 参数：self 图形管线。
+ * 外部接口：GLib g_mutex_init/g_cond_init。
+ */
 static void
 drd_rdp_graphics_pipeline_init(DrdRdpGraphicsPipeline *self)
 {
@@ -191,6 +228,12 @@ drd_rdp_graphics_pipeline_init(DrdRdpGraphicsPipeline *self)
     self->frame_acks_suspended = FALSE;
 }
 
+/*
+ * 功能：注册图形管线的生命周期回调。
+ * 逻辑：将 dispose 与 finalize 指针挂到 GObjectClass。
+ * 参数：klass 类结构指针。
+ * 外部接口：GLib GObject 类型系统。
+ */
 static void
 drd_rdp_graphics_pipeline_class_init(DrdRdpGraphicsPipelineClass *klass)
 {
@@ -205,6 +248,13 @@ drd_rdp_graphics_pipeline_new(freerdp_peer *peer,
                               guint16 surface_width,
                               guint16 surface_height)
 {
+    /*
+     * 功能：创建绑定指定 peer/VCM 的图形管线实例。
+     * 逻辑：校验参数有效后分配 Rdpgfx server context 并设置自定义回调，
+     *       保存 surface 尺寸与 peer/context。
+     * 参数：peer FreeRDP peer；vcm 虚拟通道管理器句柄；surface_width/height 渲染表面尺寸。
+     * 外部接口：FreeRDP rdpgfx_server_context_new 分配上下文，设置 ChannelIdAssigned/CapsAdvertise/FrameAcknowledge 回调。
+     */
     g_return_val_if_fail(peer != NULL, NULL);
     g_return_val_if_fail(peer->context != NULL, NULL);
     g_return_val_if_fail(vcm != NULL && vcm != INVALID_HANDLE_VALUE, NULL);
@@ -231,6 +281,13 @@ drd_rdp_graphics_pipeline_new(freerdp_peer *peer,
     return self;
 }
 
+/*
+ * 功能：尝试初始化 Rdpgfx 渠道与 surface，确保通道能力准备就绪。
+ * 逻辑：持锁检查上下文；若未打开通道则调用 Open；等待 CapsConfirm 完成；最后调用 reset_locked
+ *       创建 surface 并复位背压。
+ * 参数：self 图形管线。
+ * 外部接口：FreeRDP RdpgfxServerContext->Open/CapsConfirm、内部 reset_locked。
+ */
 gboolean
 drd_rdp_graphics_pipeline_maybe_init(DrdRdpGraphicsPipeline *self)
 {
@@ -279,6 +336,12 @@ drd_rdp_graphics_pipeline_maybe_init(DrdRdpGraphicsPipeline *self)
     return ok;
 }
 
+/*
+ * 功能：判断 surface 是否已创建可用。
+ * 逻辑：持锁读取 surface_ready 标志。
+ * 参数：self 图形管线。
+ * 外部接口：无额外外部库调用。
+ */
 gboolean
 drd_rdp_graphics_pipeline_is_ready(DrdRdpGraphicsPipeline *self)
 {
@@ -290,6 +353,12 @@ drd_rdp_graphics_pipeline_is_ready(DrdRdpGraphicsPipeline *self)
     return ready;
 }
 
+/*
+ * 功能：检查是否允许提交新帧（背压控制）。
+ * 逻辑：持锁判断 surface_ready 且 outstanding_frames 未超过上限，或客户端暂停 ACK。
+ * 参数：self 图形管线。
+ * 外部接口：无额外外部库调用。
+ */
 gboolean
 drd_rdp_graphics_pipeline_can_submit(DrdRdpGraphicsPipeline *self)
 {
@@ -303,6 +372,13 @@ drd_rdp_graphics_pipeline_can_submit(DrdRdpGraphicsPipeline *self)
     return ok;
 }
 
+/*
+ * 功能：等待 Rdpgfx 管线具备提交容量（基于 outstanding_frames）。
+ * 逻辑：在 surface_ready 时根据 timeout_us 在条件变量上等待 outstanding_frames 降至上限以下，
+ *       支持无限或超时等待。
+ * 参数：self 管线；timeout_us 等待时间，-1 表示无限。
+ * 外部接口：GLib g_cond_wait/g_cond_wait_until。
+ */
 gboolean
 drd_rdp_graphics_pipeline_wait_for_capacity(DrdRdpGraphicsPipeline *self,
                                             gint64 timeout_us)
@@ -341,6 +417,15 @@ drd_rdp_graphics_pipeline_wait_for_capacity(DrdRdpGraphicsPipeline *self,
     return ready;
 }
 
+/*
+ * 功能：将 Progressive RFX 帧提交到 Rdpgfx 通道，维护背压与关键帧状态。
+ * 逻辑：校验编码类型与 surface 就绪；若需要关键帧而未提供则报错；在背压超限时返回 WOULD_BLOCK；
+ *       生成 frame_id，填充 StartFrame/SurfaceCommand/EndFrame PDU 并调用 FreeRDP 回调发送；
+ *       失败时回滚 outstanding、标记需要关键帧并唤醒等待者。
+ * 参数：self 管线；frame 编码帧；frame_is_keyframe 是否关键帧；error 输出错误。
+ * 外部接口：FreeRDP RdpgfxServerContext 的 SurfaceFrameCommand/StartFrame/SurfaceCommand/EndFrame；
+ *           GLib g_set_error/g_error_matches，使用 DRD_RDP_GRAPHICS_PIPELINE_ERROR 域。
+ */
 gboolean
 drd_rdp_graphics_pipeline_submit_frame(DrdRdpGraphicsPipeline *self,
                                        DrdEncodedFrame *frame,
@@ -477,6 +562,12 @@ drd_rdp_graphics_pipeline_submit_frame(DrdRdpGraphicsPipeline *self,
     return TRUE;
 }
 
+/*
+ * 功能：记录 Rdpgfx 通道分配的 ChannelId。
+ * 逻辑：从回调获取 channel_id 并写入实例字段。
+ * 参数：context Rdpgfx server 上下文；channel_id 分配的通道号。
+ * 外部接口：回调由 FreeRDP 在通道分配时调用。
+ */
 static BOOL
 drd_rdpgfx_channel_assigned(RdpgfxServerContext *context, UINT32 channel_id)
 {
@@ -493,6 +584,12 @@ drd_rdpgfx_channel_assigned(RdpgfxServerContext *context, UINT32 channel_id)
     return TRUE;
 }
 
+/*
+ * 功能：处理客户端能力广告并返回确认。
+ * 逻辑：读取首个 capsSet，调用 CapsConfirm 回调回复；成功后标记 caps_confirmed。
+ * 参数：context Rdpgfx 上下文；caps 客户端能力广告。
+ * 外部接口：FreeRDP RdpgfxServerContext->CapsConfirm。
+ */
 static UINT
 drd_rdpgfx_caps_advertise(RdpgfxServerContext *context,
                           const RDPGFX_CAPS_ADVERTISE_PDU *caps)
@@ -523,6 +620,13 @@ drd_rdpgfx_caps_advertise(RdpgfxServerContext *context,
     return status;
 }
 
+/*
+ * 功能：处理客户端 FrameAcknowledge，维护背压与 ACK 状态。
+ * 逻辑：在 SUSPEND_FRAME_ACKNOWLEDGEMENT 时清零 outstanding 并挂起背压；正常情况将 outstanding 减 1，
+ *       并唤醒等待容量的线程。
+ * 参数：context Rdpgfx 上下文；ack 客户端 ACK PDU。
+ * 外部接口：FreeRDP 调用该回调；日志使用 DRD_LOG_MESSAGE。
+ */
 static UINT
 drd_rdpgfx_frame_ack(RdpgfxServerContext *context,
                      const RDPGFX_FRAME_ACKNOWLEDGE_PDU *ack)

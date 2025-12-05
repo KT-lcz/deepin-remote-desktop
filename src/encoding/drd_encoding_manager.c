@@ -27,6 +27,13 @@ struct _DrdEncodingManager
 
 G_DEFINE_TYPE(DrdEncodingManager, drd_encoding_manager, G_TYPE_OBJECT)
 
+/*
+ * 功能：释放编码管理器持有的编码器及缓冲区，避免悬挂引用。
+ * 逻辑：先调用 drd_encoding_manager_reset 清空运行时状态，再释放 raw_encoder 和 scratch_frame，
+ *       最后交给父类 dispose 做剩余清理。
+ * 参数：object GObject 指针，期望为 DrdEncodingManager 实例。
+ * 外部接口：依赖 GLib 的 g_clear_object 处理引用计数，最终调用父类 GObjectClass::dispose。
+ */
 static void
 drd_encoding_manager_dispose(GObject *object)
 {
@@ -37,6 +44,12 @@ drd_encoding_manager_dispose(GObject *object)
     G_OBJECT_CLASS(drd_encoding_manager_parent_class)->dispose(object);
 }
 
+/*
+ * 功能：初始化编码管理器的类回调。
+ * 逻辑：注册自定义 dispose 以释放内部 encoder；其他生命周期保持默认。
+ * 参数：klass 类结构指针。
+ * 外部接口：使用 GLib 类型系统，将 dispose 挂载到 GObjectClass。
+ */
 static void
 drd_encoding_manager_class_init(DrdEncodingManagerClass *klass)
 {
@@ -44,6 +57,12 @@ drd_encoding_manager_class_init(DrdEncodingManagerClass *klass)
     object_class->dispose = drd_encoding_manager_dispose;
 }
 
+/*
+ * 功能：初始化编码管理器的实例字段。
+ * 逻辑：设置默认分辨率/编码模式/差分开关，创建 Raw/RFX 编码器与暂存帧，并清零回退统计。
+ * 参数：self 编码管理器实例。
+ * 外部接口：调用内部工厂 drd_raw_encoder_new、drd_rfx_encoder_new、drd_encoded_frame_new。
+ */
 static void
 drd_encoding_manager_init(DrdEncodingManager *self)
 {
@@ -60,12 +79,26 @@ drd_encoding_manager_init(DrdEncodingManager *self)
     self->rfx_fallback_count = 0;
 }
 
+/*
+ * 功能：创建新的编码管理器实例。
+ * 逻辑：委托 g_object_new 分配并初始化 GObject。
+ * 参数：无。
+ * 外部接口：使用 GLib 的 g_object_new 完成对象创建。
+ */
 DrdEncodingManager *
 drd_encoding_manager_new(void)
 {
     return g_object_new(DRD_TYPE_ENCODING_MANAGER, NULL);
 }
 
+/*
+ * 功能：按给定编码参数准备 Raw/RFX 编码器。
+ * 逻辑：校验分辨率非零 -> 记录分辨率/模式/差分标记 -> 先配置 Raw 编码器以便回退；
+ *       当目标模式为 RFX 时继续配置 RFX 编码器；若任一步失败则重置状态并返回错误。
+ * 参数：self 管理器；options 编码选项（分辨率、模式、差分开关等）；error 输出错误。
+ * 外部接口：GLib g_set_error 报告参数/配置错误；调用内部 drd_raw_encoder_configure、
+ *           drd_rfx_encoder_configure 完成具体编码器初始化；日志使用 DRD_LOG_MESSAGE。
+ */
 gboolean
 drd_encoding_manager_prepare(DrdEncodingManager *self,
                              const DrdEncodingOptions *options,
@@ -139,6 +172,13 @@ drd_encoding_manager_prepare(DrdEncodingManager *self,
     return TRUE;
 }
 
+/*
+ * 功能：重置编码管理器状态，释放底层编码器状态。
+ * 逻辑：若未准备好直接返回；清零分辨率/模式/回退统计，调用 Raw/RFX 编码器的 reset，
+ *       置 ready 为 FALSE。
+ * 参数：self 管理器实例。
+ * 外部接口：调用 drd_raw_encoder_reset、drd_rfx_encoder_reset 复位内部 encoder，使用 DRD_LOG_MESSAGE 记录。
+ */
 void
 drd_encoding_manager_reset(DrdEncodingManager *self)
 {
@@ -168,6 +208,12 @@ drd_encoding_manager_reset(DrdEncodingManager *self)
     self->rfx_fallback_count = 0;
 }
 
+/*
+ * 功能：查询编码管理器是否已完成配置。
+ * 逻辑：校验类型后返回 ready 标志。
+ * 参数：self 管理器实例。
+ * 外部接口：无额外外部库调用，仅依赖 GLib 类型检查宏。
+ */
 gboolean
 drd_encoding_manager_is_ready(DrdEncodingManager *self)
 {
@@ -175,6 +221,15 @@ drd_encoding_manager_is_ready(DrdEncodingManager *self)
     return self->ready;
 }
 
+/*
+ * 功能：根据期望编码格式输出编码帧，并处理 RFX->RAW 回退。
+ * 逻辑：检查准备状态与模式匹配 -> 根据 max_payload 与回退计数决定选择 RAW 还是 RFX；
+ *       对 RFX 编码后若 payload 超限则回退 RAW 并设置宽限帧计数；成功时返回共享 scratch_frame。
+ * 参数：self 管理器；input 原始帧；max_payload 对端可接受的最大包；desired_codec 期望编码器；
+ *       out_frame 返回编码结果；error 输出错误。
+ * 外部接口：调用 drd_raw_encoder_encode、drd_rfx_encoder_encode 完成实际编码；
+ *           使用 DRD_LOG_MESSAGE/DRD_LOG_WARNING/DRD_LOG_DEBUG 记录流程。
+ */
 gboolean
 drd_encoding_manager_encode(DrdEncodingManager *self,
                             DrdFrame *input,
@@ -290,6 +345,12 @@ drd_encoding_manager_encode(DrdEncodingManager *self,
     return TRUE;
 }
 
+/*
+ * 功能：返回当前编码器实际使用的帧编码格式。
+ * 逻辑：根据 mode 选择 RAW 或 RFX 常量。
+ * 参数：self 管理器实例。
+ * 外部接口：无额外外部库调用。
+ */
 DrdFrameCodec
 drd_encoding_manager_get_codec(DrdEncodingManager *self)
 {
@@ -297,6 +358,12 @@ drd_encoding_manager_get_codec(DrdEncodingManager *self)
     return (self->mode == DRD_ENCODING_MODE_RAW) ? DRD_FRAME_CODEC_RAW : DRD_FRAME_CODEC_RFX;
 }
 
+/*
+ * 功能：请求下一个 RFX 编码产生关键帧。
+ * 逻辑：确认模式为 RFX 后调用 RFX 编码器的强制关键帧接口。
+ * 参数：self 管理器实例。
+ * 外部接口：调用 drd_rfx_encoder_force_keyframe 触发 RFX 编码器内部标记。
+ */
 void
 drd_encoding_manager_force_keyframe(DrdEncodingManager *self)
 {

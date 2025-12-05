@@ -23,12 +23,24 @@ struct _DrdRoutingTokenInfo
     gchar *routing_token;
 };
 
+/*
+ * 功能：分配路由令牌信息结构并初始化为空。
+ * 逻辑：使用 g_new0 分配零填充结构。
+ * 参数：无。
+ * 外部接口：GLib g_new0。
+ */
 DrdRoutingTokenInfo *
 drd_routing_token_info_new(void)
 {
     return g_new0(DrdRoutingTokenInfo, 1);
 }
 
+/*
+ * 功能：释放路由令牌信息并清除字符串。
+ * 逻辑：释放 routing_token 字符串后释放结构本身。
+ * 参数：info 路由令牌信息。
+ * 外部接口：GLib g_free。
+ */
 void
 drd_routing_token_info_free(DrdRoutingTokenInfo *info)
 {
@@ -52,6 +64,12 @@ wstream_free_full(wStream * s);
 
 G_DEFINE_AUTOPTR_CLEANUP_FUNC(wStream, wstream_free_full)
 
+/*
+ * 功能：释放 WinPR wStream 并释放底层缓冲。
+ * 逻辑：调用 Stream_Free，传 TRUE 表示释放内部分配的缓冲。
+ * 参数：s 待释放的 wStream。
+ * 外部接口：WinPR Stream_Free。
+ */
 static void
 wstream_free_full(wStream *s)
 {
@@ -60,6 +78,12 @@ wstream_free_full(wStream *s)
 
 #define MAX_PEEK_TIME_MS 2000
 
+/*
+ * 功能：在不消费 socket 数据的情况下读取指定字节数（MSG_PEEK）。
+ * 逻辑：使用 g_poll 等待可读或取消事件，随后调用 recv(MSG_PEEK) 获取数据，支持 EINTR/EAGAIN 重试。
+ * 参数：fd 套接字；buffer 目标缓存；length 读取长度；cancellable 取消源；error 错误输出。
+ * 外部接口：POSIX poll/recv，GLib g_cancellable_* 管理取消。
+ */
 static gboolean
 peek_bytes(int fd,
            uint8_t *buffer,
@@ -130,6 +154,12 @@ peek_bytes(int fd,
     return TRUE;
 }
 
+/*
+ * 功能：在 buffer 中查找 CRLF 序列的起始位置。
+ * 逻辑：线性扫描直到遇到 0x0D 0x0A，返回索引；找不到返回 -1。
+ * 参数：buffer 缓冲；length 长度。
+ * 外部接口：无。
+ */
 static int
 find_cr_lf(const char *buffer,
            int length)
@@ -145,6 +175,12 @@ find_cr_lf(const char *buffer,
     return -1;
 }
 
+/*
+ * 功能：从 peek 到的头部提取 routing token（移除前缀）。
+ * 逻辑：检查前缀 "Cookie: msts=" 是否匹配；若匹配则截取 CRLF 前的 token。
+ * 参数：buffer 数据；buffer_length 长度；routing_token_length 输出 token 总长度（含前缀）。
+ * 外部接口：GLib g_strdup/g_strndup。
+ */
 static char *
 get_routing_token_without_prefix(char *buffer,
                                  size_t buffer_length,
@@ -175,6 +211,13 @@ get_routing_token_without_prefix(char *buffer,
 }
 
 
+/*
+ * 功能：窥探 RDP TPKT/X224 握手头，提取路由令牌及 RDSTLS 请求信息。
+ * 逻辑：MSG_PEEK 首 4 字节解析 TPKT 长度；再 peek 全部 PDU 验证 x224 CRQ 与 rdpNegReq，
+ *       解析前缀为 Cookie: msts= 的 routing token，并检查是否请求 RDSTLS 协议。
+ * 参数：connection GLib socket 连接；cancellable 可取消对象；info 输出路由令牌信息；error 错误输出。
+ * 外部接口：WinPR Stream_* 操作缓冲，FreeRDP 常量 PROTOCOL_RDSTLS；GLib g_socket_get_fd 获取 fd。
+ */
 gboolean
 drd_routing_token_peek(GSocketConnection *connection,
                        GCancellable *cancellable,
