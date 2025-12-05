@@ -3,6 +3,7 @@
 #include <gio/gio.h>
 #include <string.h>
 #include <errno.h>
+#include <fcntl.h>
 #include <unistd.h>
 #include <freerdp/freerdp.h>
 #include <freerdp/listener.h>
@@ -243,8 +244,8 @@ drd_rdp_listener_new(const gchar *bind_address,
     g_return_val_if_fail(DRD_IS_SERVER_RUNTIME(runtime), NULL);
     g_return_val_if_fail(pam_service != NULL && *pam_service != '\0', NULL);
     g_return_val_if_fail(runtime_mode == DRD_RUNTIME_MODE_USER ||
-                                 runtime_mode == DRD_RUNTIME_MODE_SYSTEM ||
-                                 runtime_mode == DRD_RUNTIME_MODE_HANDOVER,
+                         runtime_mode == DRD_RUNTIME_MODE_SYSTEM ||
+                         runtime_mode == DRD_RUNTIME_MODE_HANDOVER,
                          NULL);
     if (nla_enabled)
     {
@@ -346,6 +347,16 @@ drd_rdp_listener_peer_from_connection(GSocketConnection *connection, GError **er
                     "dup() failed: %s",
                     g_strerror(errno));
         return NULL;
+    }
+    int flag = fcntl(duplicated_fd,F_GETFD);
+    if (flag < 0)
+    {
+        DRD_LOG_MESSAGE("fcntl(F_GETFD) failed");
+    }
+    else
+    {
+        flag |= O_CLOEXEC;
+        fcntl(duplicated_fd, F_SETFD, flag);
     }
 
     freerdp_peer *peer = freerdp_peer_new(duplicated_fd);

@@ -372,7 +372,7 @@ drd_x11_capture_thread(gpointer user_data)
 {
     DrdX11Capture *self = DRD_X11_CAPTURE(user_data);
 
-    const gint64 target_interval = G_USEC_PER_SEC / 60;
+    const gint64 target_interval = G_USEC_PER_SEC / 24;
     gint64 last_capture = 0;
 
     while (TRUE)
@@ -502,7 +502,7 @@ drd_x11_capture_setup_wakeup_pipe(DrdX11Capture *self, GError **error)
     }
 
     int fds[2] = {-1, -1};
-    if (!g_unix_open_pipe(fds, FD_CLOEXEC, error))
+    if (!g_unix_open_pipe(fds, O_CLOEXEC, error))
     {
         return FALSE;
     }
