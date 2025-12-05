@@ -273,7 +273,7 @@
 - 支持 drop-in 配置机制。
 - 默认配置存放在 /usr/share/deepin-remote-desktop/conf.d 目录。
 - 支持加载 /etc/deepin-remote-desktop/conf.d 下的配置覆写默认值。
-- drd-user 进程还能加载 ~/.local/share/deepin-remote-desktop/conf.d 覆盖个人配置。
+- drd-user 进程需要加载 \~/.config/deepin-remote-desktop/conf.d 覆盖个人配置。
 - 在日志中用\*\* 掩码隐藏敏感内容。
 - 提供 CLI 命令修改运行配置：
   - 端口号；
