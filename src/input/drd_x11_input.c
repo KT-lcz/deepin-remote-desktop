@@ -55,7 +55,12 @@ static void drd_x11_input_refresh_pointer_scale(DrdX11Input *self);
 
 static KeySym drd_x11_input_keysym_from_codepoint(gunichar codepoint);
 
-/* 对象销毁时停止后台线程并释放互斥锁。 */
+/*
+ * 功能：释放 X11 输入对象持有的资源。
+ * 逻辑：停止输入后端、清理互斥锁并交由父类 dispose。
+ * 参数：object 基类指针，期望为 DrdX11Input。
+ * 外部接口：drd_x11_input_stop 关闭 X11 连接；GLib g_mutex_clear。
+ */
 static void
 drd_x11_input_dispose(GObject *object)
 {
@@ -66,7 +71,12 @@ drd_x11_input_dispose(GObject *object)
     G_OBJECT_CLASS(drd_x11_input_parent_class)->dispose(object);
 }
 
-/* 绑定 dispose 钩子。 */
+/*
+ * 功能：绑定类级别析构回调。
+ * 逻辑：将自定义 dispose 挂载到 GObjectClass。
+ * 参数：klass 类结构。
+ * 外部接口：GLib 类型系统。
+ */
 static void
 drd_x11_input_class_init(DrdX11InputClass *klass)
 {
@@ -74,7 +84,12 @@ drd_x11_input_class_init(DrdX11InputClass *klass)
     object_class->dispose = drd_x11_input_dispose;
 }
 
-/* 初始化默认值，真实尺寸会在启动时根据显示与编码流写入。 */
+/*
+ * 功能：初始化输入后端的默认字段。
+ * 逻辑：初始化互斥锁，清零显示/尺寸/键盘布局，重置 keycode 缓存与指针缩放。
+ * 参数：self 输入实例。
+ * 外部接口：GLib g_mutex_init。
+ */
 static void
 drd_x11_input_init(DrdX11Input *self)
 {
@@ -92,14 +107,24 @@ drd_x11_input_init(DrdX11Input *self)
     self->stream_to_desktop_scale_y = 1.0;
 }
 
-/* 构造输入后端。 */
+/*
+ * 功能：创建 X11 输入后端对象。
+ * 逻辑：调用 g_object_new 分配实例。
+ * 参数：无。
+ * 外部接口：GLib g_object_new。
+ */
 DrdX11Input *
 drd_x11_input_new(void)
 {
     return g_object_new(DRD_TYPE_X11_INPUT, NULL);
 }
 
-/* 打开 X11 Display，并查询屏幕大小、键盘布局。 */
+/*
+ * 功能：打开 X11 Display 并初始化屏幕与键盘布局信息。
+ * 逻辑：若已打开则直接返回；调用 XOpenDisplay 获取连接并校验 XTest 扩展；记录屏幕尺寸与编码流尺寸；通过 FreeRDP keyboard API 初始化布局；最后计算指针缩放。
+ * 参数：self 输入实例；error 错误输出。
+ * 外部接口：X11 XOpenDisplay/DefaultScreen/DisplayWidth/DisplayHeight、XTestQueryExtension 校验扩展；FreeRDP freerdp_keyboard_init；GLib g_set_error_literal。
+ */
 static gboolean
 drd_x11_input_open_display(DrdX11Input *self, GError **error)
 {
@@ -163,7 +188,12 @@ drd_x11_input_open_display(DrdX11Input *self, GError **error)
     return TRUE;
 }
 
-/* 关闭 X11 Display 连接。 */
+/*
+ * 功能：关闭 X11 Display 连接。
+ * 逻辑：若 display 有效则调用 XCloseDisplay 并清空指针。
+ * 参数：self 输入实例。
+ * 外部接口：XCloseDisplay。
+ */
 static void
 drd_x11_input_close_display(DrdX11Input *self)
 {
@@ -174,7 +204,12 @@ drd_x11_input_close_display(DrdX11Input *self)
     }
 }
 
-/* 启动输入注入器，确保已连接 X11。 */
+/*
+ * 功能：启动输入注入器。
+ * 逻辑：持锁检查运行状态，必要时打开 X11 Display 并置 running 为 TRUE。
+ * 参数：self 输入实例；error 错误输出。
+ * 外部接口：drd_x11_input_open_display（X11/FreeRDP）；GLib g_mutex_lock/unlock。
+ */
 gboolean
 drd_x11_input_start(DrdX11Input *self, GError **error)
 {
@@ -196,7 +231,12 @@ drd_x11_input_start(DrdX11Input *self, GError **error)
     return ok;
 }
 
-/* 停止输入注入器并释放 Display。 */
+/*
+ * 功能：停止输入注入器。
+ * 逻辑：持锁检查运行标志；关闭 X11 Display、重置缓存与缩放后清除 running。
+ * 参数：self 输入实例。
+ * 外部接口：XCloseDisplay（通过 drd_x11_input_close_display）；GLib g_mutex_lock/unlock。
+ */
 void
 drd_x11_input_stop(DrdX11Input *self)
 {
@@ -217,7 +257,12 @@ drd_x11_input_stop(DrdX11Input *self)
     g_mutex_unlock(&self->lock);
 }
 
-/* 更新编码流尺寸，供坐标映射使用。 */
+/*
+ * 功能：更新编码流尺寸用于指针坐标映射。
+ * 逻辑：持锁写入宽高并刷新缩放因子。
+ * 参数：self 输入实例；width/height 新流尺寸。
+ * 外部接口：内部 drd_x11_input_refresh_pointer_scale；GLib g_mutex。
+ */
 void
 drd_x11_input_update_desktop_size(DrdX11Input *self, guint width, guint height)
 {
@@ -236,7 +281,12 @@ drd_x11_input_update_desktop_size(DrdX11Input *self, guint width, guint height)
     g_mutex_unlock(&self->lock);
 }
 
-/* 检查注入器运行状态，失败时填充错误信息。 */
+/*
+ * 功能：校验输入注入器是否处于运行状态。
+ * 逻辑：检查 running 与 display；未运行时设置错误。
+ * 参数：self 输入实例；error 错误输出。
+ * 外部接口：GLib g_set_error_literal。
+ */
 static gboolean
 drd_x11_input_check_running(DrdX11Input *self, GError **error)
 {
@@ -251,7 +301,12 @@ drd_x11_input_check_running(DrdX11Input *self, GError **error)
     return TRUE;
 }
 
-/* 将 RDP 键盘事件转换为 X11 事件并注入。 */
+/*
+ * 功能：将 RDP 键盘事件转换为 X11 事件注入。
+ * 逻辑：持锁校验运行态；解析扩展/释放标志并解析 RDP 扫描码到 X11 keycode（缓存 + FreeRDP 映射 + 特殊键查找）；注入 XTest FakeKeyEvent 并刷新。
+ * 参数：self 输入实例；flags RDP 键盘标志；scancode RDP 基础扫描码；error 错误输出。
+ * 外部接口：FreeRDP MAKE_RDP_SCANCODE/RDP_SCANCODE_CODE/freerdp_keyboard_get_x11_keycode_from_rdp_scancode；XTestFakeKeyEvent/XFlush；日志 DRD_LOG_DEBUG。
+ */
 gboolean
 drd_x11_input_inject_keyboard(DrdX11Input *self, guint16 flags, guint8 scancode, GError **error)
 {
@@ -294,7 +349,12 @@ drd_x11_input_inject_keyboard(DrdX11Input *self, guint16 flags, guint8 scancode,
     return TRUE;
 }
 
-/* 目前未实现 Unicode 注入，占位返回成功。 */
+/*
+ * 功能：注入 Unicode 键盘事件。
+ * 逻辑：持锁检查运行态；将 Unicode 转为 KeySym 再转 keycode，利用 XTest 注入按下/释放；无法映射时记录 debug 并返回成功以避免断流。
+ * 参数：self 输入实例；flags RDP 键盘标志；codepoint Unicode 码点；error 错误输出。
+ * 外部接口：XKeysymToKeycode、XTestFakeKeyEvent/XFlush；日志 DRD_LOG_DEBUG；内部 drd_x11_input_keysym_from_codepoint。
+ */
 gboolean
 drd_x11_input_inject_unicode(DrdX11Input *self, guint16 flags, guint16 codepoint, GError **error)
 {
@@ -332,7 +392,12 @@ drd_x11_input_inject_unicode(DrdX11Input *self, guint16 flags, guint16 codepoint
     return TRUE;
 }
 
-/* 将指针标志转换为 XTest 按键 ID。 */
+/*
+ * 功能：将指针标志转换为 XTest 按键 ID（按下为正，抬起为负）。
+ * 逻辑：检查标志位是否匹配，决定返回正/负 button_id 或 0。
+ * 参数：flags RDP 指针标志；mask 目标掩码；button_id XTest 按钮编号。
+ * 外部接口：无（内部计算）。
+ */
 static int
 drd_x11_input_pointer_button(guint16 flags, guint16 mask, int button_id)
 {
@@ -345,7 +410,12 @@ drd_x11_input_pointer_button(guint16 flags, guint16 mask, int button_id)
     return press ? button_id : -button_id;
 }
 
-/* 注入指针移动、按键及滚轮事件，同时处理分辨率缩放。 */
+/*
+ * 功能：注入指针移动/按键/滚轮事件。
+ * 逻辑：持锁检查运行态；按流/桌面尺寸计算缩放与裁剪后的坐标；根据标志注入移动、按键与滚轮事件，最后刷新 X11 输出。
+ * 参数：self 输入实例；flags RDP 指针标志；x/y 流坐标；error 错误输出。
+ * 外部接口：XTestFakeMotionEvent/XTestFakeButtonEvent/XFlush；依赖 GLib MAX 宏；日志 DRD_LOG_DEBUG。
+ */
 gboolean
 drd_x11_input_inject_pointer(DrdX11Input *self,
                              guint16 flags,
@@ -442,6 +512,12 @@ drd_x11_input_inject_pointer(DrdX11Input *self,
     return TRUE;
 }
 
+/*
+ * 功能：根据特殊扫描码映射 X11 KeyCode（处理左右 Ctrl/Alt/Win）。
+ * 逻辑：按扫描码选择对应 KeySym，再调用 XKeysymToKeycode 转换。
+ * 参数：self 输入实例；scancode RDP 基础扫描码；extended 是否扩展。
+ * 外部接口：XKeysymToKeycode，X11 KeySym 常量。
+ */
 static KeyCode
 drd_x11_input_lookup_special_keycode(DrdX11Input *self, guint8 scancode, gboolean extended)
 {
@@ -479,6 +555,12 @@ drd_x11_input_lookup_special_keycode(DrdX11Input *self, guint8 scancode, gboolea
     return keycode;
 }
 
+/*
+ * 功能：重置扫描码到 keycode 的缓存表。
+ * 逻辑：遍历缓存数组写入无效标记。
+ * 参数：self 输入实例。
+ * 外部接口：无。
+ */
 static void
 drd_x11_input_reset_keycode_cache(DrdX11Input *self)
 {
@@ -488,6 +570,12 @@ drd_x11_input_reset_keycode_cache(DrdX11Input *self)
     }
 }
 
+/*
+ * 功能：解析 RDP 扫描码对应的 X11 keycode，并可告知是否发生缓存未命中。
+ * 逻辑：计算缓存索引；若未命中则调用 FreeRDP 映射或特殊键查找并写入缓存；返回最终 keycode。
+ * 参数：self 输入实例；base_scancode 基础扫描码；extended 是否扩展；out_cache_miss 输出是否未命中缓存。
+ * 外部接口：FreeRDP freerdp_keyboard_get_x11_keycode_from_rdp_scancode；内部 drd_x11_input_lookup_special_keycode。
+ */
 static guint16
 drd_x11_input_resolve_keycode(DrdX11Input *self,
                               guint8 base_scancode,
@@ -525,6 +613,12 @@ drd_x11_input_resolve_keycode(DrdX11Input *self,
     return cached;
 }
 
+/*
+ * 功能：刷新流坐标到桌面坐标的缩放因子。
+ * 逻辑：根据流尺寸与桌面尺寸计算 x/y 缩放，避免除零。
+ * 参数：self 输入实例。
+ * 外部接口：无。
+ */
 static void
 drd_x11_input_refresh_pointer_scale(DrdX11Input *self)
 {
@@ -543,6 +637,12 @@ drd_x11_input_refresh_pointer_scale(DrdX11Input *self)
                 : ((gdouble) desktop_height / (gdouble) stream_height);
 }
 
+/*
+ * 功能：将 Unicode 码点转换为 X11 KeySym。
+ * 逻辑：处理常见控制字符，ASCII 直接返回；合法 BMP/非 BMP 码点附加 0x01000000 标志；非法返回 NoSymbol。
+ * 参数：codepoint Unicode 码点。
+ * 外部接口：X11 KeySym 常量。
+ */
 static KeySym
 drd_x11_input_keysym_from_codepoint(gunichar codepoint)
 {

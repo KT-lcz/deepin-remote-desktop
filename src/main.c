@@ -8,6 +8,12 @@
 static gboolean
 drd_initialize_winpr(void)
 {
+    /*
+     * 功能：初始化 WinPR 相关子系统（SSL 与 WTS）。
+     * 逻辑：初始化 WinPR SSL；获取 WTS API 表并注册；任一步失败打印错误并返回 FALSE。
+     * 参数：无。
+     * 外部接口：WinPR winpr_InitializeSSL、FreeRDP_InitWtsApi/WTSRegisterWtsApiFunctionTable；GLib g_printerr 输出错误。
+     */
     if (!winpr_InitializeSSL(WINPR_SSL_INIT_DEFAULT))
     {
         g_printerr("WinPR SSL init failed\n");
@@ -27,6 +33,12 @@ drd_initialize_winpr(void)
 int
 main(int argc, char **argv)
 {
+    /*
+     * 功能：程序入口，初始化 WinPR 并运行应用。
+     * 逻辑：先初始化 WinPR；创建并运行 DrdApplication，失败时输出错误；返回运行状态码。
+     * 参数：argc/argv 命令行参数。
+     * 外部接口：WinPR/FreeRDP 初始化；drd_application_run 执行主逻辑；GLib g_printerr 输出错误。
+     */
     if (!drd_initialize_winpr())
     {
         return 1;

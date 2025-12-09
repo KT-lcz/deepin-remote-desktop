@@ -10,6 +10,15 @@
   4. `drd_handover_daemon`、`drd_system_daemon` 描述 handover/system DBus 信号、routing token 分配、连接接管与 LightDM 远程 display 创建路径，明确 g_bus_own_name、DBus skeleton 导出与连接元数据的使用。
 - **影响**：提升跨模块代码可读性与外部库交互透明度，无行为改动，为后续维护和排障提供统一注释格式。
 
+## 2025-12-09：input/utils/main 注释补齐
+- **目的**：完成剩余 input、utils 及入口模块的中文注释对齐，覆盖功能、逻辑、参数与外部库调用说明。
+- **范围**：`src/input/*.c`、`src/utils/*.c`、`src/main.c`、`.codex/plan/comment-utils-input-main.md`。
+- **主要改动**：
+  1. `DrdInputDispatcher`、`DrdX11Input` 增补启动/注入/坐标缩放/键码缓存等流程注释，标注 XTest、FreeRDP 键盘映射接口。
+  2. `drd_frame*`、`drd_encoded_frame`、`drd_frame_queue` 记录缓冲配置、环形队列推送/等待/丢帧统计逻辑，`drd_log` 说明自定义 GLib writer。
+  3. `drd_tls_credentials` 清理 NTLM hash 栈残留，入口 `main` 标注 WinPR/WTS 初始化流程。
+- **影响**：全仓库函数注释格式统一，便于快速理解输入注入、帧缓存与日志初始化路径，无功能行为变更。
+
 ## 2025-12-08：RDP 监听器失败清理收敛
 - **目的**：统一 `DrdRdpListener` 的失败清理逻辑，减少连接关闭与 peer 释放的重复分支，降低遗漏风险。
 - **范围**：`src/transport/drd_rdp_listener.c`、`doc/architecture.md`、`.codex/plan/rdp_listener_cleanup.md`。
