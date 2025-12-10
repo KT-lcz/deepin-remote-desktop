@@ -12,6 +12,8 @@ typedef enum
     DRD_FRAME_CODEC_H264
 } DrdFrameCodec;
 
+typedef gboolean (*DrdEncodedFrameWriter)(guint8 *dest, gsize size, gpointer user_data);
+
 #define DRD_TYPE_ENCODED_FRAME (drd_encoded_frame_get_type())
 G_DECLARE_FINAL_TYPE(DrdEncodedFrame, drd_encoded_frame, DRD, ENCODED_FRAME, GObject)
 
@@ -29,6 +31,11 @@ void drd_encoded_frame_set_quality(DrdEncodedFrame *self, guint8 quality, guint8
 
 guint8 *drd_encoded_frame_ensure_capacity(DrdEncodedFrame *self, gsize size);
 const guint8 *drd_encoded_frame_get_data(DrdEncodedFrame *self, gsize *size);
+gboolean drd_encoded_frame_set_payload(DrdEncodedFrame *self, const guint8 *data, gsize size);
+gboolean drd_encoded_frame_fill_payload(DrdEncodedFrame *self,
+                                        gsize size,
+                                        DrdEncodedFrameWriter writer,
+                                        gpointer user_data);
 
 guint drd_encoded_frame_get_width(DrdEncodedFrame *self);
 guint drd_encoded_frame_get_height(DrdEncodedFrame *self);

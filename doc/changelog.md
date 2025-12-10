@@ -1,5 +1,15 @@
 # 变更记录
 
+## 2025-12-10：编码帧 payload 封装
+- **目的**：消除外部对 `DrdEncodedFrame` 内部 payload 指针的直接操作，集中管理编码结果写入，降低遗漏长度同步的风险。
+- **范围**：`src/utils/drd_encoded_frame.*`、`src/encoding/drd_raw_encoder.c`、`src/encoding/drd_rfx_encoder.c`、`doc/architecture.md`、`.codex/plan/drd_encoded_frame_payload_encapsulation.md`。
+- **主要改动**：
+  1. 新增 `drd_encoded_frame_set_payload`/`drd_encoded_frame_fill_payload` 封装写入，writer 返回 `gboolean`，失败会回滚长度，支持直接复制或回调填充。
+  2. RFX 编码改用 `set_payload` 写入编码流，失败路径补充错误返回。
+  3. RAW 编码通过 `fill_payload` 底朝上逐行写入，回调校验 size 并返回状态，避免暴露内部指针。
+  4. 架构文档补充工具层 API 与类图，计划文件更新进度。
+- **影响**：写 payload 时不再返回内部指针，写入失败可回滚，接口边界更清晰；编码输出行为保持不变。
+
 ## 2025-12-09：capture/core/security/system 注释对齐 encoding 规范
 - **目的**：为核心运行时、采集、安全与 system 守护模块补充与 encoding 模块一致的中文注释格式，明确功能、逻辑、参数及外部库调用。
 - **范围**：`src/capture/*.c`、`src/core/*.c`、`src/security/*.c`、`src/system/*.c`、`.codex/plan/comment-capture-core-security-system.md`。

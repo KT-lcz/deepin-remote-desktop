@@ -1,5 +1,7 @@
 #include "utils/drd_encoded_frame.h"
 
+#include <string.h>
+
 struct _DrdEncodedFrame
 {
     GObject parent_instance;
@@ -132,6 +134,54 @@ drd_encoded_frame_ensure_capacity(DrdEncodedFrame *self, gsize size)
     }
 
     return self->payload->data;
+}
+
+/*
+ * 功能：将外部数据写入 payload。
+ * 逻辑：调整字节数组长度并复制传入数据（size=0 时仅调整长度）。
+ * 参数：self 编码帧；data 源数据指针（size>0 时必须非空）；size 数据长度。
+ * 外部接口：C 标准库 memcpy。
+ */
+gboolean
+drd_encoded_frame_set_payload(DrdEncodedFrame *self, const guint8 *data, gsize size)
+{
+    g_return_val_if_fail(DRD_IS_ENCODED_FRAME(self), FALSE);
+    g_return_val_if_fail(data != NULL || size == 0, FALSE);
+
+    g_byte_array_set_size(self->payload, size);
+    if (size > 0)
+    {
+        memcpy(self->payload->data, data, size);
+    }
+    return TRUE;
+}
+
+/*
+ * 功能：通过写入回调填充 payload，避免外部直接操作内部指针。
+ * 逻辑：调整字节数组长度后调用 writer 将数据写入内部缓冲。
+ * 参数：self 编码帧；size 目标长度；writer 写入回调；user_data 透传上下文。
+ * 外部接口：无。
+ */
+gboolean
+drd_encoded_frame_fill_payload(DrdEncodedFrame *self,
+                               gsize size,
+                               DrdEncodedFrameWriter writer,
+                               gpointer user_data)
+{
+    g_return_val_if_fail(DRD_IS_ENCODED_FRAME(self), FALSE);
+    g_return_val_if_fail(writer != NULL, FALSE);
+
+    const gsize previous_len = self->payload->len;
+    g_byte_array_set_size(self->payload, size);
+    if (size > 0)
+    {
+        if (!writer(self->payload->data, size, user_data))
+        {
+            g_byte_array_set_size(self->payload, previous_len);
+            return FALSE;
+        }
+    }
+    return TRUE;
 }
 
 /*

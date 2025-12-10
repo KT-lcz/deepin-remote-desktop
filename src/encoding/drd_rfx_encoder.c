@@ -788,8 +788,16 @@ drd_rfx_encoder_encode(DrdRfxEncoder *self,
                                 FALSE,
                                 timestamp,
                                 frame_codec);
-    guint8 *payload = drd_encoded_frame_ensure_capacity(output, payload_size);
-    memcpy(payload, payload_data, payload_size);
+    /* RFX 已由 FreeRDP 序列化为连续 buffer，无需转换，直接 set_payload 复制。 */
+    if (!drd_encoded_frame_set_payload(output, payload_data, payload_size))
+    {
+        Stream_Free(stream, TRUE);
+        g_set_error_literal(error,
+                            G_IO_ERROR,
+                            G_IO_ERROR_FAILED,
+                            "Failed to persist encoded payload");
+        return FALSE;
+    }
     drd_encoded_frame_set_quality(output, 0, 0, keyframe_encode);
 
     Stream_Free(stream, TRUE);

@@ -95,6 +95,37 @@ drd_raw_encoder_reset(DrdRawEncoder *self)
     self->height = 0;
 }
 
+typedef struct
+{
+    const guint8 *src;
+    guint stride_in;
+    guint expected_stride;
+    guint height;
+} DrdRawEncoderCopyContext;
+
+/*
+ * 功能：将输入帧逐行翻转复制到底朝上的目标缓冲。
+ * 逻辑：按 height 自底向上遍历，利用 expected_stride 写入目标，保持 BGRA32 行对齐。
+ * 参数：dest 目标缓冲；size 目标大小（需等于 expected_stride*height）；user_data 复制上下文。
+ * 外部接口：C 标准库 memcpy。
+ */
+static gboolean
+drd_raw_encoder_copy_bottom_up(guint8 *dest, gsize size, gpointer user_data)
+{
+    DrdRawEncoderCopyContext *ctx = (DrdRawEncoderCopyContext *) user_data;
+    g_return_val_if_fail(ctx != NULL, FALSE);
+    g_return_val_if_fail(size == (gsize) ctx->expected_stride * ctx->height, FALSE);
+
+    for (guint y = 0; y < ctx->height; y++)
+    {
+        const guint8 *src_row = ctx->src + (gsize) ctx->stride_in * (ctx->height - 1 - y);
+        guint8 *dst_row = dest + (gsize) ctx->expected_stride * y;
+        memcpy(dst_row, src_row, ctx->expected_stride);
+    }
+
+    return TRUE;
+}
+
 /*
  * 功能：将原始帧转为底层 SurfaceBits 所需的底朝上的 BGRA 缓冲。
  * 逻辑：校验准备状态与尺寸一致性 -> 分配输出 payload -> 按行翻转复制输入数据 ->
@@ -138,24 +169,26 @@ drd_raw_encoder_encode(DrdRawEncoder *self,
     const guint32 expected_stride = self->width * 4u;
     const gsize output_size = (gsize) expected_stride * (gsize) self->height;
 
-    guint8 *payload = drd_encoded_frame_ensure_capacity(output, output_size);
-    if (payload == NULL)
+    const guint8 *src = drd_frame_get_data(input, NULL);
+    const guint stride_in = drd_frame_get_stride(input);
+    DrdRawEncoderCopyContext ctx = {
+        .src = src,
+        .stride_in = stride_in,
+        .expected_stride = expected_stride,
+        .height = self->height,
+    };
+
+    /* RAW 需在写入时完成 bottom-up 转换与 stride 对齐，因此走 fill_payload 回调写入。 */
+    if (!drd_encoded_frame_fill_payload(output,
+                                        output_size,
+                                        drd_raw_encoder_copy_bottom_up,
+                                        &ctx))
     {
         g_set_error_literal(error,
                             G_IO_ERROR,
                             G_IO_ERROR_FAILED,
-                            "Failed to allocate payload buffer");
+                            "Failed to write raw payload");
         return FALSE;
-    }
-
-    const guint8 *src = drd_frame_get_data(input, NULL);
-    const guint stride_in = drd_frame_get_stride(input);
-
-    for (guint y = 0; y < self->height; y++)
-    {
-        const guint8 *src_row = src + (gsize) stride_in * (self->height - 1 - y);
-        guint8 *dst_row = payload + (gsize) expected_stride * y;
-        memcpy(dst_row, src_row, expected_stride);
     }
 
     drd_encoded_frame_configure(output,

@@ -204,6 +204,25 @@ flowchart TB
 - `utils/drd_frame`：帧描述对象，封装像素数据/元信息。
 - `utils/drd_frame_queue`：线程安全的单帧阻塞队列。
 - `utils/drd_encoded_frame`：编码后帧的统一表示，携带 payload 与元数据。
+- `drd_encoded_frame_set_payload/drd_encoded_frame_fill_payload` 封装 payload 写入路径，RFX 直接复制编码流，RAW 通过回调按行翻转写入（回调返回 `gboolean`，失败会回滚长度），避免调用方持有内部指针。
+
+```mermaid
+classDiagram
+    class DrdEncodedFrame {
+        +configure(width,height,stride,is_bottom_up,timestamp,codec)
+        +set_quality(quality,qp,is_keyframe)
+        +set_payload(data,size)
+        +fill_payload(size,writer,user_data)
+    }
+    class DrdRfxEncoder {
+        +encode(...,output,kind)
+    }
+    class DrdRawEncoder {
+        +encode(...,output)
+    }
+    DrdRfxEncoder --> DrdEncodedFrame : set_payload复制编码结果
+    DrdRawEncoder --> DrdEncodedFrame : fill_payload行翻转写入
+```
 
 ### 8. 虚拟通道与多媒体（规划）
 - `channel/rdpdr` 系列：文件重定向、打印机、智能卡等；当前仅保留接口规划，未接入实现。
