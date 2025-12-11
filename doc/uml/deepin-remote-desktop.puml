@@ -17,6 +17,8 @@ legend right
     a. 客户端发起桌面共享请求
     pam_sso 用于远程单点登录场景,
     认证后由lightdm直接启动对应用户会话
+    步骤 4 中，如果在 wayland 环境下，
+    lightdm 会通过 wayland 合成器创建虚拟屏幕
 endlegend
 
 package "RDP 客户端" {
@@ -50,6 +52,7 @@ package "RDP 服务端" {
     node "图形组件" {
         [xorg]
         [xserver-xorg-video-dummy] as dummy
+        [wayland（treeland）]
     }
 }
 

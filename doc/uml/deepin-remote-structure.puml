@@ -1,51 +1,38 @@
 @startuml
-skinparam backgroundColor #FFFFFF
 skinparam defaultFontSize 16
 
 title Deepin Remote Desktop 模块结构
 
-legend right
-    颜色说明：
-    #EEF3FF 代表 lightdm 会话与显示管理
-    #E8F6FF 代表 deepin-remote-desktop 内核能力
-    #F5F7FF 代表用户交互 UI
-    #E9F6ED 代表图形服务器（Xorg/虚拟显卡）
-    橙色矩形表示规划中、尚未实现的模块
-    布局约束：UI 位于顶部，核心在中层，图形服务器与 lightdm 并排置于底部
-endlegend
-
-package "桌面 UI 模块" as pkg_ui #F5F7FF {
+package "桌面 UI 模块" as pkg_ui {
     component "控制中心"
     component "任务栏"
+    component "锁屏"
 }
 
-package "deepin-remote-desktop 核心" as pkg_drd #E8F6FF {
-    package "已实现模块" as done{
-      component "客户端连接管理"
-      component "屏幕采集管理"
-      component "编码与传输管理"
-      component "输入事件管理"
-      component "连接安全管理"
-      component "服务重定向管理"
-      component "远程会话管理"
-      component "远程会话权限控制"
-      component "配置与隐私管理"
-      component "服务端进程管理"
-    }
-    package "规划中模块" as backlog #FFF2E0 {
-        component "音频管理"
-        component "剪切板管理"
-        component "网络探测与流量控制"
-        component "硬件加速"
-        component "外设共享"
-    }
-    done -[hidden]down- backlog
-}
-pkg_ui -[hidden]down- pkg_drd
-
-
-package "lightdm 组件" as pkg_lightdm #EEF3FF {
+package "lightdm 组件" as pkg_lightdm {
     component "RDP seat管理"
     component "虚拟屏幕管理"
+    component "Greeter"
 }
+
+package "deepin-remote-desktop 核心" as pkg_drd {
+    component "客户端连接管理"
+    component "屏幕采集管理"
+    component "编码与传输管理"
+    component "输入事件管理"
+    component "连接安全管理"
+    component "服务重定向管理"
+    component "远程会话管理"
+    component "远程会话权限控制"
+    component "配置与隐私管理"
+    component "服务端进程管理"
+    component "音频管理"
+    component "剪切板管理"
+    component "网络探测与流量控制"
+    component "硬件加速"
+    component "外设共享"
+}
+pkg_ui -[hidden]down- pkg_drd
+pkg_lightdm -[hidden]down- pkg_drd
+
 @enduml
