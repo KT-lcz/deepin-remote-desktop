@@ -386,16 +386,25 @@ drd_server_runtime_set_encoding_options(DrdServerRuntime *self,
     g_return_if_fail(encoding_options != NULL);
 
     const gboolean had_options = self->has_encoding_options;
-    const gboolean geometry_changed =
-            had_options && (self->encoding_options.width != encoding_options->width ||
-                            self->encoding_options.height != encoding_options->height ||
-                            self->encoding_options.mode != encoding_options->mode ||
-                            self->encoding_options.enable_frame_diff != encoding_options->enable_frame_diff);
+    const gboolean options_changed = had_options &&
+                                     (self->encoding_options.width != encoding_options->width ||
+                                      self->encoding_options.height != encoding_options->height ||
+                                      self->encoding_options.mode != encoding_options->mode ||
+                                      self->encoding_options.enable_frame_diff != encoding_options->enable_frame_diff ||
+                                      self->encoding_options.h264_bitrate != encoding_options->h264_bitrate ||
+                                      self->encoding_options.h264_framerate != encoding_options->h264_framerate ||
+                                      self->encoding_options.h264_qp != encoding_options->h264_qp ||
+                                      self->encoding_options.gfx_large_change_threshold !=
+                                              encoding_options->gfx_large_change_threshold ||
+                                      self->encoding_options.gfx_progressive_refresh_interval !=
+                                              encoding_options->gfx_progressive_refresh_interval ||
+                                      self->encoding_options.gfx_progressive_refresh_timeout_ms !=
+                                              encoding_options->gfx_progressive_refresh_timeout_ms);
 
     self->encoding_options = *encoding_options;
     self->has_encoding_options = TRUE;
 
-    if (geometry_changed && self->stream_running)
+    if (options_changed && self->stream_running)
     {
         DRD_LOG_WARNING("Server runtime encoding options changed while stream active, restart required");
     }

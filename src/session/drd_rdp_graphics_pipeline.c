@@ -149,6 +149,7 @@ drd_rdp_graphics_pipeline_reset_locked(DrdRdpGraphicsPipeline *self)
     self->next_frame_id = 1;
     self->outstanding_frames = 0;
     self->surface_ready = TRUE;
+    self->last_frame_h264 = FALSE;
     self->frame_acks_suspended = FALSE;
     g_cond_broadcast(&self->capacity_cond);
     return TRUE;

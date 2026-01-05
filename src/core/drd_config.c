@@ -87,6 +87,12 @@ drd_config_init(DrdConfig *self)
     self->encoding.height = 768;
     self->encoding.mode = DRD_ENCODING_MODE_RFX;
     self->encoding.enable_frame_diff = TRUE;
+    self->encoding.h264_bitrate = DRD_H264_DEFAULT_BITRATE;
+    self->encoding.h264_framerate = DRD_H264_DEFAULT_FRAMERATE;
+    self->encoding.h264_qp = DRD_H264_DEFAULT_QP;
+    self->encoding.gfx_large_change_threshold = DRD_GFX_DEFAULT_LARGE_CHANGE_THRESHOLD;
+    self->encoding.gfx_progressive_refresh_interval = DRD_GFX_DEFAULT_PROGRESSIVE_REFRESH_INTERVAL;
+    self->encoding.gfx_progressive_refresh_timeout_ms = DRD_GFX_DEFAULT_PROGRESSIVE_REFRESH_TIMEOUT_MS;
     self->base_dir = g_get_current_dir();
     self->nla_username = NULL;
     self->nla_password = NULL;
@@ -417,6 +423,96 @@ drd_config_load_from_key_file(DrdConfig *self, GKeyFile *keyfile, GError **error
             return FALSE;
         }
         self->encoding.enable_frame_diff = value;
+    }
+
+    if (g_key_file_has_key(keyfile, "encoding", "h264_bitrate", NULL))
+    {
+        gint64 bitrate = g_key_file_get_integer(keyfile, "encoding", "h264_bitrate", NULL);
+        if (bitrate <= 0)
+        {
+            g_set_error(error,
+                        G_IO_ERROR,
+                        G_IO_ERROR_INVALID_ARGUMENT,
+                        "Invalid h264_bitrate %" G_GINT64_FORMAT " (must be >0)",
+                        bitrate);
+            return FALSE;
+        }
+        self->encoding.h264_bitrate = (guint) bitrate;
+    }
+
+    if (g_key_file_has_key(keyfile, "encoding", "h264_framerate", NULL))
+    {
+        gint64 framerate = g_key_file_get_integer(keyfile, "encoding", "h264_framerate", NULL);
+        if (framerate <= 0)
+        {
+            g_set_error(error,
+                        G_IO_ERROR,
+                        G_IO_ERROR_INVALID_ARGUMENT,
+                        "Invalid h264_framerate %" G_GINT64_FORMAT " (must be >0)",
+                        framerate);
+            return FALSE;
+        }
+        self->encoding.h264_framerate = (guint) framerate;
+    }
+
+    if (g_key_file_has_key(keyfile, "encoding", "h264_qp", NULL))
+    {
+        gint64 qp = g_key_file_get_integer(keyfile, "encoding", "h264_qp", NULL);
+        if (qp <= 0)
+        {
+            g_set_error(error,
+                        G_IO_ERROR,
+                        G_IO_ERROR_INVALID_ARGUMENT,
+                        "Invalid h264_qp %" G_GINT64_FORMAT " (must be >0)",
+                        qp);
+            return FALSE;
+        }
+        self->encoding.h264_qp = (guint) qp;
+    }
+
+    if (g_key_file_has_key(keyfile, "encoding", "gfx_large_change_threshold", NULL))
+    {
+        gdouble threshold = g_key_file_get_double(keyfile, "encoding", "gfx_large_change_threshold", NULL);
+        if (threshold < 0.0)
+        {
+            g_set_error(error,
+                        G_IO_ERROR,
+                        G_IO_ERROR_INVALID_ARGUMENT,
+                        "Invalid gfx_large_change_threshold %f (must be >=0)",
+                        threshold);
+            return FALSE;
+        }
+        self->encoding.gfx_large_change_threshold = threshold;
+    }
+
+    if (g_key_file_has_key(keyfile, "encoding", "gfx_progressive_refresh_interval", NULL))
+    {
+        gint64 interval = g_key_file_get_integer(keyfile, "encoding", "gfx_progressive_refresh_interval", NULL);
+        if (interval < 0)
+        {
+            g_set_error(error,
+                        G_IO_ERROR,
+                        G_IO_ERROR_INVALID_ARGUMENT,
+                        "Invalid gfx_progressive_refresh_interval %" G_GINT64_FORMAT " (must be >=0)",
+                        interval);
+            return FALSE;
+        }
+        self->encoding.gfx_progressive_refresh_interval = (guint) interval;
+    }
+
+    if (g_key_file_has_key(keyfile, "encoding", "gfx_progressive_refresh_timeout_ms", NULL))
+    {
+        gint64 timeout_ms = g_key_file_get_integer(keyfile, "encoding", "gfx_progressive_refresh_timeout_ms", NULL);
+        if (timeout_ms < 0)
+        {
+            g_set_error(error,
+                        G_IO_ERROR,
+                        G_IO_ERROR_INVALID_ARGUMENT,
+                        "Invalid gfx_progressive_refresh_timeout_ms %" G_GINT64_FORMAT " (must be >=0)",
+                        timeout_ms);
+            return FALSE;
+        }
+        self->encoding.gfx_progressive_refresh_timeout_ms = (guint) timeout_ms;
     }
 
     if (g_key_file_has_key(keyfile, "auth", "username", NULL))

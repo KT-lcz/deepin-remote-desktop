@@ -13,9 +13,6 @@
 
 /* SurfaceBits 未实现标志，拒绝切换 */
 #define SURFACE_BITS_NOT_IMPLEMENTED
-#define DRD_GFX_LARGE_CHANGE_THRESHOLD 0.05
-#define DRD_GFX_PROGRESSIVE_REFRESH_INTERVAL 6
-#define DRD_GFX_PROGRESSIVE_REFRESH_TIMEOUT_MS 100
 
 struct _DrdEncodingManager
 {
@@ -25,6 +22,9 @@ struct _DrdEncodingManager
     guint frame_height;
     gboolean ready;
     gboolean enable_diff;
+    guint h264_bitrate;
+    guint h264_framerate;
+    guint h264_qp;
 
     guint32 codecs;
     H264_CONTEXT *h264;
@@ -40,6 +40,9 @@ struct _DrdEncodingManager
     guint gfx_diff_stride;
     gboolean gfx_force_keyframe;
     guint gfx_progressive_rfx_frames;
+    gdouble gfx_large_change_threshold;
+    guint gfx_progressive_refresh_interval;
+    guint gfx_progressive_refresh_timeout_ms;
     DrdEncodingCodecClass gfx_last_codec;
     gboolean gfx_avc_to_non_avc_transition;
     gint64 gfx_non_avc_switch_timestamp_us;
@@ -91,6 +94,9 @@ static void drd_encoding_manager_init(DrdEncodingManager *self)
     self->frame_height = 0;
     self->ready = FALSE;
     self->enable_diff = TRUE;
+    self->h264_bitrate = DRD_H264_DEFAULT_BITRATE;
+    self->h264_framerate = DRD_H264_DEFAULT_FRAMERATE;
+    self->h264_qp = DRD_H264_DEFAULT_QP;
     self->h264 = NULL;
     self->rfx = NULL;
     self->progressive = NULL;
@@ -104,6 +110,9 @@ static void drd_encoding_manager_init(DrdEncodingManager *self)
     self->gfx_diff_stride = 0;
     self->gfx_force_keyframe = TRUE;
     self->gfx_progressive_rfx_frames = 0;
+    self->gfx_large_change_threshold = DRD_GFX_DEFAULT_LARGE_CHANGE_THRESHOLD;
+    self->gfx_progressive_refresh_interval = DRD_GFX_DEFAULT_PROGRESSIVE_REFRESH_INTERVAL;
+    self->gfx_progressive_refresh_timeout_ms = DRD_GFX_DEFAULT_PROGRESSIVE_REFRESH_TIMEOUT_MS;
     self->gfx_last_codec = DRD_ENCODING_CODEC_CLASS_UNKNOWN;
     self->gfx_avc_to_non_avc_transition = FALSE;
     self->gfx_non_avc_switch_timestamp_us = 0;
@@ -148,8 +157,14 @@ gboolean drd_encoding_manager_prepare(DrdEncodingManager *self, const DrdEncodin
         drd_encoding_manager_reset(self);
     }
     self->enable_diff = options->enable_frame_diff;
+    self->h264_bitrate = options->h264_bitrate;
+    self->h264_framerate = options->h264_framerate;
+    self->h264_qp = options->h264_qp;
     self->gfx_force_keyframe = TRUE;
     self->gfx_progressive_rfx_frames = 0;
+    self->gfx_large_change_threshold = options->gfx_large_change_threshold;
+    self->gfx_progressive_refresh_interval = options->gfx_progressive_refresh_interval;
+    self->gfx_progressive_refresh_timeout_ms = options->gfx_progressive_refresh_timeout_ms;
     self->gfx_last_codec = DRD_ENCODING_CODEC_CLASS_UNKNOWN;
     self->gfx_avc_to_non_avc_transition = FALSE;
     self->frame_width = options->width;
@@ -204,6 +219,9 @@ void drd_encoding_manager_reset(DrdEncodingManager *self)
     self->gfx_diff_stride = 0;
     self->gfx_force_keyframe = TRUE;
     self->gfx_progressive_rfx_frames = 0;
+    self->gfx_large_change_threshold = DRD_GFX_DEFAULT_LARGE_CHANGE_THRESHOLD;
+    self->gfx_progressive_refresh_interval = DRD_GFX_DEFAULT_PROGRESSIVE_REFRESH_INTERVAL;
+    self->gfx_progressive_refresh_timeout_ms = DRD_GFX_DEFAULT_PROGRESSIVE_REFRESH_TIMEOUT_MS;
     self->gfx_last_codec = DRD_ENCODING_CODEC_CLASS_UNKNOWN;
     self->gfx_avc_to_non_avc_transition = FALSE;
     self->gfx_non_avc_switch_timestamp_us = 0;
@@ -220,7 +238,7 @@ guint drd_encoding_manager_get_refresh_timeout_ms( DrdEncodingManager *self)
 {
     g_return_val_if_fail(DRD_IS_ENCODING_MANAGER(self), 0);
 
-    return DRD_GFX_PROGRESSIVE_REFRESH_TIMEOUT_MS;
+    return self->gfx_progressive_refresh_timeout_ms;
 }
 
 gboolean drd_encoding_manager_refresh_interval_reached( DrdEncodingManager *self)
@@ -237,14 +255,14 @@ gboolean drd_encoding_manager_refresh_interval_reached( DrdEncodingManager *self
         return FALSE;
     }
 
-    const gboolean frame_budget_reached = DRD_GFX_PROGRESSIVE_REFRESH_INTERVAL > 0 &&
+    const gboolean frame_budget_reached = self->gfx_progressive_refresh_interval > 0 &&
                                           self->gfx_progressive_rfx_frames + 1 >=
-                                              DRD_GFX_PROGRESSIVE_REFRESH_INTERVAL;
+                                              self->gfx_progressive_refresh_interval;
     const gint64 now_us = g_get_monotonic_time();
     const gint64 elapsed_us = now_us - self->gfx_non_avc_switch_timestamp_us;
-    const gboolean timeout_reached = DRD_GFX_PROGRESSIVE_REFRESH_TIMEOUT_MS > 0 &&
+    const gboolean timeout_reached = self->gfx_progressive_refresh_timeout_ms > 0 &&
                                      elapsed_us >=
-                                         ((gint64) DRD_GFX_PROGRESSIVE_REFRESH_TIMEOUT_MS) * G_TIME_SPAN_MILLISECOND;
+                                         ((gint64) self->gfx_progressive_refresh_timeout_ms) * G_TIME_SPAN_MILLISECOND;
 
     return frame_budget_reached || timeout_reached;
 }
@@ -347,7 +365,7 @@ void drd_encoding_manager_register_codec_result(DrdEncodingManager *self,
     {
         self->gfx_progressive_rfx_frames = 0;
     }
-    else if (keyframe_encode || DRD_GFX_PROGRESSIVE_REFRESH_INTERVAL == 0)
+    else if (keyframe_encode || self->gfx_progressive_refresh_interval == 0)
     {
         self->gfx_progressive_rfx_frames = 0;
     }
@@ -381,11 +399,11 @@ static int drd_encoder_init_h264(DrdEncodingManager *encoder)
 
     if (!h264_context_set_option(encoder->h264, H264_CONTEXT_OPTION_RATECONTROL, H264_RATECONTROL_VBR))
         goto fail;
-    if (!h264_context_set_option(encoder->h264, H264_CONTEXT_OPTION_BITRATE, 5000000))
+    if (!h264_context_set_option(encoder->h264, H264_CONTEXT_OPTION_BITRATE, encoder->h264_bitrate))
         goto fail;
-    if (!h264_context_set_option(encoder->h264, H264_CONTEXT_OPTION_FRAMERATE, 60)) // TODO frame rate
+    if (!h264_context_set_option(encoder->h264, H264_CONTEXT_OPTION_FRAMERATE, encoder->h264_framerate))
         goto fail;
-    if (!h264_context_set_option(encoder->h264, H264_CONTEXT_OPTION_QP, 15)) // TODO
+    if (!h264_context_set_option(encoder->h264, H264_CONTEXT_OPTION_QP, encoder->h264_qp))
         goto fail;
     // if (!h264_context_set_option(encoder->h264, H264_CONTEXT_OPTION_HW_ACCEL, TRUE))
     //     goto fail;
@@ -851,7 +869,7 @@ gboolean drd_encoding_manager_encode_surface_gfx(DrdEncodingManager *self, rdpSe
     gboolean success = FALSE;
     GArray *dirty_flags = g_array_sized_new(FALSE, TRUE, sizeof(gboolean), self->gfx_tiles_x * self->gfx_tiles_y);
     const gboolean large_change = drd_encoding_manager_analyze_tiles(
-            self, data, previous_frame, stride, DRD_GFX_LARGE_CHANGE_THRESHOLD, dirty_flags, NULL);
+            self, data, previous_frame, stride, self->gfx_large_change_threshold, dirty_flags, NULL);
     gboolean use_avc444 = FALSE;
     gboolean use_avc420 = FALSE;
     gboolean use_progressive = FALSE;

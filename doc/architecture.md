@@ -102,6 +102,7 @@ flowchart LR
 ### 3. 编码层
 - `encoding/drd_encoding_manager`：统一编码配置、调度与发送；SurfaceBits 与 Rdpgfx 的编码/差分逻辑统一在管理器内维护，RemoteFX 生成 RFX_RECT（复用脏矩形缓存以降低分配抖动），Progressive 在 tile 遍历时直接并入 REGION16，减少中间列表遍历。
 - Progressive/RemoteFX 刷新窗口内若捕获超时，运行时会复用上一帧触发关键帧，全量编码确保刷新超时也能立即对齐客户端状态。
+- `[encoding]` 支持配置 `h264_bitrate/h264_framerate/h264_qp` 以及 `gfx_large_change_threshold/gfx_progressive_refresh_interval/gfx_progressive_refresh_timeout_ms`，`drd_config` 将数值写入 `DrdEncodingManager`，用于 H264 初始化与 AVC→非 AVC 切换期间的刷新窗口控制，默认值与示例配置一致。
 
 ```mermaid
 flowchart TD
@@ -319,6 +320,12 @@ private_key=/usr/share/deepin-remote-desktop/certs/server.key
 # mode: h264|rfx|auto
 mode=rfx
 enable_diff=true
+h264_bitrate=5000000
+h264_framerate=60
+h264_qp=15
+gfx_large_change_threshold=0.05
+gfx_progressive_refresh_interval=6
+gfx_progressive_refresh_timeout_ms=100
 
 [auth]
 username=uos

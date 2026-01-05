@@ -103,7 +103,7 @@ drd_frame_queue_new(void)
 
 /*
  * 功能：重置队列状态并清空缓冲。
- * 逻辑：持锁恢复 running，清理所有帧引用，重置头尾指针与统计。
+ * 逻辑：持锁恢复 running，清理所有帧引用，重置头尾指针与统计，并广播条件唤醒等待线程。
  * 参数：self 队列实例。
  * 外部接口：GLib g_clear_object；互斥锁保护。
  */
@@ -123,6 +123,7 @@ drd_frame_queue_reset(DrdFrameQueue *self)
     self->tail = 0;
     self->size = 0;
     self->dropped_frames = 0;
+    g_cond_broadcast(&self->cond);
     g_mutex_unlock(&self->mutex);
 }
 

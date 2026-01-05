@@ -1,5 +1,23 @@
 # 变更记录
 
+## 2026-03-07：编码与 gfx 参数可配置
+- **目的**：让 H264 码率/帧率/QP 以及 GFX 刷新阈值/周期由配置驱动，便于按带宽或画质需求调优。
+- **范围**：`src/core/drd_config.*`、`src/core/drd_encoding_options.h`、`src/encoding/drd_encoding_manager.c`、`src/core/drd_server_runtime.c`、`data/config.d/*.ini`、`README.md`、`doc/architecture.md`。
+- **主要改动**：
+  1. `DrdEncodingOptions` 增加 H264 与 GFX 刷新字段，配置加载校验正数/非负值，并将数值下发至编码管理器。
+  2. H264 初始化使用配置中的 bitrate/framerate/qp，Rdpgfx 刷新间隔与超时时间改为读取配置字段驱动刷新窗口。
+  3. 所有示例配置与文档列出可调参数及默认值，保持 README 与架构文档同步。
+- **影响**：部署时可按客户端性能与网络状况调节编码参数，默认行为与旧版本一致。
+
+## 2026-03-05：reset 状态一致性补丁
+- **目的**：确保各 reset 例程彻底回滚内部状态，避免等待线程或状态机残留旧值。
+- **范围**：`src/utils/drd_frame_queue.c`、`src/session/drd_rdp_graphics_pipeline.c`、`.codex/plan/reset-review.md`。
+- **主要改动**：
+  1. 帧队列重置时广播条件变量，唤醒可能阻塞的消费者线程，避免队列重建后仍旧阻塞。
+  2. Rdpgfx 图形管线重置时清零上一帧编码模式标记，防止新的 surface 初始状态继承旧的 H264/非 H264 模式。 
+  3. 计划文件记录重置检查背景与执行进度。
+- **影响**：重置流程更可靠，等待线程可以及时获知状态刷新，图形管线重建后的背压逻辑以干净状态起步。
+
 ## 2026-02-28：AVC→非 AVC 切换定时补帧
 - **目的**：在首次从 AVC 回落到非 AVC 时设定刷新超时回调，即使捕获侧没有新帧也能按超时复用缓存帧发送全量关键帧。
 - **范围**：`src/session/drd_rdp_session.c`、`src/core/drd_server_runtime.c`、`src/encoding/drd_encoding_manager.*`、`doc/architecture.md`、`doc/changelog.md`、`.codex/plan/full-frame-refresh-timeout.md`。

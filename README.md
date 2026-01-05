@@ -26,6 +26,11 @@ meson test -C build --suite unit                           # 可选：运行单�
 
 `config.d` 中提供了 NLA 固定账号、systemd handover、PAM system 模式等示例；`data/certs/server.*` 则内置了一套开发用 TLS 证书，可直接 smoke。
 
+- `[encoding]` 支持以下编码/刷新参数（括号内为默认值，可在 `data/config.d` 覆盖）：
+  - `mode`：h264/rfx/auto，`enable_diff`：是否启用帧间差分。
+  - `h264_bitrate` (5000000)、`h264_framerate` (60)、`h264_qp` (15)。
+  - `gfx_large_change_threshold` (0.05)、`gfx_progressive_refresh_interval` (6)、`gfx_progressive_refresh_timeout_ms` (100，0 表示禁用超时刷新)。
+
 - 默认启用 NLA：在 `[auth]` 中配置 `username/password` 或使用 `--nla-username/--nla-password`，CredSSP 通过一次性 SAM 文件完成认证，适合单账号嵌入式场景。
 - `enable_nla=false` + `--system`：切换到 TLS-only + PAM 登录，客户端凭据会在 system 模式下交给 PAM，适合桌面 SSO。
 - `--system` 模式仅执行 TLS/NLA 握手与 PAM 会话创建，不会启动 X11 捕获、编码或渲染线程，真正的图像/输入在 handover 阶段启动。
