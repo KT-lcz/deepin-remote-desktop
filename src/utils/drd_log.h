@@ -1,9 +1,9 @@
 #pragma once
 
 #include <glib.h>
-
+#include <freerdp/log.h>
 void drd_log_init(void);
-
+#define TAG CLIENT_TAG("deepin")
 /*
  * 为日志自动附带文件名与行号，方便排障。
  * 通过 g_log_structured_standard 注入元信息，便于统一格式化。

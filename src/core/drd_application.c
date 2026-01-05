@@ -32,26 +32,6 @@ struct _DrdApplication
 G_DEFINE_TYPE(DrdApplication, drd_application, G_TYPE_OBJECT)
 
 /*
- * 功能：将编码模式转换为日志友好的字符串。
- * 逻辑：依据枚举返回对应字面量，未知模式返回 "unknown"。
- * 参数：mode 编码模式。
- * 外部接口：无额外外部库调用。
- */
-static const gchar *
-drd_application_mode_to_string(DrdEncodingMode mode)
-{
-    switch (mode)
-    {
-        case DRD_ENCODING_MODE_RAW:
-            return "raw";
-        case DRD_ENCODING_MODE_RFX:
-            return "rfx";
-        default:
-            return "unknown";
-    }
-}
-
-/*
  * 功能：将运行模式转为字符串。
  * 逻辑：根据枚举返回 system/handover/user 文本，默认 user。
  * 参数：mode 运行模式。
@@ -105,7 +85,7 @@ drd_application_log_effective_config(DrdApplication *self)
     DRD_LOG_MESSAGE("Effective capture geometry %ux%u, encoder=%s, frame diff %s",
                     encoding_opts->width,
                     encoding_opts->height,
-                    drd_application_mode_to_string(encoding_opts->mode),
+                    drd_encoding_mode_to_string(encoding_opts->mode),
                     encoding_opts->enable_frame_diff ? "enabled" : "disabled");
 
     const DrdRuntimeMode runtime_mode = drd_config_get_runtime_mode(self->config);
@@ -515,7 +495,7 @@ drd_application_parse_options(DrdApplication *self, gint *argc, gchar ***argv, G
             "Capture/render fps stats window seconds",
             "SEC"
         },
-        {"encoder", 0, 0, G_OPTION_ARG_STRING, &encoder_mode, "Encoder mode (raw|rfx)", "MODE"},
+        {"encoder", 0, 0, G_OPTION_ARG_STRING, &encoder_mode, "Encoder mode (h264|rfx|auto)", "MODE"},
         {"nla-username", 0, 0, G_OPTION_ARG_STRING, &nla_username, "NLA username for static mode", "USER"},
         {"nla-password", 0, 0, G_OPTION_ARG_STRING, &nla_password, "NLA password for static mode", "PASS"},
         {"enable-nla", 0, 0, G_OPTION_ARG_NONE, &enable_nla_flag, "Force enable NLA regardless of config", NULL},

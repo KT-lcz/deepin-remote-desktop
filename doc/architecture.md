@@ -64,7 +64,7 @@ flowchart LR
 - LightDM RemoteDisplayFactory/SeatRDP 通过 DBus 与 system/handover 交互，创建远程 seat、管理虚拟屏幕，并与 UI 控制中心共享状态。
 
 ## 当前能力概览
-- **显示/编码**：X11/XDamage 抓屏 + 单帧队列，RFX Progressive（默认 RLGR1）与 Raw 回退，关键帧/上下文管理齐备。
+- **显示/编码**：X11/XDamage 抓屏 + 单帧队列，RFX Progressive（默认 RLGR1）与 SurfaceBits RemoteFX 路径，关键帧/上下文管理齐备。
 - **传输**：FreeRDP 监听 + TLS/NLA 强制，渲染线程串行“等待帧→编码→Rdpgfx/SurfaceBits 发送”，具备 ACK 背压与自动回退逻辑。
 - **输入**：XTest 键鼠注入，扩展扫描码拆分，指针缩放改为预计算比例减少每次浮点除法，并在 RDP → X11 键码转换环节新增缓存避免重复查表；Unicode 注入通过 `XKeysymToKeycode` 直接构造 KeySym 并注入，常见控制字符（Tab/Enter/Backspace）同样可用。
 - **配置/安全**：INI/CLI 合并，TLS 凭据集中加载，NLA SAM 临时文件确保 CredSSP，拒绝回退纯 TLS/RDP。
@@ -100,9 +100,21 @@ flowchart LR
 （capture/encoding/input/utils 源文件直接编译进主程序，无需构建中间静态库）
 
 ### 3. 编码层
-- `encoding/drd_encoding_manager`：统一编码配置、调度；对外暴露帧编码接口，并在 Progressive 超出多片段限制时自动回退 RAW。
-- `encoding/drd_raw_encoder`：原始帧编码器（BGRX → bottom-up），兼容旧客户端。
-- `encoding/drd_rfx_encoder`：基于 RemoteFX 的压缩实现，支持帧差分与底图缓存；Progressive 路径固定使用 RLGR1（`rfx_context_set_mode(RLGR1)`）保持与 mstsc/gnome-remote-desktop 一致，SurfaceBits 仍以 RLGR3 为主。其 `collect_dirty_rects()` 采用“tile 哈希 + 按需逐行校验”收集脏矩形，并直接生成 `RFX_RECT` 输入，详见 `doc/collect_dirty_rects.md`。为避免客户端 `MultifragMaxRequestSize` 过小导致每帧都先压缩再回退原始帧，`DrdEncodingManager` 会在检测到多片段超限后进入一段“raw grace” 周期，直接输出原始帧并跳过 RFX 压缩，待若干帧或上限增大后再尝试 RFX，减少重复编码开销。
+- `encoding/drd_encoding_manager`：统一编码配置、调度与发送；SurfaceBits 与 Rdpgfx 的编码/差分逻辑统一在管理器内维护，RemoteFX 生成 RFX_RECT（复用脏矩形缓存以降低分配抖动），Progressive 在 tile 遍历时直接并入 REGION16，减少中间列表遍历。
+- Progressive/RemoteFX 刷新窗口内若捕获超时，运行时会复用上一帧触发关键帧，全量编码确保刷新超时也能立即对齐客户端状态。
+
+```mermaid
+flowchart TD
+    Start[Surface GFX RemoteFX 输入帧] --> Prep[初始化 diff 状态\n(tile hash/previous frame)]
+    Prep --> Keyframe{强制关键帧或禁用差分?}
+    Keyframe -->|是| Full[全帧矩形]
+    Keyframe -->|否| Dirty[collect_dirty_rects\n哈希+逐行校验]
+    Dirty -->|无变化| Skip[跳过编码发送]
+    Dirty -->|有变化| Rects[输出 tile 矩形列表]
+    Full --> Encode[rfx_compose_message]
+    Rects --> Encode
+    Encode --> Update[更新 previous frame/hash]
+```
 
 ### 4. 输入层
 - `input/drd_input_dispatcher`：键鼠事件注入入口，管理 X11 注入后端与 FreeRDP 回调。
@@ -110,8 +122,8 @@ flowchart LR
 
 ### 5. 传输层
 - `transport/drd_rdp_listener`：直接继承 `GSocketService`，通过 `g_socket_listener_add_*` 绑定端口，`incoming` 信号里将 `GSocketConnection` 的 fd 复制给 `freerdp_peer`，再复用既有 TLS/NLA/输入配置流程，整个监听循环交由 GLib 主循环驱动；运行模式改为 `DrdRuntimeMode` 三态驱动：system 模式触发被动会话/输入屏蔽 + delegate/cancellable，handover 模式自动启用 RDSTLS，其余场景按 user 模式执行；失败分支统一复用内部连接/peer 清理函数，避免重复关闭/释放遗漏。
-- `session/drd_rdp_session`：会话状态机，维护 peer/runtime 引用、虚拟通道、事件线程与 renderer 线程。`drd_rdp_session_render_thread()` 在激活后循环：等待 Rdpgfx 容量（带 1 秒超时，无法及时 ACK 时自动回退 SurfaceBits）→ 调用 `drd_server_runtime_pull_encoded_frame()`（同步等待并编码，累计错误次数）→ 优先提交 Progressive，失败则回退 SurfaceBits（Raw 帧按行分片避免超限 payload），并负责 transport 切换、关键帧请求与桌面大小校验。
-- `session/drd_rdp_graphics_pipeline`：Rdpgfx server 适配器，负责与客户端交换 `CapsAdvertise/CapsConfirm`，在虚拟通道上执行 `ResetGraphics`/Surface 创建/帧提交；内部用 `needs_keyframe` 防止增量帧越级，并用 `capacity_cond`/`outstanding_frames` 控制 ACK 背压，当 Progressive 管线就绪时驱动运行时切换编码模式。
+- `session/drd_rdp_session`：会话状态机，维护 peer/runtime 引用、虚拟通道、事件线程与 renderer 线程。`drd_rdp_session_render_thread()` 在激活后循环：等待 Rdpgfx 容量（带 1 秒超时，无法及时 ACK 时自动回退 SurfaceBits）→ 调用 `drd_server_runtime_pull_encoded_frame()`（同步等待并编码，累计错误次数）→ 优先提交 Progressive，失败则回退 SurfaceBits（RemoteFX），并负责 transport 切换、关键帧请求与桌面大小校验。
+- `session/drd_rdp_graphics_pipeline`：Rdpgfx server 适配器，负责与客户端交换 `CapsAdvertise/CapsConfirm`，在虚拟通道上执行 `ResetGraphics`/Surface 创建/帧提交；内部用 `capacity_cond`/`outstanding_frames` 控制 ACK 背压，关键帧由编码管理器的 `gfx_force_keyframe` 标志驱动，当 Progressive 管线就绪时切换运行时编码模式。
 - `frame_acks_suspended` 状态机：当客户端发送 `queueDepth = SUSPEND_FRAME_ACKNOWLEDGEMENT` 时立刻清空未确认帧并广播 `capacity_cond`，编码线程不再累积 `outstanding_frames`；下一个普通 ACK 抵达后自动恢复背压。这样避免长时间不 ACK 时 `outstanding_frames` 无上限膨胀，也保证 resume 后重新以 0 起步。
 
 ```mermaid
@@ -204,7 +216,7 @@ flowchart TB
 - `utils/drd_frame`：帧描述对象，封装像素数据/元信息。
 - `utils/drd_frame_queue`：线程安全的单帧阻塞队列。
 - `utils/drd_encoded_frame`：编码后帧的统一表示，携带 payload 与元数据。
-- `drd_encoded_frame_set_payload/drd_encoded_frame_fill_payload` 封装 payload 写入路径，RFX 直接复制编码流，RAW 通过回调按行翻转写入（回调返回 `gboolean`，失败会回滚长度），避免调用方持有内部指针。
+- `drd_encoded_frame_set_payload/drd_encoded_frame_fill_payload` 封装 payload 写入路径，RemoteFX/Progressive 直接复制编码流，避免调用方持有内部指针。
 
 ```mermaid
 classDiagram
@@ -214,14 +226,11 @@ classDiagram
         +set_payload(data,size)
         +fill_payload(size,writer,user_data)
     }
-    class DrdRfxEncoder {
-        +encode(...,output,kind)
+    class DrdEncodingManager {
+        +encode_surface_gfx(...)
+        +encode_surface_bit(...)
     }
-    class DrdRawEncoder {
-        +encode(...,output)
-    }
-    DrdRfxEncoder --> DrdEncodedFrame : set_payload复制编码结果
-    DrdRawEncoder --> DrdEncodedFrame : fill_payload行翻转写入
+    DrdEncodingManager --> DrdEncodedFrame : set_payload复制编码结果
 ```
 
 ### 8. 虚拟通道与多媒体（规划）
@@ -289,7 +298,7 @@ deepin-remote-desktop \
   --cert=FILE                 # TLS 证书 PEM
   --key=FILE                  # TLS 私钥 PEM
   -c, --config=FILE           # INI 配置路径
-  --encoder=MODE              # raw|rfx
+  --encoder=MODE              # h264|rfx|auto
   --nla-username=USER         # 静态 NLA 账号
   --nla-password=PASS         # 静态 NLA 密码
   --enable-nla|--disable-nla  # 强制开关 NLA
@@ -307,6 +316,7 @@ certificate=/usr/share/deepin-remote-desktop/certs/server.crt
 private_key=/usr/share/deepin-remote-desktop/certs/server.key
 
 [encoding]
+# mode: h264|rfx|auto
 mode=rfx
 enable_diff=true
 
@@ -396,7 +406,7 @@ rdp_sso=false
 ## 数据流简述
 1. 应用启动后创建 `DrdServerRuntime`，合并配置与 TLS 凭据，调用 `drd_server_runtime_set_encoding_options()` 写入分辨率/编码模式，但不会立即启动 capture/input/encoder。
 2. 客户端完成 TLS/NLA→RDP 握手并触发 `DrdRdpSession::Activate` 后，session 会读取 runtime 中缓存的 `DrdEncodingOptions`，再调用 `prepare_stream()` 依次启动 capture/input/encoder；当所有 session 关闭时，`drd_rdp_listener_session_closed()` 会调 `drd_server_runtime_stop()` 停止 `drd_x11_capture_thread`。
-3. Renderer 线程通过 `drd_server_runtime_pull_encoded_frame()` 同步等待帧并即时编码：若 Graphics Pipeline 就绪则走 Progressive（成功后将 runtime transport 设为 `DRD_FRAME_TRANSPORT_GRAPHICS_PIPELINE`），否则通过 `SurfaceBits` + `SurfaceFrameMarker` 推送，Raw 帧按行拆分以满足多片段上限。`drd_rdp_session_pump()` 仅在 renderer 尚未启动时退化为 SurfaceBits 发送。
+3. Renderer 线程通过 `drd_server_runtime_pull_encoded_frame()` 同步等待帧并即时编码：若 Graphics Pipeline 就绪则走 Progressive（成功后将 runtime transport 设为 `DRD_FRAME_TRANSPORT_GRAPHICS_PIPELINE`），否则通过 `SurfaceBits` + `SurfaceFrameMarker` 推送 RemoteFX。`drd_rdp_session_pump()` 仅在 renderer 尚未启动时退化为 SurfaceBits 发送。
 
 ## 关键流程
 
@@ -515,7 +525,7 @@ sequenceDiagram
 - 这两条路径都依赖 routing token → client_id 的互逆关系，确保任何阶段都能找到唯一 handover session。
 
 ## 现代 RDP 功能蓝图
-- **显示链路**：现状为 X11 抓屏 + RFX/Raw；规划 H.264/AVC444、硬件加速、频道自适应（RFX↔H.264）与多显示器/DisplayControl。
+- **显示链路**：现状为 X11 抓屏 + RFX；规划 H.264/AVC444、硬件加速、频道自适应（RFX↔H.264）与多显示器/DisplayControl。
 - **输入与协作**：现状具备键鼠；规划 Unicode/IME、Clipboard VCHANNEL、触控/笔、快捷键修复。
 - **多媒体与设备**：待补充 rdpsnd（音频播放/录制）与 rdpdr（文件、打印机、智能卡、USB 转发）。
 - **网络与治理**：需引入带宽/丢包探测、自适应码率、故障恢复、systemd handover 与健康探针。
@@ -610,11 +620,9 @@ sequenceDiagram
 ```
 
 ## Progressive RFX 帧封装
-- `DrdRfxEncoder` 新增 `drd_rfx_encoder_write_progressive_message()`（`glib-rewrite/src/encoding/drd_rfx_encoder.c:218-379`），按 [MS-RDPEGFX] 规范依次写入 `SYNC`、`CONTEXT`、`FRAME_BEGIN/REGION/TILE/FRAME_END`，确保 Windows 客户端能正确解码。
-- FreeRDP 提供的 `progressive_rfx_write_message_progressive_simple()` 仅生成精简流，缺少 `RFX_PROGRESSIVE_CONTEXT`/`REGION` 元数据，导致客户端侧色彩错位；因此编码器改为显式构建 Header 并追踪 `progressive_header_sent` 状态（`glib-rewrite/src/encoding/drd_rfx_encoder.c:404-414`）。
-- 为了在强制关键帧或重新配置后刷新上下文，每次触发 `drd_rfx_encoder_force_keyframe()` 都会复位 Header 标记，保证下一帧重新携带同步块（`glib-rewrite/src/encoding/drd_rfx_encoder.c:623-628`）。
-- Progressive 帧提交路径增加了 `needs_keyframe` 守卫：`drd_rdp_graphics_pipeline_submit_frame()` 会拒绝在尚未发送关键帧时提交增量帧，并通过新的 `DRD_RDP_GRAPHICS_PIPELINE_ERROR_NEEDS_KEYFRAME` 错误提示会话调用 `drd_server_runtime_request_keyframe()`，防止客户端收到缺失 Progressive Header 的数据（`glib-rewrite/src/session/drd_rdp_graphics_pipeline.c`、`drd_rdp_session.c`）。关键帧标记在会话层读取后随参数传入，避免编码线程重用同一 `DrdEncodedFrame` 对象时造成竞态。
-- Progressive 路径默认切换到 `RLGR1`，保持与 `gnome-remote-desktop` 及 Windows mstsc 的兼容性；SurfaceBits 仍可沿用 `RLGR3` 以追求更高压缩率。若需要调试全量帧，可在 `[encoding] enable_diff=false` 或调用 `drd_server_runtime_request_keyframe()`。
+- Progressive 编码由 `DrdEncodingManager` 直接调用 FreeRDP `progressive_compress()` 输出，并通过 `SurfaceFrameCommand` 发送。
+- 帧提交失败时由编码器置位 `gfx_force_keyframe`，保证下一帧全量区域重新建立基线；会话仍可通过 `drd_server_runtime_request_keyframe()` 主动触发关键帧。
+- Progressive 路径默认使用 `RLGR1`，与 mstsc/gnome-remote-desktop 保持兼容；如需全量帧调试，可在 `[encoding] enable_diff=false` 或调用 `drd_server_runtime_request_keyframe()`。
 
 ## 单线程编码与发送
 - `DrdServerRuntime` 不再维护独立的编码线程 / `encoded_queue`。`drd_server_runtime_pull_encoded_frame()` 会直接从 `DrdCaptureManager` 取出最新 `DrdFrame`，立刻调用 `DrdEncodingManager` 同步编码并将 `DrdEncodedFrame` 返回给会话线程（`glib-rewrite/src/core/drd_server_runtime.c:146-191`）。
@@ -628,7 +636,7 @@ sequenceDiagram
 - 如果在超时时间内一直得不到 ACK，会话会调用 `drd_rdp_session_disable_graphics_pipeline()` 回退 SurfaceBits，并通过 `drd_server_runtime_request_keyframe()` 在恢复时强制全量帧，保证客户端状态重新对齐。
 
 - **捕获线程**：`drd_x11_capture_thread()` 每个 `target_interval`（默认 60fps，可通过配置项 `[capture] target_fps` 调整）执行一次事件消费与抓帧，将像素写入 `DrdFrameQueue` 环形缓冲（当前容量 3 帧，超限会丢弃最旧帧并记录计数），renderer 线程消费时仍能尽量拿到最新的画面，同时可根据丢帧指标判断是否存在背压；XDamage 事件在周期内被全部消费并清理，防止长时间合并导致帧率被压低，统计窗口（`[capture] stats_interval_sec`，默认 5 秒）仍输出实际捕获帧率与达标情况。
-- **Renderer 线程**：`drd_rdp_session_render_thread()` 在 `render_running` 标志下循环：等待 Rdpgfx 容量 → 调用 `drd_server_runtime_pull_encoded_frame()`（同步等待并编码）→ 优先提交 Progressive，失败则退回 SurfaceBits；过程中持续维护 `frame_sequence`、关键帧状态和 `needs_keyframe` 标志，且无需额外 `DrdRdpRenderer` 模块；同样以配置的窗口统计已发送帧率并输出是否达到目标帧率，实现发送端观测。
+- **Renderer 线程**：`drd_rdp_session_render_thread()` 在 `render_running` 标志下循环：等待 Rdpgfx 容量 → 调用 `drd_server_runtime_pull_encoded_frame()`（同步等待并编码）→ 优先提交 Progressive，失败则退回 SurfaceBits；过程中持续维护 `frame_sequence` 与编码器关键帧标志（`gfx_force_keyframe`），且无需额外 `DrdRdpRenderer` 模块；同样以配置的窗口统计已发送帧率并输出是否达到目标帧率，实现发送端观测。
 - **生命周期**：renderer 线程在会话 `Activate` 时启动，`drd_rdp_session_stop_event_thread()`/`drd_rdp_session_disable_graphics_pipeline()` 会在断开或切换时停止线程并重置状态，确保 capture/renderer 不会引用失效的 `freerdp_peer`。
 
 ```mermaid
@@ -639,7 +647,7 @@ flowchart LR
   end
   subgraph Renderer Thread
     Q --> |wait_frame| ENCODE[DrdEncodingManager\n（RLGR1 Progressive）]
-    ENCODE --> |needs_keyframe?| PIPE[DrdRdpGraphicsPipeline\nSurfaceFrameCommand]
+    ENCODE --> |full/dirty region| PIPE[DrdRdpGraphicsPipeline\nSurfaceFrameCommand]
     PIPE --> |FrameAck| COND[capacity_cond broadcast]
     ENCODE --> |fallback| SURF[SurfaceBits]
     ENCODE --> RenderStats[5s render FPS\nlog target vs actual]
@@ -654,28 +662,29 @@ flowchart LR
 
 ## Rdpgfx 背压与关键帧修复（2025-11-12）
 - `DrdRdpGraphicsPipeline` 新增 `capacity_cond` 条件变量，`FrameAcknowledge` 以及提交失败都会唤醒等待者，`drd_rdp_graphics_pipeline_wait_for_capacity()` 允许在握有同一把锁的情况下等待 “未确认帧 `< max_outstanding_frames`” 的判定（`glib-rewrite/src/session/drd_rdp_graphics_pipeline.c:24-116`、`:264-333`、`:389-452`）。
-- 会话渲染逻辑直接内嵌在 `drd_rdp_session_render_thread()`（`glib-rewrite/src/session/drd_rdp_session.c`）中：线程串行调用 `drd_rdp_graphics_pipeline_submit_frame()`，失败时立即请求关键帧或降级，无需单独 `DrdRdpRenderer` 模块。
-- `drd_rdp_session_try_submit_graphics()` 在提交 Progressive 帧前若检测到拥塞，会调用 `drd_rdp_graphics_pipeline_wait_for_capacity()` 并一直阻塞直到 ACK/管线重置释放槽位；若等待返回仍无法提交，则禁用 Rdpgfx 回退 SurfaceBits，同时强制关键帧，避免客户端长时间灰屏。
+- 会话渲染逻辑直接内嵌在 `drd_rdp_session_render_thread()`（`glib-rewrite/src/session/drd_rdp_session.c`）中：线程串行调用 `drd_rdp_graphics_pipeline_wait_for_capacity()` + `drd_server_runtime_pull_encoded_frame_surface_gfx()`，由编码器完成压缩并通过 `SurfaceFrameCommand` 发送；发送失败时置位 `gfx_force_keyframe`，必要时降级到 SurfaceBits，无需单独 `DrdRdpRenderer` 模块。
+- AVC→非 AVC 切换后，`drd_rdp_session_render_thread()` 会通过 `g_timeout_add_full()` 设定一次性刷新定时器：当 `drd_encoding_manager_refresh_interval_reached()` 在超时回调里满足刷新条件时，渲染线程下一次循环将复用缓存帧调用 `drd_server_runtime_send_cached_frame_surface_gfx()`，即使捕获端暂未产出新帧也能按时发送全量关键帧。
+- 拥塞检测由 `drd_rdp_graphics_pipeline_can_submit()` 与 `drd_rdp_session_wait_for_graphics_capacity()` 协作：当 ACK 长时间不到、等待超时仍不可提交时，渲染线程禁用 Rdpgfx 并回退 SurfaceBits，同时触发关键帧，避免客户端长时间灰屏。
 - 通过 renderer + 条件变量，rdpgfx 在正常情况下不会直接丢帧；当客户端未发送 ACK 时，系统会自动降级并刷新关键帧，确保画面尽快恢复。
 
 ```mermaid
 sequenceDiagram
     participant Pump as drd_rdp_session_render_thread
-    participant Renderer as SessionRenderer
+    participant Renderer as RenderThread
     participant Pipeline as DrdRdpGraphicsPipeline
     participant Client as RDP Client
 
-    Pump->>Renderer: enqueue progressive frame
+    Pump->>Renderer: enter loop
     Renderer->>Pipeline: wait_for_capacity()
     alt ACK arrives
         Client-->>Pipeline: FrameAcknowledge
         Pipeline-->>Renderer: capacity_cond signal
-        Renderer->>Pipeline: submit_frame()
+        Renderer->>Pipeline: pull_encoded_frame_surface_gfx()
     else Failure
         Renderer->>Pump: notify error/disable pipeline
         Pump->>Pipeline: disable & fallback
     end
-    Pipeline->>Client: Start/Surface/EndFrame
+    Pipeline->>Client: SurfaceFrameCommand
     Client-->>Pipeline: FrameAcknowledge
     Pipeline-->>Renderer: capacity_cond signal（允许下一帧）
 ```

@@ -1,5 +1,76 @@
 # 变更记录
 
+## 2026-02-28：AVC→非 AVC 切换定时补帧
+- **目的**：在首次从 AVC 回落到非 AVC 时设定刷新超时回调，即使捕获侧没有新帧也能按超时复用缓存帧发送全量关键帧。
+- **范围**：`src/session/drd_rdp_session.c`、`src/core/drd_server_runtime.c`、`src/encoding/drd_encoding_manager.*`、`doc/architecture.md`、`doc/changelog.md`、`.codex/plan/full-frame-refresh-timeout.md`。
+- **主要改动**：
+  1. 渲染线程在检测到 AVC→非 AVC 过渡时通过 `g_timeout_add_full()` 安排一次性刷新定时器，回调命中刷新窗口后置位刷新标记。
+  2. 刷新标记由渲染线程消费，直接调用运行时新的缓存帧编码入口发送全量关键帧，跳过捕获等待的延迟。
+  3. 编码管理器导出刷新超时配置访问器，文档补充定时补帧的触发路径。
+- **影响**：刷新时间窗口到达但无新帧时，仍能在定时器触发后立即发送关键帧，避免回落到非 AVC 后关键帧被推迟到下一次捕获。
+
+## 2026-02-27：Surface GFX 刷新超时补发关键帧
+- **目的**：在 Progressive/RemoteFX 刷新窗口内捕获无新帧时，仍能按超时要求立即发送全量帧，避免客户端状态对齐被推迟。
+- **范围**：`src/encoding/drd_encoding_manager.c`、`src/encoding/drd_encoding_manager.h`、`src/core/drd_server_runtime.c`、`doc/changelog.md`、`.codex/plan/full-frame-refresh-timeout.md`。
+- **主要改动**：
+  1. 编码管理器新增复用缓存帧的接口，在刷新超时到达时强制以关键帧形式走 Surface GFX 编码链路。
+  2. 运行时捕获超时时检测刷新窗口，到期则直接复用上一帧编码并发送全量帧。
+- **影响**：当刷新计数或时间达到阈值但捕获侧暂时静止时，也能及时推送关键帧，客户端画面不会滞后等待下一次输入或 damage。
+
+## 2026-02-26：Surface GFX 脏块分析复用与编码模式开关
+- **目的**：合并大变化判定与脏区收集的 tile 遍历，减少 Progressive/RemoteFX 差分路径的重复扫描，并提供是否启用 H264 与 Progressive/RemoteFX 自动切换的开关。
+- **范围**：`src/encoding/drd_encoding_manager.c`、`src/encoding/drd_encoding_manager.h`、`src/core/drd_server_runtime.c`、`doc/changelog.md`。
+- **主要改动**：
+  1. 新增 tile 分析辅助函数，一次遍历同时生成大变化判定与脏块标记，Progressive/RemoteFX 复用标记生成 REGION16/脏矩形，避免第二次 memcmp 全帧扫描。
+  2. `drd_encoding_manager_encode_surface_gfx` 接口新增 auto switch 参数，运行时根据编码模式传递开关以控制 H264 与 Progressive/RemoteFX 的自适应切换。
+- **影响**：高分辨率场景下 Progressive/RemoteFX 差分编码减少额外内存读取开销，可按配置关闭自动切换以固定编码策略。
+
+## 2025-12-31：Surface GFX surface_id 透传
+- **目的**：消除 Surface GFX 编码路径中固定的 surfaceId，统一与 Rdpgfx 图形管线的 surface_id 关联。
+- **范围**：`src/session/drd_rdp_graphics_pipeline.*`、`src/core/drd_server_runtime.*`、`src/encoding/drd_encoding_manager.*`、`src/session/drd_rdp_session.c`、`doc/changelog.md`、`.codex/plan/surface-gfx-surface-id.md`。
+- **主要改动**：
+  1. 新增 `drd_rdp_graphics_pipeline_get_surface_id()`，对外暴露管线 surface_id。
+  2. 运行时与编码器接口新增 surface_id 参数，替换编码路径中的固定值。
+  3. 会话层在拉取编码帧时传递 surface_id，确保与 Rdpgfx 管线一致。
+- **影响**：Surface GFX 编码命令的 surfaceId 与实际创建的 surface 一致，为多 surface 扩展或重建场景消除隐性不一致风险。
+
+## 2025-12-29：Surface GFX 差分路径优化
+- **目的**：复用脏矩形缓存并直接构建 REGION16，降低高帧率场景的分配与中间遍历开销。
+- **范围**：`src/encoding/drd_encoding_manager.c`、`doc/architecture.md`、`doc/changelog.md`、`.codex/plan/surface-gfx-diff-optimizations.md`。
+- **主要改动**：
+  1. 编码管理器新增可复用的 gfx 脏矩形数组，RemoteFX Surface GFX 复用该缓存。
+  2. Progressive 分支在 tile diff 过程中直接 union REGION16，避免构建 RFX_RECT 列表。
+  3. 文档与计划记录同步更新。
+- **影响**：减少每帧分配与额外遍历，降低 CPU 抖动；编码结果与关键帧行为保持不变。
+
+## 2025-12-29：Surface GFX RemoteFX 差分脏矩形迁移
+- **目的**：将 `collect_dirty_rects` 的 tile 哈希差分逻辑移入 surface gfx 编码路径，避免依赖独立 RFX 编码器。
+- **范围**：`src/encoding/drd_encoding_manager.c`、`doc/architecture.md`、`doc/changelog.md`、`.codex/plan/surface-gfx-dirty-rects.md`。
+- **主要改动**：
+  1. 编码管理器新增 surface gfx 差分状态（tile hash、previous frame、关键帧标志），并在 RemoteFX 分支内生成脏矩形列表。
+  2. RemoteFX Surface GFX 编码根据差分结果决定全帧或局部 tile 编码，成功后更新 previous frame 与哈希。
+  3. 架构文档补充 surface gfx 差分流程图与编码层说明。
+- **影响**：在 Rdpgfx RemoteFX 传输时可减少无变化区域的编码与发送，降低带宽与 CPU 压力；关键帧与尺寸变化会触发全量矩形发送以保证一致性。
+
+## 2025-12-29：Surface GFX Progressive REGION16 差分接入
+- **目的**：将 tile 脏区转换为 REGION16，降低 Progressive 编码的无变化区域开销。
+- **范围**：`src/encoding/drd_encoding_manager.c`、`doc/architecture.md`、`doc/changelog.md`、`.codex/plan/surface-gfx-progressive-region.md`。
+- **主要改动**：
+  1. Progressive 分支复用 tile hash 差分结果，构建 REGION16 并交给 `progressive_compress`。
+  2. 成功发送后更新 previous frame/关键帧标志，确保后续增量稳定。
+  3. 架构文档更新编码管理器差分范围说明。
+- **影响**：Progressive 发送路径可按 tile 变化区域编码，降低静止画面与局部更新时的编码与带宽消耗。
+
+## 2025-12-29：编码模式与 FrameCodec 配置对齐
+- **目的**：对齐 encoding.mode 的配置语义与文档描述，扩展帧编码枚举以明确 AVC420/AVC444。
+- **范围**：`src/core/drd_encoding_options.h`、`src/core/drd_config.c`、`src/core/drd_application.c`、`src/encoding/drd_encoding_manager.c`、`src/core/drd_server_runtime.c`、`src/session/drd_rdp_session.c`、`src/transport/drd_rdp_listener.c`、`src/utils/drd_encoded_frame.h`、`doc/architecture.md`、`doc/old/远程桌面概要设计.typ`、`doc/changelog.md`、`.codex/plan/encoding-mode-framecodec-update.md`。
+- **主要改动**：
+  1. encoding.mode 解析与 CLI 文案更新为 h264/rfx/auto，统一日志展示字符串。
+  2. `DrdFrameCodec` 枚举替换为 raw/rfx/rfx_progressive/avc420/avc444 五态，为后续 AVC 传输留出口。
+  3. 编码管理器与运行时映射新增 auto 分支并显式拒绝未实现的 AVC/H264 编码，SurfaceBits 仅允许 RAW/RFX。
+  4. 架构文档补充编码模式配置说明。
+- **影响**：配置层不再接受 raw 字符串；rfx/auto 维持现有 RFX+RAW 回退行为，h264/avc 仍未实现且会在流准备阶段报错。
+
 ## 2025-12-15：X11 捕获按帧率驱动事件
 - **目的**：脱离 XDamage 事件频率限制，让捕获线程按目标帧率周期驱动事件消费与抓帧，避免合成器低频 damage 时帧率被压低。
 - **范围**：`src/capture/drd_x11_capture.c`、`doc/architecture.md`、`.codex/plan/x11-capture-event-driven.md`。

@@ -56,7 +56,6 @@ package session {
     -RdpgfxServerContext *rdpgfx_context
     -guint16 surface_id
     -guint max_outstanding_frames
-    -gboolean needs_keyframe
     +gboolean submit(frame)
     +void request_keyframe()
     +gboolean wait_for_capacity(timeout)

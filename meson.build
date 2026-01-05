@@ -13,7 +13,8 @@ add_project_arguments([
   '-Wno-deprecated-declarations',
   '-Wno-error=pedantic',
   '-Wno-unused-function',
-  '-Wno-unused-variable'
+  '-Wno-unused-variable',
+  '-Wno-unused-parameter'
 ], language: 'c')
 
 cc = meson.get_compiler('c')

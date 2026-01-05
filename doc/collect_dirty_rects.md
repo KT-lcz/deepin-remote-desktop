@@ -1,7 +1,7 @@
 # collect_dirty_rects 机制分析
 
 ## 背景
-- 模块定位：`collect_dirty_rects()` 位于 `src/encoding/drd_rfx_encoder.c`，作为 RFX 编码前的差分筛选器，只为真正变动的 tile 生成 `RFX_RECT` 列表，配合 Progressive/SurfaceBits 共同减少冗余编码。
+- 模块定位：`collect_dirty_rects()` 位于 `src/encoding/drd_encoding_manager.c`，作为 RFX 编码前的差分筛选器，只为真正变动的 tile 生成 `RFX_RECT` 列表，配合 Progressive/SurfaceBits 共同减少冗余编码。
 - 设计目标：在不牺牲画质的前提下最大限度复用上一帧结果，通过哈希+按需逐行比较的方式避开整帧 `memcmp`，同时与 RFX 64×64 tile 对齐，保证抽象简洁（KISS）且不引入额外的 buffer（YAGNI）。
 
 ```mermaid
@@ -40,4 +40,4 @@ flowchart TD
 - 现有逐行校验在 stride == `width * 4` 时仍循环多次 `memcmp`。可在对齐条件满足时一次性比较整个 tile 缓冲，交由 libc 使用向量化指令，进一步降低热点路径 CPU 占用并遵循 KISS。
 
 ## 结论
-`collect_dirty_rects()` 通过“哈希缓存 + 按需校验 + tile 对齐矩形”三段式实现了高效、低耦合的帧差分。它让 `DrdRfxEncoder` 在静态画面下几乎零开销运行，同时在画面快速变化时仍能准确捕获变更范围，为 Progressive/SurfaceBits 提供最小输入集合，是当前编码链路中的关键性能支点。
+`collect_dirty_rects()` 通过“哈希缓存 + 按需校验 + tile 对齐矩形”三段式实现了高效、低耦合的帧差分。它让 `DrdEncodingManager` 在静态画面下几乎零开销运行，同时在画面快速变化时仍能准确捕获变更范围，为 Progressive/SurfaceBits 提供最小输入集合，是当前编码链路中的关键性能支点。

@@ -21,13 +21,10 @@ media_sources = files(
   'capture/drd_capture_manager.c',
   'capture/drd_x11_capture.c',
   'encoding/drd_encoding_manager.c',
-  'encoding/drd_raw_encoder.c',
-  'encoding/drd_rfx_encoder.c',
   'input/drd_input_dispatcher.c',
   'input/drd_x11_input.c',
   'utils/drd_frame.c',
   'utils/drd_frame_queue.c',
-  'utils/drd_encoded_frame.c',
   'utils/drd_capture_metrics.c'
 )
 

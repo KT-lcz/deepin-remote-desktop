@@ -1,12 +1,7 @@
 #pragma once
 
 #include <glib-object.h>
-
-struct rdp_settings;
-typedef struct rdp_settings rdpSettings;
-
-typedef struct rdp_certificate rdpCertificate;
-typedef struct rdp_private_key rdpPrivateKey;
+#include <freerdp/freerdp.h>
 
 G_BEGIN_DECLS
 

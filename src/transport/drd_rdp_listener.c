@@ -832,7 +832,9 @@ drd_configure_peer_settings(DrdRdpListener *self, freerdp_peer *client, GError *
     const guint32 width = self->encoding_options.width;
     const guint32 height = self->encoding_options.height;
     const gboolean enable_graphics_pipeline =
-            (self->encoding_options.mode == DRD_ENCODING_MODE_RFX);
+            (self->encoding_options.mode == DRD_ENCODING_MODE_RFX ||
+             self->encoding_options.mode == DRD_ENCODING_MODE_AUTO ||
+             self->encoding_options.mode != DRD_ENCODING_MODE_H264);
     if (width == 0 || height == 0)
     {
         g_set_error_literal(error,
@@ -855,13 +857,13 @@ drd_configure_peer_settings(DrdRdpListener *self, freerdp_peer *client, GError *
         !freerdp_settings_set_bool(settings, FreeRDP_SupportMonitorLayoutPdu, FALSE) ||
         !freerdp_settings_set_bool(settings, FreeRDP_RemoteFxCodec, TRUE) ||
         !freerdp_settings_set_bool(settings, FreeRDP_RemoteFxImageCodec, TRUE) ||
-        !freerdp_settings_set_bool(settings, FreeRDP_NSCodec, TRUE) ||
-        !freerdp_settings_set_bool(settings, FreeRDP_GfxH264, FALSE) ||
-        !freerdp_settings_set_bool(settings, FreeRDP_GfxAVC444v2, FALSE) ||
-        !freerdp_settings_set_bool(settings, FreeRDP_GfxAVC444, FALSE) ||
-        !freerdp_settings_set_bool(settings,
-                                   FreeRDP_SupportGraphicsPipeline,
-                                   enable_graphics_pipeline) ||
+        !freerdp_settings_set_bool(settings, FreeRDP_NSCodec, FALSE) ||
+        !freerdp_settings_set_bool(settings, FreeRDP_GfxH264, TRUE) ||
+        !freerdp_settings_set_bool(settings, FreeRDP_GfxAVC444v2, TRUE) ||
+        !freerdp_settings_set_bool(settings, FreeRDP_GfxAVC444, TRUE) ||
+        !freerdp_settings_set_bool(settings,FreeRDP_GfxProgressive,TRUE) ||
+        !freerdp_settings_set_bool(settings,FreeRDP_GfxProgressiveV2,TRUE) ||
+        !freerdp_settings_set_bool(settings,FreeRDP_SupportGraphicsPipeline,enable_graphics_pipeline) ||
         !freerdp_settings_set_bool(settings, FreeRDP_HasExtendedMouseEvent, TRUE) ||
         !freerdp_settings_set_bool(settings, FreeRDP_HasHorizontalWheel, TRUE) ||
         !freerdp_settings_set_bool(settings, FreeRDP_HasRelativeMouseEvent, FALSE) ||
@@ -883,6 +885,19 @@ drd_configure_peer_settings(DrdRdpListener *self, freerdp_peer *client, GError *
                             G_IO_ERROR_FAILED,
                             "Failed to configure peer settings");
         return FALSE;
+    }
+
+    if (self->encoding_options.mode == DRD_ENCODING_MODE_RFX)
+    {
+        if (!freerdp_settings_set_bool(settings, FreeRDP_GfxH264, FALSE) ||
+            !freerdp_settings_set_bool(settings, FreeRDP_GfxAVC444v2, FALSE) ||
+            !freerdp_settings_set_bool(settings, FreeRDP_GfxAVC444, FALSE))
+        {
+            g_set_error_literal(error,
+                            G_IO_ERROR,
+                            G_IO_ERROR_FAILED,
+                            "Failed to configure h264 settings");
+        }
     }
 
     if (!self->nla_enabled)

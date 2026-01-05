@@ -9,7 +9,6 @@
 typedef struct _DrdServerRuntime DrdServerRuntime;
 typedef struct _DrdLocalSession DrdLocalSession;
 
-#include "utils/drd_encoded_frame.h"
 
 G_BEGIN_DECLS
 

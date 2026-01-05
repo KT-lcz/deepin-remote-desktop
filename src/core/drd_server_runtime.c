@@ -1,10 +1,9 @@
 #include "core/drd_server_runtime.h"
 
+#include <freerdp/settings.h>
 #include <gio/gio.h>
 
 #include "utils/drd_log.h"
-
-static DrdFrameCodec drd_server_runtime_resolve_codec(DrdServerRuntime *self);
 
 struct _DrdServerRuntime
 {
@@ -17,7 +16,7 @@ struct _DrdServerRuntime
     DrdEncodingOptions encoding_options;
     gboolean has_encoding_options;
     gboolean stream_running;
-    gint transport_mode;
+    DrdFrameTransport transport_mode;
 };
 
 G_DEFINE_TYPE(DrdServerRuntime, drd_server_runtime, G_TYPE_OBJECT)
@@ -69,7 +68,7 @@ drd_server_runtime_init(DrdServerRuntime *self)
     self->tls = NULL;
     self->has_encoding_options = FALSE;
     self->stream_running = FALSE;
-    g_atomic_int_set(&self->transport_mode, DRD_FRAME_TRANSPORT_SURFACE_BITS);
+    g_atomic_int_set(&self->transport_mode, DRD_FRAME_TRANSPORT_GRAPHICS_PIPELINE);
 }
 
 /*
@@ -144,7 +143,7 @@ drd_server_runtime_prepare_stream(DrdServerRuntime *self,
 
     self->encoding_options = *encoding_options;
     self->has_encoding_options = TRUE;
-    g_atomic_int_set(&self->transport_mode, DRD_FRAME_TRANSPORT_SURFACE_BITS);
+    g_atomic_int_set(&self->transport_mode, DRD_FRAME_TRANSPORT_GRAPHICS_PIPELINE);
 
     if (!drd_encoding_manager_prepare(self->encoder, encoding_options, error))
     {
@@ -201,21 +200,97 @@ drd_server_runtime_stop(DrdServerRuntime *self)
     DRD_LOG_MESSAGE("Server runtime stopped and released capture/encoding resources");
 }
 
-/*
- * 功能：从捕获队列拉取帧并按当前策略编码。
- * 逻辑：等待指定超时时间获取帧，依据传输模式解析应使用的编码器，然后调用编码管理器输出编码帧。
- * 参数：self 运行时实例；timeout_us 等待超时；out_frame 输出编码帧；error 错误输出。
- * 外部接口：drd_capture_manager_wait_frame、drd_encoding_manager_encode；使用 GLib g_return_val_if_fail。
- */
-gboolean
-drd_server_runtime_pull_encoded_frame(DrdServerRuntime *self,
-                                      gint64 timeout_us,
-                                      DrdEncodedFrame **out_frame,
-                                      GError **error)
+gboolean drd_server_runtime_pull_encoded_frame_surface_gfx(DrdServerRuntime *self,
+                                                           rdpSettings *settings,
+                                                           RdpgfxServerContext *context,
+                                                           guint16 surface_id,
+                                                           gint64 timeout_us,
+                                                           guint32 frame_id,
+                                                           gboolean *h264,
+                                                           GError **error)
 {
     g_return_val_if_fail(DRD_IS_SERVER_RUNTIME(self), FALSE);
-    g_return_val_if_fail(out_frame != NULL, FALSE);
     g_return_val_if_fail(self->capture != NULL, FALSE);
+    g_return_val_if_fail(settings != NULL, FALSE);
+
+    const gboolean auto_switch = self->has_encoding_options &&
+                                 self->encoding_options.mode == DRD_ENCODING_MODE_AUTO;
+
+    g_autoptr(DrdFrame) frame = NULL;
+    g_autoptr(GError) capture_error = NULL;
+    if (!drd_capture_manager_wait_frame(self->capture, timeout_us, &frame, &capture_error))
+    {
+        const gboolean refresh_due = drd_encoding_manager_refresh_interval_reached(self->encoder);
+
+        if (capture_error != NULL && capture_error->domain == G_IO_ERROR &&
+            capture_error->code == G_IO_ERROR_TIMED_OUT && refresh_due)
+        {
+            g_clear_error(&capture_error);
+            return drd_encoding_manager_encode_cached_frame_gfx(self->encoder,
+                                                                settings,
+                                                                context,
+                                                                surface_id,
+                                                                frame_id,
+                                                                h264,
+                                                                auto_switch,
+                                                                error);
+        }
+
+        if (error != NULL)
+        {
+            *error = capture_error;
+            capture_error = NULL;
+        }
+        return FALSE;
+    }
+
+    return drd_encoding_manager_encode_surface_gfx(self->encoder,
+                                                   settings,
+                                                   context,
+                                                   surface_id,
+                                                   frame,
+                                                   frame_id,
+                                                   h264,
+                                                   auto_switch,
+                                                   error);
+}
+
+gboolean drd_server_runtime_send_cached_frame_surface_gfx(DrdServerRuntime *self,
+                                                          rdpSettings *settings,
+                                                          RdpgfxServerContext *context,
+                                                          guint16 surface_id,
+                                                          guint32 frame_id,
+                                                          gboolean *h264,
+                                                          GError **error)
+{
+    g_return_val_if_fail(DRD_IS_SERVER_RUNTIME(self), FALSE);
+    g_return_val_if_fail(self->encoder != NULL, FALSE);
+    g_return_val_if_fail(settings != NULL, FALSE);
+    g_return_val_if_fail(context != NULL, FALSE);
+
+    const gboolean auto_switch = self->has_encoding_options &&
+                                 self->encoding_options.mode == DRD_ENCODING_MODE_AUTO;
+
+    return drd_encoding_manager_encode_cached_frame_gfx(self->encoder,
+                                                        settings,
+                                                        context,
+                                                        surface_id,
+                                                        frame_id,
+                                                        h264,
+                                                        auto_switch,
+                                                        error);
+}
+
+gboolean drd_server_runtime_pull_encoded_frame_surface_bit(DrdServerRuntime *self,
+                                                           rdpContext *context,
+                                                           guint32 frame_id,
+                                                           gsize max_payload,
+                                                           gint64 timeout_us,
+                                                           GError **error)
+{
+    g_return_val_if_fail(DRD_IS_SERVER_RUNTIME(self), FALSE);
+    g_return_val_if_fail(self->capture != NULL, FALSE);
+    g_return_val_if_fail(context != NULL, FALSE);
 
     g_autoptr(DrdFrame) frame = NULL;
     if (!drd_capture_manager_wait_frame(self->capture, timeout_us, &frame, error))
@@ -223,13 +298,12 @@ drd_server_runtime_pull_encoded_frame(DrdServerRuntime *self,
         return FALSE;
     }
 
-    DrdFrameCodec codec = drd_server_runtime_resolve_codec(self);
-    return drd_encoding_manager_encode(self->encoder,
-                                       frame,
-                                       0,
-                                       codec,
-                                       out_frame,
-                                       error);
+    return drd_encoding_manager_encode_surface_bit(self->encoder,
+                                                   context,
+                                                   frame,
+                                                   frame_id,
+                                                   max_payload,
+                                                   error);
 }
 
 /*
@@ -274,19 +348,6 @@ drd_server_runtime_get_transport(DrdServerRuntime *self)
 {
     g_return_val_if_fail(DRD_IS_SERVER_RUNTIME(self), DRD_FRAME_TRANSPORT_SURFACE_BITS);
     return (DrdFrameTransport) g_atomic_int_get(&self->transport_mode);
-}
-
-/*
- * 功能：根据配置与传输模式返回当前编码器类型。
- * 逻辑：若未配置或 RAW 模式返回 RAW，否则根据传输模式选择 RFX 或 RFX_PROGRESSIVE。
- * 参数：self 运行时实例。
- * 外部接口：无额外外部库。
- */
-DrdFrameCodec
-drd_server_runtime_get_codec(DrdServerRuntime *self)
-{
-    g_return_val_if_fail(DRD_IS_SERVER_RUNTIME(self), DRD_FRAME_CODEC_RAW);
-    return drd_server_runtime_resolve_codec(self);
 }
 
 /*
@@ -396,33 +457,7 @@ drd_server_runtime_request_keyframe(DrdServerRuntime *self)
     g_return_if_fail(DRD_IS_SERVER_RUNTIME(self));
     drd_encoding_manager_force_keyframe(self->encoder);
 }
-
-/*
- * 功能：根据当前配置与传输模式解析应使用的编码格式。
- * 逻辑：未配置或 RAW 模式返回 RAW；Graphics Pipeline 传输使用 RFX_PROGRESSIVE，其余走 RFX。
- * 参数：self 运行时实例。
- * 外部接口：GLib g_atomic_int_get 读取传输模式。
- */
-static DrdFrameCodec
-drd_server_runtime_resolve_codec(DrdServerRuntime *self)
+gboolean drd_runtime_encoder_prepare(DrdServerRuntime *self, guint32 codecs, rdpSettings *settings)
 {
-    if (!self->has_encoding_options)
-    {
-        return DRD_FRAME_CODEC_RAW;
-    }
-
-    if (self->encoding_options.mode == DRD_ENCODING_MODE_RAW)
-    {
-        return DRD_FRAME_CODEC_RAW;
-    }
-
-    DrdFrameTransport transport =
-            (DrdFrameTransport) g_atomic_int_get(&self->transport_mode);
-
-    if (transport == DRD_FRAME_TRANSPORT_GRAPHICS_PIPELINE)
-    {
-        return DRD_FRAME_CODEC_RFX_PROGRESSIVE;
-    }
-
-    return DRD_FRAME_CODEC_RFX;
+    return drd_encoder_prepare(self->encoder, codecs, settings);
 }

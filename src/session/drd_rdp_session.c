@@ -1,29 +1,29 @@
 #include "session/drd_rdp_session.h"
 
-#include <freerdp/freerdp.h>
-#include <freerdp/update.h>
-#include <freerdp/codec/bitmap.h>
-#include <freerdp/constants.h>
 #include <freerdp/channels/drdynvc.h>
 #include <freerdp/channels/wtsvc.h>
-#include <freerdp/redirection.h>
-#include <freerdp/crypto/crypto.h>
+#include <freerdp/codec/bitmap.h>
+#include <freerdp/constants.h>
 #include <freerdp/crypto/certificate.h>
+#include <freerdp/crypto/crypto.h>
+#include <freerdp/freerdp.h>
+#include <freerdp/redirection.h>
+#include <freerdp/update.h>
 
 #include <gio/gio.h>
 #include <string.h>
 
-#include <winpr/synch.h>
-#include <winpr/wtypes.h>
 #include <winpr/crypto.h>
 #include <winpr/stream.h>
 #include <winpr/string.h>
+#include <winpr/synch.h>
+#include <winpr/wtypes.h>
 
 #include "core/drd_server_runtime.h"
+#include "security/drd_local_session.h"
+#include "session/drd_rdp_graphics_pipeline.h"
 #include "utils/drd_capture_metrics.h"
 #include "utils/drd_log.h"
-#include "session/drd_rdp_graphics_pipeline.h"
-#include "security/drd_local_session.h"
 
 #define ELEMENT_TYPE_CERTIFICATE 32
 
@@ -57,31 +57,26 @@ struct _DrdRdpSession
     gboolean passive_mode;
     DrdRdpSessionError last_error;
     guint64 frame_pull_errors;
+    /* 拥塞降级相关的状态管理 */
+    guint congestion_recovery_attempts; /* 尝试恢复 Rdpgfx 的次数 */
+    gint64 congestion_disable_time; /* 上次禁用 Rdpgfx 的时间戳 */
+    gboolean congestion_permanent_disabled; /* 是否永久禁用 */
+
+    guint refresh_timeout_source; /* avc 切换时的全量帧定时器 */
+    gint refresh_timeout_due; /* 定时器到期后由渲染线程消费 */
 };
 
 G_DEFINE_TYPE(DrdRdpSession, drd_rdp_session, G_TYPE_OBJECT)
 
-static gboolean drd_rdp_session_send_surface_bits(DrdRdpSession *self,
-                                                  DrdEncodedFrame *frame,
-                                                  guint32 frame_id,
-                                                  UINT32 negotiated_max_payload,
-                                                  GError **error);
-
 static gpointer drd_rdp_session_vcm_thread(gpointer user_data);
-
-static gboolean drd_rdp_session_try_submit_graphics(DrdRdpSession *self,
-                                                    DrdEncodedFrame *frame,
-                                                    gboolean *out_sent);
 
 static void drd_rdp_session_maybe_init_graphics(DrdRdpSession *self);
 
-static void drd_rdp_session_disable_graphics_pipeline(DrdRdpSession *self,
-                                                      const gchar *reason);
+static void drd_rdp_session_disable_graphics_pipeline(DrdRdpSession *self, const gchar *reason);
 
 static gboolean drd_rdp_session_enforce_peer_desktop_size(DrdRdpSession *self);
 
-static gboolean drd_rdp_session_wait_for_graphics_capacity(DrdRdpSession *self,
-                                                           gint64 timeout_us);
+static gboolean drd_rdp_session_wait_for_graphics_capacity(DrdRdpSession *self, gint64 timeout_us);
 
 static gboolean drd_rdp_session_start_render_thread(DrdRdpSession *self);
 
@@ -101,6 +96,11 @@ static WCHAR *drd_rdp_session_generate_redirection_guid(size_t *size);
 
 static BYTE *drd_rdp_session_get_certificate_container(const char *certificate, size_t *size);
 
+static gboolean drd_rdp_session_on_refresh_timeout(gpointer user_data);
+
+static void drd_rdp_session_cancel_refresh_timer(DrdRdpSession *self);
+static void drd_rdp_session_update_refresh_timer_state(DrdRdpSession *self);
+
 /*
  * 功能：释放会话持有的线程与资源，防止 FreeRDP peer 悬挂。
  * 逻辑：停止事件线程与渲染管线，等待 VCM 线程结束；若 peer context 仍存在则交由 FreeRDP 管理；
@@ -108,13 +108,13 @@ static BYTE *drd_rdp_session_get_certificate_container(const char *certificate, 
  * 参数：object GObject 指针，预期为 DrdRdpSession。
  * 外部接口：调用 GLib g_thread_join 等线程接口，依赖 drd_local_session_close 关闭本地会话。
  */
-static void
-drd_rdp_session_dispose(GObject *object)
+static void drd_rdp_session_dispose(GObject *object)
 {
     DrdRdpSession *self = DRD_RDP_SESSION(object);
 
     drd_rdp_session_stop_event_thread(self);
     drd_rdp_session_disable_graphics_pipeline(self, NULL);
+    drd_rdp_session_cancel_refresh_timer(self);
     if (self->vcm_thread != NULL)
     {
         g_thread_join(self->vcm_thread);
@@ -140,8 +140,7 @@ drd_rdp_session_dispose(GObject *object)
  * 参数：object GObject 指针。
  * 外部接口：使用 GLib g_clear_pointer/g_clear_object 处理引用。
  */
-static void
-drd_rdp_session_finalize(GObject *object)
+static void drd_rdp_session_finalize(GObject *object)
 {
     DrdRdpSession *self = DRD_RDP_SESSION(object);
     drd_rdp_session_stop_event_thread(self);
@@ -157,8 +156,7 @@ drd_rdp_session_finalize(GObject *object)
  * 参数：klass 类结构指针。
  * 外部接口：GLib GObject 类型系统。
  */
-static void
-drd_rdp_session_class_init(DrdRdpSessionClass *klass)
+static void drd_rdp_session_class_init(DrdRdpSessionClass *klass)
 {
     GObjectClass *object_class = G_OBJECT_CLASS(klass);
     object_class->dispose = drd_rdp_session_dispose;
@@ -171,8 +169,7 @@ drd_rdp_session_class_init(DrdRdpSessionClass *klass)
  * 参数：self 会话实例。
  * 外部接口：使用 GLib 原子操作 g_atomic_int_set。
  */
-static void
-drd_rdp_session_init(DrdRdpSession *self)
+static void drd_rdp_session_init(DrdRdpSession *self)
 {
     self->peer = NULL;
     self->peer_address = g_strdup("unknown");
@@ -197,6 +194,11 @@ drd_rdp_session_init(DrdRdpSession *self)
     self->passive_mode = FALSE;
     self->last_error = DRD_RDP_SESSION_ERROR_NONE;
     self->frame_pull_errors = 0;
+    self->congestion_recovery_attempts = 0;
+    self->congestion_disable_time = 0;
+    self->congestion_permanent_disabled = FALSE;
+    self->refresh_timeout_source = 0;
+    g_atomic_int_set(&self->refresh_timeout_due, 0);
 }
 
 /*
@@ -205,8 +207,7 @@ drd_rdp_session_init(DrdRdpSession *self)
  * 参数：peer FreeRDP 的连接上下文。
  * 外部接口：依赖 FreeRDP peer->hostname 提供远端信息；使用 GLib g_object_new/g_strdup。
  */
-DrdRdpSession *
-drd_rdp_session_new(freerdp_peer *peer)
+DrdRdpSession *drd_rdp_session_new(freerdp_peer *peer)
 {
     g_return_val_if_fail(peer != NULL, NULL);
 
@@ -223,8 +224,7 @@ drd_rdp_session_new(freerdp_peer *peer)
  * 参数：self 会话实例；state 状态描述。
  * 外部接口：日志使用 DRD_LOG_MESSAGE。
  */
-void
-drd_rdp_session_set_peer_state(DrdRdpSession *self, const gchar *state)
+void drd_rdp_session_set_peer_state(DrdRdpSession *self, const gchar *state)
 {
     g_return_if_fail(DRD_IS_RDP_SESSION(self));
 
@@ -240,8 +240,7 @@ drd_rdp_session_set_peer_state(DrdRdpSession *self, const gchar *state)
  * 参数：self 会话；runtime 服务器运行时。
  * 外部接口：GLib g_object_ref/g_clear_object 管理引用。
  */
-void
-drd_rdp_session_set_runtime(DrdRdpSession *self, DrdServerRuntime *runtime)
+void drd_rdp_session_set_runtime(DrdRdpSession *self, DrdServerRuntime *runtime)
 {
     g_return_if_fail(DRD_IS_RDP_SESSION(self));
     g_return_if_fail(runtime == NULL || DRD_IS_SERVER_RUNTIME(runtime));
@@ -268,8 +267,7 @@ drd_rdp_session_set_runtime(DrdRdpSession *self, DrdServerRuntime *runtime)
  * 参数：self 会话；vcm FreeRDP 虚拟通道管理器句柄。
  * 外部接口：句柄由 FreeRDP/WTS 提供。
  */
-void
-drd_rdp_session_set_virtual_channel_manager(DrdRdpSession *self, HANDLE vcm)
+void drd_rdp_session_set_virtual_channel_manager(DrdRdpSession *self, HANDLE vcm)
 {
     g_return_if_fail(DRD_IS_RDP_SESSION(self));
     self->vcm = vcm;
@@ -282,10 +280,7 @@ drd_rdp_session_set_virtual_channel_manager(DrdRdpSession *self, HANDLE vcm)
  * 参数：self 会话；callback 关闭回调；user_data 回调透传数据。
  * 外部接口：使用 GLib 原子 g_atomic_int_get/compare_and_exchange 检查状态。
  */
-void
-drd_rdp_session_set_closed_callback(DrdRdpSession *self,
-                                    DrdRdpSessionClosedFunc callback,
-                                    gpointer user_data)
+void drd_rdp_session_set_closed_callback(DrdRdpSession *self, DrdRdpSessionClosedFunc callback, gpointer user_data)
 {
     g_return_if_fail(DRD_IS_RDP_SESSION(self));
 
@@ -310,8 +305,7 @@ drd_rdp_session_set_closed_callback(DrdRdpSession *self,
  * 参数：self 会话；passive 是否被动。
  * 外部接口：无。
  */
-void
-drd_rdp_session_set_passive_mode(DrdRdpSession *self, gboolean passive)
+void drd_rdp_session_set_passive_mode(DrdRdpSession *self, gboolean passive)
 {
     g_return_if_fail(DRD_IS_RDP_SESSION(self));
     self->passive_mode = passive;
@@ -323,8 +317,7 @@ drd_rdp_session_set_passive_mode(DrdRdpSession *self, gboolean passive)
  * 参数：self 会话；session 本地会话对象。
  * 外部接口：调用 drd_local_session_close 关闭旧会话。
  */
-void
-drd_rdp_session_attach_local_session(DrdRdpSession *self, DrdLocalSession *session)
+void drd_rdp_session_attach_local_session(DrdRdpSession *self, DrdLocalSession *session)
 {
     g_return_if_fail(DRD_IS_RDP_SESSION(self));
 
@@ -343,8 +336,7 @@ drd_rdp_session_attach_local_session(DrdRdpSession *self, DrdLocalSession *sessi
  * 参数：self 会话。
  * 外部接口：无。
  */
-BOOL
-drd_rdp_session_post_connect(DrdRdpSession *self)
+BOOL drd_rdp_session_post_connect(DrdRdpSession *self)
 {
     g_return_val_if_fail(DRD_IS_RDP_SESSION(self), FALSE);
     drd_rdp_session_set_peer_state(self, "post-connect");
@@ -359,8 +351,7 @@ drd_rdp_session_post_connect(DrdRdpSession *self)
  * 外部接口：调用 drd_server_runtime_* 访问编码流水，使用 FreeRDP settings 更新桌面尺寸，
  *           日志采用 DRD_LOG_MESSAGE/DRD_LOG_WARNING。
  */
-BOOL
-drd_rdp_session_activate(DrdRdpSession *self)
+BOOL drd_rdp_session_activate(DrdRdpSession *self)
 {
     g_return_val_if_fail(DRD_IS_RDP_SESSION(self), FALSE);
 
@@ -387,8 +378,7 @@ drd_rdp_session_activate(DrdRdpSession *self)
     DrdEncodingOptions encoding_opts;
     if (!drd_server_runtime_get_encoding_options(self->runtime, &encoding_opts))
     {
-        DRD_LOG_WARNING("Session %s missing encoding options before stream start",
-                        self->peer_address);
+        DRD_LOG_WARNING("Session %s missing encoding options before stream start", self->peer_address);
         drd_rdp_session_set_peer_state(self, "encoding-opts-missing");
         drd_rdp_session_disconnect(self, "encoding-opts-missing");
         return FALSE;
@@ -402,14 +392,12 @@ drd_rdp_session_activate(DrdRdpSession *self)
         {
             if (stream_error != NULL)
             {
-                DRD_LOG_WARNING("Session %s failed to prepare runtime stream: %s",
-                                self->peer_address,
+                DRD_LOG_WARNING("Session %s failed to prepare runtime stream: %s", self->peer_address,
                                 stream_error->message);
             }
             else
             {
-                DRD_LOG_WARNING("Session %s failed to prepare runtime stream",
-                                self->peer_address);
+                DRD_LOG_WARNING("Session %s failed to prepare runtime stream", self->peer_address);
             }
             drd_rdp_session_set_peer_state(self, "stream-prepare-failed");
             drd_rdp_session_disconnect(self, "stream-prepare-failed");
@@ -443,8 +431,7 @@ drd_rdp_session_activate(DrdRdpSession *self)
  * 外部接口：使用 WinPR CreateEvent/SetEvent/WaitForSingleObject 操作事件，
  *           GLib g_thread_new 创建线程。
  */
-gboolean
-drd_rdp_session_start_event_thread(DrdRdpSession *self)
+gboolean drd_rdp_session_start_event_thread(DrdRdpSession *self)
 {
     g_return_val_if_fail(DRD_IS_RDP_SESSION(self), FALSE);
 
@@ -483,8 +470,7 @@ drd_rdp_session_start_event_thread(DrdRdpSession *self)
  * 参数：self 会话。
  * 外部接口：GLib g_thread_new 创建线程，g_atomic_int_set 设置标志。
  */
-static gboolean
-drd_rdp_session_start_render_thread(DrdRdpSession *self)
+static gboolean drd_rdp_session_start_render_thread(DrdRdpSession *self)
 {
     g_return_val_if_fail(DRD_IS_RDP_SESSION(self), FALSE);
 
@@ -499,8 +485,7 @@ drd_rdp_session_start_render_thread(DrdRdpSession *self)
     }
 
     g_atomic_int_set(&self->render_running, 1);
-    self->render_thread =
-            g_thread_new("drd-render-thread", drd_rdp_session_render_thread, g_object_ref(self));
+    self->render_thread = g_thread_new("drd-render-thread", drd_rdp_session_render_thread, g_object_ref(self));
     if (self->render_thread == NULL)
     {
         g_atomic_int_set(&self->render_running, 0);
@@ -515,8 +500,7 @@ drd_rdp_session_start_render_thread(DrdRdpSession *self)
  * 参数：self 会话。
  * 外部接口：GLib g_thread_join。
  */
-static void
-drd_rdp_session_stop_render_thread(DrdRdpSession *self)
+static void drd_rdp_session_stop_render_thread(DrdRdpSession *self)
 {
     g_return_if_fail(DRD_IS_RDP_SESSION(self));
 
@@ -537,8 +521,7 @@ drd_rdp_session_stop_render_thread(DrdRdpSession *self)
  * 参数：self 会话。
  * 外部接口：WinPR SetEvent/CloseHandle 操作事件；GLib g_thread_join。
  */
-void
-drd_rdp_session_stop_event_thread(DrdRdpSession *self)
+void drd_rdp_session_stop_event_thread(DrdRdpSession *self)
 {
     g_return_if_fail(DRD_IS_RDP_SESSION(self));
 
@@ -579,8 +562,7 @@ drd_rdp_session_stop_event_thread(DrdRdpSession *self)
  * 参数：self 会话。
  * 外部接口：GLib g_atomic_int_compare_and_exchange。
  */
-static void
-drd_rdp_session_notify_closed(DrdRdpSession *self)
+static void drd_rdp_session_notify_closed(DrdRdpSession *self)
 {
     g_return_if_fail(DRD_IS_RDP_SESSION(self));
 
@@ -603,8 +585,7 @@ drd_rdp_session_notify_closed(DrdRdpSession *self)
  * 参数：self 会话。
  * 外部接口：使用 freerdp_settings_get_uint32 读取设置。
  */
-gboolean
-drd_rdp_session_client_is_mstsc(DrdRdpSession *self)
+gboolean drd_rdp_session_client_is_mstsc(DrdRdpSession *self)
 {
     g_return_val_if_fail(DRD_IS_RDP_SESSION(self), FALSE);
     if (self->peer == NULL || self->peer->context == NULL || self->peer->context->settings == NULL)
@@ -624,8 +605,7 @@ drd_rdp_session_client_is_mstsc(DrdRdpSession *self)
  * 参数：str 源字符串；size 输出字节长度。
  * 外部接口：WinPR ConvertUtf8ToWCharAlloc 负责编码转换。
  */
-static WCHAR *
-drd_rdp_session_get_utf16_string(const char *str, size_t *size)
+static WCHAR *drd_rdp_session_get_utf16_string(const char *str, size_t *size)
 {
     g_return_val_if_fail(str != NULL, NULL);
     g_return_val_if_fail(size != NULL, NULL);
@@ -647,8 +627,7 @@ drd_rdp_session_get_utf16_string(const char *str, size_t *size)
  * 参数：size 输出字节长度。
  * 外部接口：WinPR winpr_RAND 生成随机数，FreeRDP crypto_base64_encode 进行 base64。
  */
-static WCHAR *
-drd_rdp_session_generate_redirection_guid(size_t *size)
+static WCHAR *drd_rdp_session_generate_redirection_guid(size_t *size)
 {
     BYTE guid_bytes[16] = {0};
     g_autofree gchar *guid_base64 = NULL;
@@ -675,9 +654,7 @@ drd_rdp_session_generate_redirection_guid(size_t *size)
  * 外部接口：FreeRDP freerdp_certificate_new_from_pem/get_der 处理证书，
  *           WinPR Stream_* API 管理序列化。
  */
-static BYTE *
-drd_rdp_session_get_certificate_container(const char *certificate,
-                                          size_t *size)
+static BYTE *drd_rdp_session_get_certificate_container(const char *certificate, size_t *size)
 {
     g_return_val_if_fail(certificate != NULL, NULL);
     g_return_val_if_fail(size != NULL, NULL);
@@ -737,8 +714,7 @@ drd_rdp_session_get_certificate_container(const char *certificate,
  * 参数：self 会话；error 枚举。
  * 外部接口：DRD_LOG_WARNING 打印日志。
  */
-void
-drd_rdp_session_notify_error(DrdRdpSession *self, DrdRdpSessionError error)
+void drd_rdp_session_notify_error(DrdRdpSession *self, DrdRdpSessionError error)
 {
     g_return_if_fail(DRD_IS_RDP_SESSION(self));
     if (error == DRD_RDP_SESSION_ERROR_NONE)
@@ -787,12 +763,8 @@ drd_rdp_session_notify_error(DrdRdpSession *self, DrdRdpSessionError error)
  * 外部接口：使用 FreeRDP redirection_* API 与 freerdp_settings_get_uint32 读取客户端 OS，
  *           调用 peer->SendServerRedirection 发送。
  */
-gboolean
-drd_rdp_session_send_server_redirection(DrdRdpSession *self,
-                                        const gchar *routing_token,
-                                        const gchar *username,
-                                        const gchar *password,
-                                        const gchar *certificate)
+gboolean drd_rdp_session_send_server_redirection(DrdRdpSession *self, const gchar *routing_token, const gchar *username,
+                                                 const gchar *password, const gchar *certificate)
 {
     DRD_LOG_MESSAGE("drd_rdp_session_send_server_redirection");
     g_return_val_if_fail(DRD_IS_RDP_SESSION(self), FALSE);
@@ -821,10 +793,7 @@ drd_rdp_session_send_server_redirection(DrdRdpSession *self,
     size_t size = 0;
 
     redirection_flags |= LB_LOAD_BALANCE_INFO;
-    redirection_set_byte_option(redirection,
-                                LB_LOAD_BALANCE_INFO,
-                                (const BYTE *) routing_token,
-                                strlen(routing_token));
+    redirection_set_byte_option(redirection, LB_LOAD_BALANCE_INFO, (const BYTE *) routing_token, strlen(routing_token));
 
     redirection_flags |= LB_USERNAME;
     redirection_set_string_option(redirection, LB_USERNAME, username);
@@ -852,8 +821,7 @@ drd_rdp_session_send_server_redirection(DrdRdpSession *self,
     redirection_set_byte_option(redirection, LB_REDIRECTION_GUID, (const BYTE *) encoded_guid, size);
 
     redirection_flags |= LB_TARGET_CERTIFICATE;
-    g_autofree BYTE *certificate_container =
-            drd_rdp_session_get_certificate_container(certificate, &size);
+    g_autofree BYTE *certificate_container = drd_rdp_session_get_certificate_container(certificate, &size);
     if (certificate_container == NULL)
     {
         return FALSE;
@@ -864,9 +832,7 @@ drd_rdp_session_send_server_redirection(DrdRdpSession *self,
 
     if (!redirection_settings_are_valid(redirection, &incorrect_flags))
     {
-        DRD_LOG_WARNING("Session %s invalid redirection flags 0x%08x",
-                        self->peer_address,
-                        incorrect_flags);
+        DRD_LOG_WARNING("Session %s invalid redirection flags 0x%08x", self->peer_address, incorrect_flags);
         return FALSE;
     }
 
@@ -886,8 +852,7 @@ drd_rdp_session_send_server_redirection(DrdRdpSession *self,
  * 参数：self 会话；reason 断开原因。
  * 外部接口：FreeRDP peer->Disconnect 终止连接；DRD_LOG_MESSAGE 输出日志。
  */
-void
-drd_rdp_session_disconnect(DrdRdpSession *self, const gchar *reason)
+void drd_rdp_session_disconnect(DrdRdpSession *self, const gchar *reason)
 {
     g_return_if_fail(DRD_IS_RDP_SESSION(self));
 
@@ -910,13 +875,6 @@ drd_rdp_session_disconnect(DrdRdpSession *self, const gchar *reason)
     self->is_activated = FALSE;
 }
 
-static gboolean
-drd_rdp_session_send_surface_bits(DrdRdpSession *self,
-                                  DrdEncodedFrame *frame,
-                                  guint32 frame_id,
-                                  UINT32 negotiated_max_payload,
-                                  GError **error);
-
 /*
  * 功能：在独立线程处理虚拟通道与 peer 事件，驱动 drdynvc/Rdpgfx 生命周期。
  * 逻辑：获取 VCM 事件句柄，循环等待 stop_event、channel_event 以及 peer 事件；
@@ -926,8 +884,7 @@ drd_rdp_session_send_surface_bits(DrdRdpSession *self,
  * 外部接口：WinPR WaitForMultipleObjects/WaitForSingleObject 等事件 API，
  *           FreeRDP WTSVirtualChannelManager*、peer->GetEventHandles/CheckFileDescriptor。
  */
-static gpointer
-drd_rdp_session_vcm_thread(gpointer user_data)
+static gpointer drd_rdp_session_vcm_thread(gpointer user_data)
 {
     DrdRdpSession *self = g_object_ref(DRD_RDP_SESSION(user_data));
     freerdp_peer *peer = self->peer;
@@ -1009,8 +966,7 @@ drd_rdp_session_vcm_thread(gpointer user_data)
         {
             break;
         }
-        if (channel_event != NULL &&
-            WaitForSingleObject(channel_event, 0) == WAIT_OBJECT_0)
+        if (channel_event != NULL && WaitForSingleObject(channel_event, 0) == WAIT_OBJECT_0)
         {
             if (!WTSVirtualChannelManagerCheckFileDescriptor(vcm))
             {
@@ -1035,8 +991,7 @@ drd_rdp_session_vcm_thread(gpointer user_data)
  * 外部接口：freerdp_settings_get_uint32/get_bool 读取设置，freerdp_settings_set_uint32 写入；
  *           调用 rdpUpdate->DesktopResize 通知客户端。
  */
-static gboolean
-drd_rdp_session_enforce_peer_desktop_size(DrdRdpSession *self)
+static gboolean drd_rdp_session_enforce_peer_desktop_size(DrdRdpSession *self)
 {
     g_return_val_if_fail(DRD_IS_RDP_SESSION(self), TRUE);
 
@@ -1064,21 +1019,13 @@ drd_rdp_session_enforce_peer_desktop_size(DrdRdpSession *self)
     const guint32 client_height = freerdp_settings_get_uint32(settings, FreeRDP_DesktopHeight);
     const gboolean client_allows_resize = freerdp_settings_get_bool(settings, FreeRDP_DesktopResize);
 
-    DRD_LOG_MESSAGE("Session %s peer geometry %ux%u, server requires %ux%u",
-                    self->peer_address,
-                    client_width,
-                    client_height,
-                    desired_width,
-                    desired_height);
+    DRD_LOG_MESSAGE("Session %s peer geometry %ux%u, server requires %ux%u", self->peer_address, client_width,
+                    client_height, desired_width, desired_height);
 
     if (!client_allows_resize && (client_width != desired_width || client_height != desired_height))
     {
         DRD_LOG_WARNING("Session %s client did not advertise DesktopResize, cannot override %ux%u with %ux%u",
-                        self->peer_address,
-                        client_width,
-                        client_height,
-                        desired_width,
-                        desired_height);
+                        self->peer_address, client_width, client_height, desired_width, desired_height);
         return FALSE;
     }
 
@@ -1088,9 +1035,7 @@ drd_rdp_session_enforce_peer_desktop_size(DrdRdpSession *self)
     {
         if (!freerdp_settings_set_uint32(settings, FreeRDP_DesktopWidth, desired_width))
         {
-            DRD_LOG_WARNING("Session %s could not update DesktopWidth to %u",
-                            self->peer_address,
-                            desired_width);
+            DRD_LOG_WARNING("Session %s could not update DesktopWidth to %u", self->peer_address, desired_width);
             return FALSE;
         }
         updated = TRUE;
@@ -1100,9 +1045,7 @@ drd_rdp_session_enforce_peer_desktop_size(DrdRdpSession *self)
     {
         if (!freerdp_settings_set_uint32(settings, FreeRDP_DesktopHeight, desired_height))
         {
-            DRD_LOG_WARNING("Session %s could not update DesktopHeight to %u",
-                            self->peer_address,
-                            desired_height);
+            DRD_LOG_WARNING("Session %s could not update DesktopHeight to %u", self->peer_address, desired_height);
             return FALSE;
         }
         updated = TRUE;
@@ -1126,9 +1069,7 @@ drd_rdp_session_enforce_peer_desktop_size(DrdRdpSession *self)
         return FALSE;
     }
 
-    DRD_LOG_MESSAGE("Session %s enforced desktop resolution to %ux%u",
-                    self->peer_address,
-                    desired_width,
+    DRD_LOG_MESSAGE("Session %s enforced desktop resolution to %ux%u", self->peer_address, desired_width,
                     desired_height);
     return TRUE;
 }
@@ -1139,17 +1080,14 @@ drd_rdp_session_enforce_peer_desktop_size(DrdRdpSession *self)
  * 参数：self 会话。
  * 外部接口：freerdp_settings_get_uint32 读取设置；GLib g_atomic_int_set 更新缓存。
  */
-static void
-drd_rdp_session_refresh_surface_payload_limit(DrdRdpSession *self)
+static void drd_rdp_session_refresh_surface_payload_limit(DrdRdpSession *self)
 {
     g_return_if_fail(DRD_IS_RDP_SESSION(self));
 
     guint32 max_payload = 0;
-    if (self->peer != NULL && self->peer->context != NULL &&
-        self->peer->context->settings != NULL)
+    if (self->peer != NULL && self->peer->context != NULL && self->peer->context->settings != NULL)
     {
-        max_payload = freerdp_settings_get_uint32(self->peer->context->settings,
-                                                  FreeRDP_MultifragMaxRequestSize);
+        max_payload = freerdp_settings_get_uint32(self->peer->context->settings, FreeRDP_MultifragMaxRequestSize);
     }
     /* 缓存通道协商出的多片段上限，渲染线程读取时无需再访问 settings。 */
     g_atomic_int_set(&self->max_surface_payload, (gint) max_payload);
@@ -1163,8 +1101,7 @@ drd_rdp_session_refresh_surface_payload_limit(DrdRdpSession *self)
  * 外部接口：drd_server_runtime_pull_encoded_frame 获取帧，drd_rdp_graphics_pipeline_* 操作图形通道，
  *           FreeRDP/WinPR 睡眠 g_usleep，日志使用 DRD_LOG_*。
  */
-static gpointer
-drd_rdp_session_render_thread(gpointer user_data)
+static gpointer drd_rdp_session_render_thread(gpointer user_data)
 {
     DrdRdpSession *self = DRD_RDP_SESSION(user_data);
 
@@ -1185,86 +1122,144 @@ drd_rdp_session_render_thread(gpointer user_data)
             g_usleep(1000);
             continue;
         }
-
-        if (self->graphics_pipeline != NULL && self->graphics_pipeline_ready)
-        {
-            /*
-             * Rdpgfx 背压：若 outstanding_frames >= max_outstanding_frames，则
-             * drd_rdp_graphics_pipeline_wait_for_capacity() 会在 capacity_cond 上等待，
-             * 直到客户端发送 RDPGFX_FRAME_ACKNOWLEDGE 释放槽位，保证不会编码无限多
-             * Progressive 帧。
-             */
-            if (!drd_rdp_session_wait_for_graphics_capacity(self, G_USEC_PER_SEC))
-            {
-                drd_rdp_session_disable_graphics_pipeline(self, "Rdpgfx capacity wait aborted");
-            }
-        }
-
-        DrdEncodedFrame *encoded = NULL;
         g_autoptr(GError) error = NULL;
-        if (!drd_server_runtime_pull_encoded_frame(self->runtime,
-                                                   16 * 1000,
-                                                   &encoded,
-                                                   &error))
-        {
-            if (error != NULL && error->domain == G_IO_ERROR && error->code == G_IO_ERROR_TIMED_OUT)
-            {
-                g_clear_error(&error);
-                continue;
-            }
-
-            if (error != NULL)
-            {
-                self->frame_pull_errors++;
-                DRD_LOG_WARNING("Session %s failed to pull encoded frame: %s (errors=%" G_GUINT64_FORMAT ")",
-                                self->peer_address,
-                                error->message,
-                                self->frame_pull_errors);
-            }
-            continue;
-        }
-
-        g_autoptr(DrdEncodedFrame) owned_frame = encoded;
-
         gboolean sent = FALSE;
-        gboolean sent_via_graphics = FALSE;
-        gboolean handled_by_graphics =
-                drd_rdp_session_try_submit_graphics(self, owned_frame, &sent_via_graphics);
-        sent = sent_via_graphics;
-
-        if (!handled_by_graphics)
+        DrdFrameTransport transport = drd_server_runtime_get_transport(self->runtime);
+        if (transport == DRD_FRAME_TRANSPORT_GRAPHICS_PIPELINE)
         {
-            guint32 negotiated_max_payload =
-                    (guint32) g_atomic_int_get(&self->max_surface_payload);
-            if (negotiated_max_payload == 0)
+            /* 尝试恢复 Rdpgfx 管线 */
+            if (self->graphics_pipeline == NULL)
             {
-                drd_rdp_session_refresh_surface_payload_limit(self);
-                negotiated_max_payload =
-                        (guint32) g_atomic_int_get(&self->max_surface_payload);
+                drd_rdp_session_maybe_init_graphics(self);
+                drd_rdp_graphics_pipeline_maybe_init(self->graphics_pipeline);
             }
 
-            DRD_LOG_DEBUG("Session %s sending SurfaceBits fallback (limit=%u)",
-                          self->peer_address,
-                          negotiated_max_payload);
-            g_autoptr(GError) send_error = NULL;
-            if (drd_rdp_session_send_surface_bits(self,
-                                                  owned_frame,
-                                                  self->frame_sequence,
-                                                  negotiated_max_payload,
-                                                  &send_error))
+            if (!self->graphics_pipeline_ready && self->graphics_pipeline != NULL &&
+                drd_rdp_graphics_pipeline_is_ready(self->graphics_pipeline))
             {
-                sent = TRUE;
+                drd_server_runtime_set_transport(self->runtime, DRD_FRAME_TRANSPORT_GRAPHICS_PIPELINE);
+                self->graphics_pipeline_ready = TRUE;
+                DRD_LOG_MESSAGE("Session %s graphics pipeline ready, switching to GFX", self->peer_address);
             }
-            else
+
+            if (self->graphics_pipeline_ready)
             {
-                if (send_error != NULL)
+                if (!drd_rdp_session_wait_for_graphics_capacity(self, -1) || !drd_rdp_graphics_pipeline_can_submit(self->graphics_pipeline))
                 {
-                    DRD_LOG_WARNING("Session %s failed to send frame: %s",
-                                    self->peer_address,
-                                    send_error->message);
+                    DRD_LOG_WARNING("Session %s Rdpgfx congestion persists, disabling graphics pipeline",
+                                                       self->peer_address);
+                    drd_rdp_session_disable_graphics_pipeline(self, "Rdpgfx congestion");
+                    continue;
+                }
+                gboolean h264 = FALSE;
+                if (g_atomic_int_compare_and_exchange(&self->refresh_timeout_due, 1, 0))
+                {
+                    if (drd_server_runtime_send_cached_frame_surface_gfx(self->runtime,
+                                                                         self->peer->context->settings,
+                                                                         drd_rdpgfx_get_context(self->graphics_pipeline),
+                                                                         drd_rdp_graphics_pipeline_get_surface_id(self->graphics_pipeline),
+                                                                         self->frame_sequence,
+                                                                         &h264,
+                                                                         &error))
+                    {
+                        sent = TRUE;
+                        drd_rdp_graphics_pipeline_out_frame_change(self->graphics_pipeline, TRUE);
+
+                        drd_rdp_graphics_pipeline_set_last_frame_mode(self->graphics_pipeline, h264);
+                    }
+                    else if (error != NULL && error->domain == G_IO_ERROR &&
+                             (error->code == G_IO_ERROR_TIMED_OUT || error->code == G_IO_ERROR_PENDING))
+                    {
+                        g_clear_error(&error);
+                    }
+                    else if (error != NULL)
+                    {
+                        self->frame_pull_errors++;
+                        DRD_LOG_WARNING("Session %s failed to send cached refresh: %s (errors=%" G_GUINT64_FORMAT ")",
+                                        self->peer_address,
+                                        error->message,
+                                        self->frame_pull_errors);
+                        g_clear_error(&error);
+                    }
+                }
+                if (!sent)
+                {
+                    if (drd_server_runtime_pull_encoded_frame_surface_gfx(
+                            self->runtime,
+                            self->peer->context->settings,
+                            drd_rdpgfx_get_context(self->graphics_pipeline),
+                            drd_rdp_graphics_pipeline_get_surface_id(self->graphics_pipeline),
+                            16 * 1000,
+                            self->frame_sequence,
+                            &h264,
+                            &error))
+                    {
+                        sent = TRUE;
+                        drd_rdp_graphics_pipeline_out_frame_change(self->graphics_pipeline, TRUE);
+
+                        drd_rdp_graphics_pipeline_set_last_frame_mode(self->graphics_pipeline, h264);
+
+                    }
+                    else
+                    {
+                        if (error != NULL && error->domain == G_IO_ERROR &&
+                        (error->code == G_IO_ERROR_TIMED_OUT || error->code == G_IO_ERROR_PENDING))
+                        {
+                            /* 无新数据情况：不递增 outstanding_frames，无需人工调整 */
+                            g_clear_error(&error);
+                            continue;
+                        }
+                        if (error != NULL)
+                        {
+                            self->frame_pull_errors++;
+                            DRD_LOG_WARNING("Session %s failed to pull encoded frame: %s (errors=%" G_GUINT64_FORMAT ")",
+                                            self->peer_address, error->message, self->frame_pull_errors);
+                        }
+                        continue;
+                    }
                 }
             }
         }
+        if (transport == DRD_FRAME_TRANSPORT_SURFACE_BITS)
+        {
+            const guint32 max_payload = (guint32) g_atomic_int_get(&self->max_surface_payload);
+            if (!drd_server_runtime_pull_encoded_frame_surface_bit(
+                        self->runtime, self->peer->context, self->frame_sequence, max_payload, 16 * 1000, &error))
+            {
+                if (error != NULL && error->domain == G_IO_ERROR &&
+                    (error->code == G_IO_ERROR_TIMED_OUT || error->code == G_IO_ERROR_PENDING))
+                {
+                    g_clear_error(&error);
+                    continue;
+                }
+                /* SurfaceBits 未实现时，不应禁用 Rdpgfx，因为它是唯一可用的传输 */
+                if (error != NULL && error->domain == G_IO_ERROR && error->code == G_IO_ERROR_NOT_SUPPORTED)
+                {
+                    DRD_LOG_WARNING("Session %s SurfaceBits not supported, Rdpgfx required", self->peer_address);
+                    g_clear_error(&error);
+                    /* SurfaceBits 不可用时，尝试恢复 Rdpgfx */
+                    if (!self->graphics_pipeline)
+                    {
+                        drd_rdp_session_maybe_init_graphics(self);
+                        drd_rdp_graphics_pipeline_maybe_init(self->graphics_pipeline);
+                    }
+                    continue;
+                }
+                if (error != NULL)
+                {
+                    self->frame_pull_errors++;
+                    DRD_LOG_WARNING("Session %s failed to send surface bits: %s (errors=%" G_GUINT64_FORMAT ")",
+                                    self->peer_address, error->message, self->frame_pull_errors);
+                }
+                continue;
+            }
+            sent = TRUE;
+        }
+        else
+        {
+            /* not reached */
+        }
+
 
         if (sent)
         {
@@ -1278,18 +1273,16 @@ drd_rdp_session_render_thread(gpointer user_data)
             const gint64 elapsed = now - stats_window_start;
             if (elapsed >= stats_interval)
             {
-                const gdouble actual_fps =
-                        (gdouble) stats_frames * (gdouble) G_USEC_PER_SEC / (gdouble) elapsed;
+                const gdouble actual_fps = (gdouble) stats_frames * (gdouble) G_USEC_PER_SEC / (gdouble) elapsed;
                 const gboolean reached_target = actual_fps >= (gdouble) target_fps;
-                DRD_LOG_MESSAGE("Session %s render fps=%.2f (target=%u): %s",
-                                self->peer_address,
-                                actual_fps,
-                                target_fps,
-                                reached_target ? "reached target" : "below target");
+                DRD_LOG_MESSAGE("Session %s render fps=%.2f (target=%u): %s", self->peer_address, actual_fps,
+                                target_fps, reached_target ? "reached target" : "below target");
                 stats_frames = 0;
                 stats_window_start = now;
             }
         }
+
+        drd_rdp_session_update_refresh_timer_state(self);
 
         self->frame_sequence++;
         if (self->frame_sequence == 0)
@@ -1310,13 +1303,11 @@ drd_rdp_session_render_thread(gpointer user_data)
  * 外部接口：drd_server_runtime_get_encoding_options 读取配置，
  *           drd_rdp_graphics_pipeline_new 创建 FreeRDP Rdpgfx 上下文。
  */
-static void
-drd_rdp_session_maybe_init_graphics(DrdRdpSession *self)
+static void drd_rdp_session_maybe_init_graphics(DrdRdpSession *self)
 {
     g_return_if_fail(DRD_IS_RDP_SESSION(self));
 
-    if (self->graphics_pipeline != NULL || self->peer == NULL ||
-        self->peer->context == NULL || self->runtime == NULL ||
+    if (self->graphics_pipeline != NULL || self->peer == NULL || self->peer->context == NULL || self->runtime == NULL ||
         self->vcm == NULL || self->vcm == INVALID_HANDLE_VALUE)
     {
         return;
@@ -1328,16 +1319,14 @@ drd_rdp_session_maybe_init_graphics(DrdRdpSession *self)
         return;
     }
 
-    if (encoding_opts.mode != DRD_ENCODING_MODE_RFX)
+    if (encoding_opts.mode != DRD_ENCODING_MODE_RFX && encoding_opts.mode != DRD_ENCODING_MODE_AUTO &&
+        encoding_opts.mode != DRD_ENCODING_MODE_H264)
     {
         return;
     }
 
-    DrdRdpGraphicsPipeline *pipeline =
-            drd_rdp_graphics_pipeline_new(self->peer,
-                                          self->vcm,
-                                          (guint16) encoding_opts.width,
-                                          (guint16) encoding_opts.height);
+    DrdRdpGraphicsPipeline *pipeline = drd_rdp_graphics_pipeline_new(
+            self->peer, self->vcm, self->runtime, (guint16) encoding_opts.width, (guint16) encoding_opts.height);
     if (pipeline == NULL)
     {
         DRD_LOG_WARNING("Session %s failed to allocate graphics pipeline", self->peer_address);
@@ -1355,8 +1344,7 @@ drd_rdp_session_maybe_init_graphics(DrdRdpSession *self)
  * 参数：self 会话；reason 关闭原因，可为空。
  * 外部接口：drd_server_runtime_set_transport 设置传输方式；DRD_LOG_WARNING 记录。
  */
-static void
-drd_rdp_session_disable_graphics_pipeline(DrdRdpSession *self, const gchar *reason)
+static void drd_rdp_session_disable_graphics_pipeline(DrdRdpSession *self, const gchar *reason)
 {
     if (self->graphics_pipeline == NULL)
     {
@@ -1365,9 +1353,7 @@ drd_rdp_session_disable_graphics_pipeline(DrdRdpSession *self, const gchar *reas
 
     if (reason != NULL)
     {
-        DRD_LOG_WARNING("Session %s disabling graphics pipeline: %s",
-                        self->peer_address,
-                        reason);
+        DRD_LOG_WARNING("Session %s disabling graphics pipeline: %s", self->peer_address, reason);
     }
 
     if (self->runtime != NULL)
@@ -1385,17 +1371,81 @@ drd_rdp_session_disable_graphics_pipeline(DrdRdpSession *self, const gchar *reas
  * 参数：self 会话；timeout_us 等待时间，-1 表示阻塞。
  * 外部接口：drd_rdp_graphics_pipeline_wait_for_capacity。
  */
-static gboolean
-drd_rdp_session_wait_for_graphics_capacity(DrdRdpSession *self,
-                                           gint64 timeout_us)
+static gboolean drd_rdp_session_wait_for_graphics_capacity(DrdRdpSession *self, gint64 timeout_us)
 {
     if (self->graphics_pipeline == NULL || !self->graphics_pipeline_ready)
     {
         return FALSE;
     }
 
-    return drd_rdp_graphics_pipeline_wait_for_capacity(self->graphics_pipeline,
-                                                       timeout_us);
+    return drd_rdp_graphics_pipeline_wait_for_capacity(self->graphics_pipeline, timeout_us);
+}
+
+static void drd_rdp_session_cancel_refresh_timer(DrdRdpSession *self)
+{
+    g_return_if_fail(DRD_IS_RDP_SESSION(self));
+
+    if (self->refresh_timeout_source != 0)
+    {
+        g_source_remove(self->refresh_timeout_source);
+        self->refresh_timeout_source = 0;
+    }
+
+    g_atomic_int_set(&self->refresh_timeout_due, 0);
+}
+
+static gboolean drd_rdp_session_on_refresh_timeout(gpointer user_data)
+{
+    DrdRdpSession *self = DRD_RDP_SESSION(user_data);
+    self->refresh_timeout_source = 0;
+
+    if (self->runtime != NULL)
+    {
+        DrdEncodingManager *encoder = drd_server_runtime_get_encoder(self->runtime);
+        if (encoder != NULL && drd_encoding_manager_refresh_interval_reached(encoder))
+        {
+            g_atomic_int_set(&self->refresh_timeout_due, 1);
+        }
+    }
+
+    return G_SOURCE_REMOVE;
+}
+
+static void drd_rdp_session_update_refresh_timer_state(DrdRdpSession *self)
+{
+    DrdEncodingManager *encoder = NULL;
+
+    if (self->runtime != NULL)
+    {
+        encoder = drd_server_runtime_get_encoder(self->runtime);
+    }
+
+    if (encoder == NULL)
+    {
+        drd_rdp_session_cancel_refresh_timer(self);
+        return;
+    }
+
+    const gboolean tracking = drd_encoding_manager_has_avc_to_non_avc_transition(encoder);
+
+    if (!tracking)
+    {
+        drd_rdp_session_cancel_refresh_timer(self);
+        return;
+    }
+
+    if (self->refresh_timeout_source == 0)
+    {
+        const guint refresh_timeout_ms = drd_encoding_manager_get_refresh_timeout_ms(encoder);
+        if (refresh_timeout_ms > 0)
+        {
+            self->refresh_timeout_source = g_timeout_add_full(G_PRIORITY_DEFAULT,
+                                                              refresh_timeout_ms,
+                                                              drd_rdp_session_on_refresh_timeout,
+                                                              g_object_ref(self),
+                                                              g_object_unref);
+        }
+    }
 }
 
 /*
@@ -1407,291 +1457,3 @@ drd_rdp_session_wait_for_graphics_capacity(DrdRdpSession *self,
  * 外部接口：drd_rdp_graphics_pipeline_* 系列检查能力并提交帧，
  *           drd_server_runtime_request_keyframe 触发关键帧重编。
  */
-static gboolean
-drd_rdp_session_try_submit_graphics(DrdRdpSession *self,
-                                    DrdEncodedFrame *frame,
-                                    gboolean *out_sent)
-{
-    if (self->runtime == NULL)
-    {
-        return FALSE;
-    }
-
-    if (out_sent != NULL)
-    {
-        *out_sent = FALSE;
-    }
-
-    drd_rdp_session_maybe_init_graphics(self);
-
-    if (self->graphics_pipeline == NULL)
-    {
-        return FALSE;
-    }
-
-    // drd_rdp_graphics_pipeline_maybe_init(self->graphics_pipeline);
-
-    if (!self->graphics_pipeline_ready &&
-        drd_rdp_graphics_pipeline_is_ready(self->graphics_pipeline))
-    {
-        drd_server_runtime_set_transport(self->runtime,
-                                         DRD_FRAME_TRANSPORT_GRAPHICS_PIPELINE);
-        self->graphics_pipeline_ready = TRUE;
-        DRD_LOG_MESSAGE("Session %s graphics pipeline ready, switching to RFX progressive",
-                        self->peer_address);
-    }
-
-    if (!self->graphics_pipeline_ready)
-    {
-        return FALSE;
-    }
-
-    if (drd_encoded_frame_get_codec(frame) != DRD_FRAME_CODEC_RFX_PROGRESSIVE)
-    {
-        return FALSE;
-    }
-
-    if (!drd_rdp_graphics_pipeline_can_submit(self->graphics_pipeline))
-    {
-        if (!drd_rdp_session_wait_for_graphics_capacity(self, -1) ||
-            !drd_rdp_graphics_pipeline_can_submit(self->graphics_pipeline))
-        {
-            DRD_LOG_WARNING("Session %s Rdpgfx congestion persists, disabling graphics pipeline",
-                            self->peer_address);
-            drd_rdp_session_disable_graphics_pipeline(self, "Rdpgfx congestion");
-            return TRUE;
-        }
-    }
-
-    /*
-     * Progressive 关键帧 = 覆盖完整画面且包含 SYNC/CONTEXT 等头部的帧，客户端无需
-     * 依赖旧数据即可渲染。只有在关键帧成功提交后，后续增量帧才安全，因此我们要
-     * 在编码线程覆盖 payload 前抢先读取 is_keyframe，并传给管线判断。
-     */
-    gboolean frame_is_keyframe = drd_encoded_frame_is_keyframe(frame);
-    g_autoptr(GError) gfx_error = NULL;
-    if (!drd_rdp_graphics_pipeline_submit_frame(self->graphics_pipeline,
-                                                frame,
-                                                frame_is_keyframe,
-                                                &gfx_error))
-    {
-        if (gfx_error != NULL &&
-            g_error_matches(gfx_error,
-                            DRD_RDP_GRAPHICS_PIPELINE_ERROR,
-                            DRD_RDP_GRAPHICS_PIPELINE_ERROR_NEEDS_KEYFRAME))
-        {
-            DRD_LOG_MESSAGE("Session %s Rdpgfx requires progressive keyframe, requesting re-encode",
-                            self->peer_address);
-            drd_server_runtime_request_keyframe(self->runtime);
-            return TRUE;
-        }
-
-        if (gfx_error != NULL)
-        {
-            DRD_LOG_WARNING("Session %s Rdpgfx submission failed: %s",
-                            self->peer_address,
-                            gfx_error->message);
-        }
-        drd_rdp_session_disable_graphics_pipeline(self, "Rdpgfx submission failure");
-        return TRUE;
-    }
-
-    if (out_sent != NULL)
-    {
-        *out_sent = TRUE;
-    }
-    return TRUE;
-}
-
-/*
- * 功能：通过 SurfaceBits 或 FrameMarker 将编码帧发送给客户端。
- * 逻辑：校验回调可用后发送 FRAME_BEGIN；若无 payload 仅发送标记；RFX 模式检查 payload 是否超限，
- *       RAW 模式按行分片（可 bottom-up）发送；最后发送 FRAME_END，任一步失败则返回错误。
- * 参数：self 会话；frame 编码帧；frame_id 帧序号；negotiated_max_payload 协商负载上限；error 错误输出。
- * 外部接口：FreeRDP update->SurfaceFrameMarker/SurfaceBits 承载数据传输，使用 SURFACE_BITS_COMMAND 结构。
- */
-static gboolean
-drd_rdp_session_send_surface_bits(DrdRdpSession *self,
-                                  DrdEncodedFrame *frame,
-                                  guint32 frame_id,
-                                  UINT32 negotiated_max_payload,
-                                  GError **error)
-{
-    g_return_val_if_fail(DRD_IS_RDP_SESSION(self), FALSE);
-    g_return_val_if_fail(DRD_IS_ENCODED_FRAME(frame), FALSE);
-
-    if (self->peer == NULL || self->peer->context == NULL)
-    {
-        g_set_error_literal(error,
-                            G_IO_ERROR,
-                            G_IO_ERROR_FAILED,
-                            "Peer context not available");
-        return FALSE;
-    }
-
-    rdpContext *context = self->peer->context;
-    rdpUpdate *update = context->update;
-    if (update == NULL || update->SurfaceBits == NULL || update->SurfaceFrameMarker == NULL)
-    {
-        g_set_error_literal(error,
-                            G_IO_ERROR,
-                            G_IO_ERROR_NOT_SUPPORTED,
-                            "Surface update callbacks are not available");
-        return FALSE;
-    }
-
-    guint width = drd_encoded_frame_get_width(frame);
-    guint height = drd_encoded_frame_get_height(frame);
-    gsize data_size = 0;
-    const guint8 *data = drd_encoded_frame_get_data(frame, &data_size);
-    if (data == NULL || data_size == 0)
-    {
-        SURFACE_FRAME_MARKER marker_begin = {SURFACECMD_FRAMEACTION_BEGIN, frame_id};
-        SURFACE_FRAME_MARKER marker_end = {SURFACECMD_FRAMEACTION_END, frame_id};
-
-        if (!update->SurfaceFrameMarker(context, &marker_begin))
-        {
-            g_set_error_literal(error,
-                                G_IO_ERROR,
-                                G_IO_ERROR_FAILED,
-                                "SurfaceFrameMarker (begin) failed");
-            return FALSE;
-        }
-
-        if (!update->SurfaceFrameMarker(context, &marker_end))
-        {
-            g_set_error_literal(error,
-                                G_IO_ERROR,
-                                G_IO_ERROR_FAILED,
-                                "SurfaceFrameMarker (end) failed");
-            return FALSE;
-        }
-
-        return TRUE;
-    }
-
-    const gsize stride = drd_encoded_frame_get_stride(frame);
-    const gboolean bottom_up = drd_encoded_frame_get_is_bottom_up(frame);
-    DrdFrameCodec codec = drd_encoded_frame_get_codec(frame);
-
-    gsize payload_limit = (gsize) negotiated_max_payload;
-    if (payload_limit > 0 && payload_limit < stride)
-    {
-        payload_limit = stride;
-    }
-
-    SURFACE_FRAME_MARKER marker_begin = {SURFACECMD_FRAMEACTION_BEGIN, frame_id};
-    SURFACE_FRAME_MARKER marker_end = {SURFACECMD_FRAMEACTION_END, frame_id};
-
-    gboolean frame_started = update->SurfaceFrameMarker(context, &marker_begin);
-    if (!frame_started)
-    {
-        g_set_error_literal(error,
-                            G_IO_ERROR,
-                            G_IO_ERROR_FAILED,
-                            "SurfaceFrameMarker (begin) failed");
-        return FALSE;
-    }
-
-    gboolean success = FALSE;
-
-    if (codec == DRD_FRAME_CODEC_RFX)
-    {
-        if (payload_limit > 0 && data_size > payload_limit)
-        {
-            g_set_error(error,
-                        G_IO_ERROR,
-                        G_IO_ERROR_FAILED,
-                        "Encoded RFX frame exceeds negotiated payload limit (%zu > %u)",
-                        data_size,
-                        negotiated_max_payload);
-            goto end_frame;
-        }
-
-        SURFACE_BITS_COMMAND cmd;
-        memset(&cmd, 0, sizeof(cmd));
-        cmd.cmdType = CMDTYPE_SET_SURFACE_BITS;
-        cmd.destLeft = 0;
-        cmd.destTop = 0;
-        cmd.destRight = width;
-        cmd.destBottom = height;
-        cmd.skipCompression = FALSE;
-
-        cmd.bmp.codecID = RDP_CODEC_ID_REMOTEFX;
-        cmd.bmp.bpp = 32;
-        cmd.bmp.flags = 0;
-        cmd.bmp.width = (UINT16) width;
-        cmd.bmp.height = (UINT16) height;
-        cmd.bmp.bitmapData = (BYTE *) data;
-        cmd.bmp.bitmapDataLength = (UINT32) data_size;
-
-        success = update->SurfaceBits(context, &cmd);
-    }
-    else
-    {
-        /* 对 raw 帧执行按行分片，避免超出通道带宽的巨块推送。 */
-        const gsize chunk_budget = (payload_limit > 0) ? payload_limit : (512 * 1024);
-        guint rows_per_chunk = (guint) MAX((gsize)1, chunk_budget / stride);
-        if (rows_per_chunk == 0)
-        {
-            rows_per_chunk = 1;
-        }
-
-        success = TRUE;
-        for (guint top = 0; top < height; top += rows_per_chunk)
-        {
-            guint chunk_height = MIN(rows_per_chunk, height - top);
-            gsize offset = bottom_up
-                               ? (gsize) stride * (height - top - chunk_height)
-                               : (gsize) stride * top;
-
-            SURFACE_BITS_COMMAND cmd;
-            memset(&cmd, 0, sizeof(cmd));
-            cmd.cmdType = CMDTYPE_SET_SURFACE_BITS;
-            cmd.destLeft = 0;
-            cmd.destTop = top;
-            cmd.destRight = width;
-            cmd.destBottom = top + chunk_height;
-            cmd.skipCompression = TRUE;
-
-            cmd.bmp.bitmapData = (BYTE *) (data + offset);
-            cmd.bmp.bitmapDataLength = (UINT32) (stride * chunk_height);
-            cmd.bmp.bpp = 32;
-            cmd.bmp.flags = 0;
-            cmd.bmp.codecID = 0;
-            cmd.bmp.width = (UINT16) width;
-            cmd.bmp.height = (UINT16) chunk_height;
-
-            if (!update->SurfaceBits(context, &cmd))
-            {
-                success = FALSE;
-                break;
-            }
-        }
-    }
-
-end_frame:
-    if (!success)
-    {
-        g_set_error_literal(error,
-                            G_IO_ERROR,
-                            G_IO_ERROR_FAILED,
-                            "SurfaceBits command failed");
-        if (frame_started)
-        {
-            update->SurfaceFrameMarker(context, &marker_end);
-        }
-        return FALSE;
-    }
-
-    if (!update->SurfaceFrameMarker(context, &marker_end))
-    {
-        g_set_error_literal(error,
-                            G_IO_ERROR,
-                            G_IO_ERROR_FAILED,
-                            "SurfaceFrameMarker (end) failed");
-        return FALSE;
-    }
-
-    return TRUE;
-}

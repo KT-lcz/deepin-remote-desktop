@@ -271,7 +271,7 @@ drd_handover_daemon_bind_handover(DrdHandoverDaemon *self, GError **error)
                      "take-client-ready",
                      G_CALLBACK(drd_handover_daemon_on_take_client_ready),
                      self);
-    g_signal_connect(self->handover_proxy, // 什么时候发这个信号？// TODO
+    g_signal_connect(self->handover_proxy,
                      "restart-handover",
                      G_CALLBACK(drd_handover_daemon_on_restart_handover),
                      self);

@@ -206,7 +206,7 @@ drd_config_set_runtime_mode_internal(DrdConfig *self, DrdRuntimeMode mode)
 
 /*
  * 功能：根据字符串设置编码模式。
- * 逻辑：接受 raw/rfx/remotefx 并写入对应枚举，非法值时报错。
+ * 逻辑：接受 h264/rfx/remotefx/auto 并写入对应枚举，非法值时报错。
  * 参数：self 配置实例；value 模式名称；error 错误输出。
  * 外部接口：GLib g_ascii_strcasecmp/g_set_error。
  */
@@ -217,20 +217,25 @@ drd_config_set_mode_from_string(DrdConfig *self, const gchar *value, GError **er
     {
         return FALSE;
     }
-    if (g_ascii_strcasecmp(value, "raw") == 0)
+    if (g_ascii_strcasecmp(value, "h264") == 0)
     {
-        self->encoding.mode = DRD_ENCODING_MODE_RAW;
+        self->encoding.mode = DRD_ENCODING_MODE_H264;
         return TRUE;
     }
-    if (g_ascii_strcasecmp(value, "rfx") == 0 || g_ascii_strcasecmp(value, "remotefx") == 0)
+    if (g_ascii_strcasecmp(value, "rfx") == 0)
     {
         self->encoding.mode = DRD_ENCODING_MODE_RFX;
+        return TRUE;
+    }
+    if (g_ascii_strcasecmp(value, "auto") == 0)
+    {
+        self->encoding.mode = DRD_ENCODING_MODE_AUTO;
         return TRUE;
     }
     g_set_error(error,
                 G_IO_ERROR,
                 G_IO_ERROR_INVALID_ARGUMENT,
-                "Unknown encoder mode '%s' (expected raw or rfx)",
+                "Unknown encoder mode '%s' (expected h264, rfx or auto)",
                 value);
     return FALSE;
 }

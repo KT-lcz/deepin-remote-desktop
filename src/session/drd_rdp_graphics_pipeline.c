@@ -8,6 +8,7 @@
 
 #include <gio/gio.h>
 
+#include "core/drd_server_runtime.h"
 #include "utils/drd_log.h"
 
 struct _DrdRdpGraphicsPipeline
@@ -26,14 +27,6 @@ struct _DrdRdpGraphicsPipeline
     guint16 surface_id;
     guint32 codec_context_id;
     guint32 next_frame_id;
-    /*
-     * needs_keyframe: Progressive RFX 在 Reset/提交失败后必须先发送一帧完整关键帧
-     * (带 SYNC/CONTEXT/REGION/TILE)，客户端才能正确叠加后续增量帧。
-     * 一旦我们检测到关键帧丢失，就置位该标志，禁止额外增量帧写入，直到新的
-     * 关键帧成功入队；否则 Windows mstsc 会因没有基线而花屏。
-     */
-    gboolean needs_keyframe;
-
     gint outstanding_frames;
     guint max_outstanding_frames;
     guint32 channel_id;
@@ -46,6 +39,9 @@ struct _DrdRdpGraphicsPipeline
      * 节奏一致，避免“先编码再丢弃”导致的花屏。
      */
     GCond capacity_cond;
+
+    DrdServerRuntime *runtime;
+    gboolean last_frame_h264;
 };
 
 G_DEFINE_TYPE(DrdRdpGraphicsPipeline, drd_rdp_graphics_pipeline, G_TYPE_OBJECT)
@@ -64,11 +60,11 @@ drd_rdp_graphics_pipeline_error_quark(void)
 
 static BOOL drd_rdpgfx_channel_assigned(RdpgfxServerContext *context, UINT32 channel_id);
 
-static UINT drd_rdpgfx_caps_advertise(RdpgfxServerContext *context,
-                                      const RDPGFX_CAPS_ADVERTISE_PDU *caps);
-
 static UINT drd_rdpgfx_frame_ack(RdpgfxServerContext *context,
                                  const RDPGFX_FRAME_ACKNOWLEDGE_PDU *ack);
+
+static UINT shadow_client_rdpgfx_caps_advertise(RdpgfxServerContext* context,
+                                                const RDPGFX_CAPS_ADVERTISE_PDU* capsAdvertise);
 
 /*
  * 功能：生成符合 Rdpgfx 要求的 32 位时间戳。
@@ -141,7 +137,7 @@ drd_rdp_graphics_pipeline_reset_locked(DrdRdpGraphicsPipeline *self)
     map.surfaceId = self->surface_id;
     map.outputOriginX = 0;
     map.outputOriginY = 0;
-
+    map.reserved = 0;
     if (!self->rdpgfx_context->MapSurfaceToOutput ||
         self->rdpgfx_context->MapSurfaceToOutput(self->rdpgfx_context, &map) != CHANNEL_RC_OK)
     {
@@ -153,7 +149,6 @@ drd_rdp_graphics_pipeline_reset_locked(DrdRdpGraphicsPipeline *self)
     self->next_frame_id = 1;
     self->outstanding_frames = 0;
     self->surface_ready = TRUE;
-    self->needs_keyframe = TRUE;
     self->frame_acks_suspended = FALSE;
     g_cond_broadcast(&self->capacity_cond);
     return TRUE;
@@ -224,7 +219,6 @@ drd_rdp_graphics_pipeline_init(DrdRdpGraphicsPipeline *self)
     self->codec_context_id = 1;
     self->next_frame_id = 1;
     self->max_outstanding_frames = 3;
-    self->needs_keyframe = TRUE;
     self->frame_acks_suspended = FALSE;
 }
 
@@ -245,6 +239,7 @@ drd_rdp_graphics_pipeline_class_init(DrdRdpGraphicsPipelineClass *klass)
 DrdRdpGraphicsPipeline *
 drd_rdp_graphics_pipeline_new(freerdp_peer *peer,
                               HANDLE vcm,
+                              DrdServerRuntime *runtime,
                               guint16 surface_width,
                               guint16 surface_height)
 {
@@ -271,11 +266,12 @@ drd_rdp_graphics_pipeline_new(freerdp_peer *peer,
     self->width = surface_width;
     self->height = surface_height;
     self->rdpgfx_context = rdpgfx_context;
+    self->runtime = runtime;
 
     rdpgfx_context->rdpcontext = peer->context;
     rdpgfx_context->custom = self;
     rdpgfx_context->ChannelIdAssigned = drd_rdpgfx_channel_assigned;
-    rdpgfx_context->CapsAdvertise = drd_rdpgfx_caps_advertise;
+    rdpgfx_context->CapsAdvertise = shadow_client_rdpgfx_caps_advertise;
     rdpgfx_context->FrameAcknowledge = drd_rdpgfx_frame_ack;
 
     return self;
@@ -332,6 +328,7 @@ drd_rdp_graphics_pipeline_maybe_init(DrdRdpGraphicsPipeline *self)
     }
 
     gboolean ok = drd_rdp_graphics_pipeline_reset_locked(self);
+    drd_server_runtime_set_transport(self->runtime,DRD_FRAME_TRANSPORT_GRAPHICS_PIPELINE);
     g_mutex_unlock(&self->lock);
     return ok;
 }
@@ -367,9 +364,39 @@ drd_rdp_graphics_pipeline_can_submit(DrdRdpGraphicsPipeline *self)
     g_mutex_lock(&self->lock);
     gboolean ok = self->surface_ready &&
                   (self->frame_acks_suspended ||
-                   self->outstanding_frames < (gint) self->max_outstanding_frames);
+                   self->outstanding_frames < (gint) self->max_outstanding_frames ||
+                   self->last_frame_h264);
     g_mutex_unlock(&self->lock);
     return ok;
+}
+
+guint16
+drd_rdp_graphics_pipeline_get_surface_id(DrdRdpGraphicsPipeline *self)
+{
+    g_return_val_if_fail(DRD_IS_RDP_GRAPHICS_PIPELINE(self), 0);
+
+    return self->surface_id;
+}
+
+void drd_rdp_graphics_pipeline_out_frame_change(DrdRdpGraphicsPipeline *self, gboolean add)
+{
+    g_mutex_lock(&self->lock);
+    if (add)
+    {
+        if (!self->frame_acks_suspended)
+        {
+            self->outstanding_frames++;
+        }
+    }
+    else
+    {
+        if (!self->frame_acks_suspended && self->outstanding_frames > 0)
+        {
+            self->outstanding_frames--;
+        }
+        g_cond_broadcast(&self->capacity_cond);
+    }
+    g_mutex_unlock(&self->lock);
 }
 
 /*
@@ -397,6 +424,11 @@ drd_rdp_graphics_pipeline_wait_for_capacity(DrdRdpGraphicsPipeline *self,
     }
 
     g_mutex_lock(&self->lock);
+    if (self->last_frame_h264)
+    {
+        g_mutex_unlock(&self->lock);
+        return TRUE;
+    }
     while (self->surface_ready && !self->frame_acks_suspended &&
            self->outstanding_frames >= (gint) self->max_outstanding_frames)
     {
@@ -415,151 +447,6 @@ drd_rdp_graphics_pipeline_wait_for_capacity(DrdRdpGraphicsPipeline *self,
                       self->outstanding_frames < (gint) self->max_outstanding_frames);
     g_mutex_unlock(&self->lock);
     return ready;
-}
-
-/*
- * 功能：将 Progressive RFX 帧提交到 Rdpgfx 通道，维护背压与关键帧状态。
- * 逻辑：校验编码类型与 surface 就绪；若需要关键帧而未提供则报错；在背压超限时返回 WOULD_BLOCK；
- *       生成 frame_id，填充 StartFrame/SurfaceCommand/EndFrame PDU 并调用 FreeRDP 回调发送；
- *       失败时回滚 outstanding、标记需要关键帧并唤醒等待者。
- * 参数：self 管线；frame 编码帧；frame_is_keyframe 是否关键帧；error 输出错误。
- * 外部接口：FreeRDP RdpgfxServerContext 的 SurfaceFrameCommand/StartFrame/SurfaceCommand/EndFrame；
- *           GLib g_set_error/g_error_matches，使用 DRD_RDP_GRAPHICS_PIPELINE_ERROR 域。
- */
-gboolean
-drd_rdp_graphics_pipeline_submit_frame(DrdRdpGraphicsPipeline *self,
-                                       DrdEncodedFrame *frame,
-                                       gboolean frame_is_keyframe,
-                                       GError **error)
-{
-    g_return_val_if_fail(DRD_IS_RDP_GRAPHICS_PIPELINE(self), FALSE);
-    g_return_val_if_fail(DRD_IS_ENCODED_FRAME(frame), FALSE);
-
-    if (drd_encoded_frame_get_codec(frame) != DRD_FRAME_CODEC_RFX_PROGRESSIVE)
-    {
-        g_set_error_literal(error,
-                            G_IO_ERROR,
-                            G_IO_ERROR_FAILED,
-                            "Encoded frame is not RFX progressive");
-        return FALSE;
-    }
-
-    gsize payload_size = 0;
-    const guint8 *payload = drd_encoded_frame_get_data(frame, &payload_size);
-    if (payload == NULL || payload_size == 0)
-    {
-        return TRUE;
-    }
-
-    guint32 frame_id = 0;
-
-    g_mutex_lock(&self->lock);
-    if (!self->surface_ready)
-    {
-        g_mutex_unlock(&self->lock);
-        g_set_error_literal(error,
-                            G_IO_ERROR,
-                            G_IO_ERROR_FAILED,
-                            "Graphics pipeline surface not ready");
-        return FALSE;
-    }
-
-    if (self->needs_keyframe && !frame_is_keyframe)
-    {
-        g_mutex_unlock(&self->lock);
-        g_set_error(error,
-                    DRD_RDP_GRAPHICS_PIPELINE_ERROR,
-                    DRD_RDP_GRAPHICS_PIPELINE_ERROR_NEEDS_KEYFRAME,
-                    "Graphics pipeline requires RFX progressive keyframe");
-        return FALSE;
-    }
-
-    gboolean track_ack = !self->frame_acks_suspended;
-
-    if (track_ack &&
-        self->outstanding_frames >= (gint) self->max_outstanding_frames)
-    {
-        g_mutex_unlock(&self->lock);
-        g_set_error_literal(error,
-                            G_IO_ERROR,
-                            G_IO_ERROR_WOULD_BLOCK,
-                            "Graphics pipeline congestion");
-        return FALSE;
-    }
-
-    frame_id = self->next_frame_id++;
-    if (self->next_frame_id == 0)
-    {
-        self->next_frame_id = 1;
-    }
-    if (track_ack)
-    {
-        self->outstanding_frames++;
-    }
-    if (frame_is_keyframe)
-    {
-        self->needs_keyframe = FALSE;
-    }
-    g_mutex_unlock(&self->lock);
-
-    RDPGFX_START_FRAME_PDU start = {0};
-    start.timestamp = drd_rdp_graphics_pipeline_build_timestamp();
-    start.frameId = frame_id;
-
-    RDPGFX_END_FRAME_PDU end = {0};
-    end.frameId = frame_id;
-
-    RDPGFX_SURFACE_COMMAND cmd = {0};
-    cmd.surfaceId = self->surface_id;
-    cmd.codecId = RDPGFX_CODECID_CAPROGRESSIVE;
-    cmd.contextId = self->codec_context_id;
-    cmd.format = PIXEL_FORMAT_BGRX32;
-    cmd.left = 0;
-    cmd.top = 0;
-    cmd.right = self->width;
-    cmd.bottom = self->height;
-    cmd.width = self->width;
-    cmd.height = self->height;
-    cmd.length = (UINT32) payload_size;
-    cmd.data = (BYTE *) payload;
-
-    UINT status = CHANNEL_RC_OK;
-    if (self->rdpgfx_context->SurfaceFrameCommand != NULL)
-    {
-        status = self->rdpgfx_context->SurfaceFrameCommand(self->rdpgfx_context,
-                                                           &cmd,
-                                                           &start,
-                                                           &end);
-    }
-    else if (!self->rdpgfx_context->StartFrame ||
-             self->rdpgfx_context->StartFrame(self->rdpgfx_context, &start) != CHANNEL_RC_OK ||
-             !self->rdpgfx_context->SurfaceCommand ||
-             self->rdpgfx_context->SurfaceCommand(self->rdpgfx_context, &cmd) != CHANNEL_RC_OK ||
-             !self->rdpgfx_context->EndFrame ||
-             self->rdpgfx_context->EndFrame(self->rdpgfx_context, &end) != CHANNEL_RC_OK)
-    {
-        status = CHANNEL_RC_BAD_PROC;
-    }
-
-    if (status != CHANNEL_RC_OK)
-    {
-        g_mutex_lock(&self->lock);
-        if (track_ack && self->outstanding_frames > 0)
-        {
-            self->outstanding_frames--;
-        }
-        self->needs_keyframe = TRUE;
-        g_cond_broadcast(&self->capacity_cond);
-        g_mutex_unlock(&self->lock);
-
-        g_set_error_literal(error,
-                            G_IO_ERROR,
-                            G_IO_ERROR_FAILED,
-                            "Failed to submit frame over Rdpgfx");
-        return FALSE;
-    }
-
-    return TRUE;
 }
 
 /*
@@ -584,40 +471,294 @@ drd_rdpgfx_channel_assigned(RdpgfxServerContext *context, UINT32 channel_id)
     return TRUE;
 }
 
-/*
- * 功能：处理客户端能力广告并返回确认。
- * 逻辑：读取首个 capsSet，调用 CapsConfirm 回调回复；成功后标记 caps_confirmed。
- * 参数：context Rdpgfx 上下文；caps 客户端能力广告。
- * 外部接口：FreeRDP RdpgfxServerContext->CapsConfirm。
- */
-static UINT
-drd_rdpgfx_caps_advertise(RdpgfxServerContext *context,
-                          const RDPGFX_CAPS_ADVERTISE_PDU *caps)
+static BOOL shadow_are_caps_filtered(const rdpSettings* settings, UINT32 caps)
 {
-    DrdRdpGraphicsPipeline *self = context != NULL ? context->custom : NULL;
+    const UINT32 capList[] = { RDPGFX_CAPVERSION_8,   RDPGFX_CAPVERSION_81,
+                               RDPGFX_CAPVERSION_10,  RDPGFX_CAPVERSION_101,
+                               RDPGFX_CAPVERSION_102, RDPGFX_CAPVERSION_103,
+                               RDPGFX_CAPVERSION_104, RDPGFX_CAPVERSION_105,
+                               RDPGFX_CAPVERSION_106, RDPGFX_CAPVERSION_106_ERR,
+                               RDPGFX_CAPVERSION_107 };
 
-    if (self == NULL || caps == NULL || caps->capsSetCount == 0)
+    WINPR_ASSERT(settings);
+    const UINT32 filter = freerdp_settings_get_uint32(settings, FreeRDP_GfxCapsFilter);
+
+    for (UINT32 x = 0; x < ARRAYSIZE(capList); x++)
+    {
+        if (caps == capList[x])
+            return (filter & (1 << x)) != 0;
+    }
+
+    return TRUE;
+}
+
+static UINT shadow_client_send_caps_confirm(DrdRdpGraphicsPipeline *self,RdpgfxServerContext* context,
+                                            const RDPGFX_CAPS_CONFIRM_PDU* pdu)
+{
+    WINPR_ASSERT(context);
+    WINPR_ASSERT(self);
+    WINPR_ASSERT(pdu);
+
+    WINPR_ASSERT(context->CapsConfirm);
+    UINT rc = context->CapsConfirm(context, pdu);
+    g_mutex_lock(&self->lock);
+    self->caps_confirmed = TRUE;
+    g_mutex_unlock(&self->lock);
+    return rc;
+}
+
+
+static BOOL shadow_client_caps_test_version(DrdRdpGraphicsPipeline *self,RdpgfxServerContext* context,
+                                            BOOL h264, const RDPGFX_CAPSET* capsSets,
+                                            UINT32 capsSetCount, UINT32 capsVersion, UINT* rc)
+{
+	const rdpSettings* srvSettings = NULL;
+	rdpSettings* clientSettings = NULL;
+
+	WINPR_ASSERT(context);
+	WINPR_ASSERT(self);
+	WINPR_ASSERT(capsSets || (capsSetCount == 0));
+	WINPR_ASSERT(rc);
+
+	WINPR_ASSERT(context->rdpcontext);
+	srvSettings = context->rdpcontext->settings;
+	WINPR_ASSERT(srvSettings);
+
+	clientSettings = self->peer->context->settings; // TODO
+	WINPR_ASSERT(clientSettings);
+
+	if (shadow_are_caps_filtered(srvSettings, capsVersion))
+		return FALSE;
+
+	for (UINT32 index = 0; index < capsSetCount; index++)
+	{
+		const RDPGFX_CAPSET* currentCaps = &capsSets[index];
+
+		if (currentCaps->version == capsVersion)
+		{
+			UINT32 flags = 0;
+			BOOL rfx = FALSE;
+			BOOL avc444v2 = FALSE;
+			BOOL avc444 = FALSE;
+			BOOL avc420 = FALSE;
+			BOOL progressive = FALSE;
+			RDPGFX_CAPSET caps = *currentCaps;
+			RDPGFX_CAPS_CONFIRM_PDU pdu = { 0 };
+			pdu.capsSet = &caps;
+
+			flags = pdu.capsSet->flags;
+
+			if (!freerdp_settings_set_bool(clientSettings, FreeRDP_GfxSmallCache,
+			                               (flags & RDPGFX_CAPS_FLAG_SMALL_CACHE) ? TRUE : FALSE))
+				return FALSE;
+
+			avc444v2 = avc444 = !(flags & RDPGFX_CAPS_FLAG_AVC_DISABLED);
+            avc420 = avc444;
+		    gboolean avc444v2_setting = freerdp_settings_get_bool(srvSettings, FreeRDP_GfxAVC444v2);
+		    gboolean avc444_setting = freerdp_settings_get_bool(srvSettings, FreeRDP_GfxAVC444);
+		    gboolean h264_setting = freerdp_settings_get_bool(srvSettings, FreeRDP_GfxH264);
+			if (!avc444v2_setting || !h264)
+				avc444v2 = FALSE;
+			if (!freerdp_settings_set_bool(clientSettings, FreeRDP_GfxAVC444v2, avc444v2))
+				return FALSE;
+			if (!avc444_setting || !h264)
+				avc444 = FALSE;
+			if (!freerdp_settings_set_bool(clientSettings, FreeRDP_GfxAVC444, avc444))
+				return FALSE;
+            if (!h264_setting || !h264)
+            {
+                avc420 = FALSE;
+            }
+
+			if (!freerdp_settings_set_bool(clientSettings, FreeRDP_GfxH264, avc420))
+				return FALSE;
+
+
+			progressive = freerdp_settings_get_bool(srvSettings, FreeRDP_GfxProgressive);
+			if (!freerdp_settings_set_bool(clientSettings, FreeRDP_GfxProgressive, progressive))
+				return FALSE;
+			progressive = freerdp_settings_get_bool(srvSettings, FreeRDP_GfxProgressiveV2);
+			if (!freerdp_settings_set_bool(clientSettings, FreeRDP_GfxProgressiveV2, progressive))
+				return FALSE;
+
+			rfx = freerdp_settings_get_bool(srvSettings, FreeRDP_RemoteFxCodec);
+			if (!freerdp_settings_set_bool(clientSettings, FreeRDP_RemoteFxCodec, rfx))
+				return FALSE;
+
+			// planar = freerdp_settings_get_bool(srvSettings, FreeRDP_GfxPlanar);
+			if (!freerdp_settings_set_bool(clientSettings, FreeRDP_GfxPlanar, FALSE))
+				return FALSE;
+
+			if (!avc444v2 && !avc444 && !avc420)
+				pdu.capsSet->flags |= RDPGFX_CAPS_FLAG_AVC_DISABLED;
+
+			*rc = shadow_client_send_caps_confirm(self, context, &pdu);
+			return TRUE;
+		}
+	}
+
+	return FALSE;
+}
+
+static UINT shadow_client_rdpgfx_caps_advertise(RdpgfxServerContext* context,
+                                                const RDPGFX_CAPS_ADVERTISE_PDU* capsAdvertise)
+{
+	UINT rc = ERROR_INTERNAL_ERROR;
+	const rdpSettings* srvSettings = NULL;
+	rdpSettings* clientSettings = NULL;
+	BOOL h264 = FALSE;
+
+	UINT32 flags = 0;
+
+	WINPR_ASSERT(context);
+	WINPR_ASSERT(capsAdvertise);
+
+    DrdRdpGraphicsPipeline *self = context->custom;
+
+    if (self == NULL ||capsAdvertise->capsSetCount == 0)
     {
         return CHANNEL_RC_OK;
     }
 
-    RDPGFX_CAPS_CONFIRM_PDU confirm = {0};
-    confirm.capsSet = &caps->capsSets[0];
-    UINT status = CHANNEL_RC_OK;
-
-    if (context->CapsConfirm)
+    rdpSettings *settings = (context->rdpcontext != NULL) ? context->rdpcontext->settings : NULL;
+    if (settings == NULL)
     {
-        status = context->CapsConfirm(context, &confirm);
+        return CHANNEL_RC_OK;
     }
 
-    if (status == CHANNEL_RC_OK)
-    {
-        g_mutex_lock(&self->lock);
-        self->caps_confirmed = TRUE;
-        g_mutex_unlock(&self->lock);
-    }
+	WINPR_ASSERT(self);
+	WINPR_ASSERT(context->rdpcontext);
 
-    return status;
+	srvSettings = context->rdpcontext->settings;
+	WINPR_ASSERT(srvSettings);
+
+	clientSettings = context->rdpcontext->settings;
+	WINPR_ASSERT(clientSettings);
+
+    h264 = drd_runtime_encoder_prepare(self->runtime, FREERDP_CODEC_AVC420 | FREERDP_CODEC_AVC444, clientSettings);
+    DRD_LOG_MESSAGE("h264 support: %d", h264);
+    drd_server_runtime_request_keyframe(self->runtime);
+
+	if (shadow_client_caps_test_version(self,context,h264, capsAdvertise->capsSets,
+	                                    capsAdvertise->capsSetCount, RDPGFX_CAPVERSION_107, &rc))
+		return rc;
+
+	if (shadow_client_caps_test_version(self,context, h264, capsAdvertise->capsSets,
+	                                    capsAdvertise->capsSetCount, RDPGFX_CAPVERSION_106, &rc))
+		return rc;
+
+	if (shadow_client_caps_test_version(self,context, h264, capsAdvertise->capsSets,
+	                                    capsAdvertise->capsSetCount, RDPGFX_CAPVERSION_106_ERR,
+	                                    &rc))
+		return rc;
+
+	if (shadow_client_caps_test_version(self,context, h264, capsAdvertise->capsSets,
+	                                    capsAdvertise->capsSetCount, RDPGFX_CAPVERSION_105, &rc))
+		return rc;
+
+	if (shadow_client_caps_test_version(self,context, h264, capsAdvertise->capsSets,
+	                                    capsAdvertise->capsSetCount, RDPGFX_CAPVERSION_104, &rc))
+		return rc;
+
+	if (shadow_client_caps_test_version(self,context, h264, capsAdvertise->capsSets,
+	                                    capsAdvertise->capsSetCount, RDPGFX_CAPVERSION_103, &rc))
+		return rc;
+
+	if (shadow_client_caps_test_version(self,context, h264, capsAdvertise->capsSets,
+	                                    capsAdvertise->capsSetCount, RDPGFX_CAPVERSION_102, &rc))
+		return rc;
+
+	if (shadow_client_caps_test_version(self,context, h264, capsAdvertise->capsSets,
+	                                    capsAdvertise->capsSetCount, RDPGFX_CAPVERSION_101, &rc))
+		return rc;
+
+	if (shadow_client_caps_test_version(self,context, h264, capsAdvertise->capsSets,
+	                                    capsAdvertise->capsSetCount, RDPGFX_CAPVERSION_10, &rc))
+		return rc;
+
+	if (!shadow_are_caps_filtered(srvSettings, RDPGFX_CAPVERSION_81))
+	{
+		for (UINT32 index = 0; index < capsAdvertise->capsSetCount; index++)
+		{
+			const RDPGFX_CAPSET* currentCaps = &capsAdvertise->capsSets[index];
+
+			if (currentCaps->version == RDPGFX_CAPVERSION_81)
+			{
+				RDPGFX_CAPSET caps = *currentCaps;
+				RDPGFX_CAPS_CONFIRM_PDU pdu;
+				pdu.capsSet = &caps;
+
+				flags = pdu.capsSet->flags;
+
+				if (!freerdp_settings_set_bool(clientSettings, FreeRDP_GfxAVC444v2, FALSE))
+					return rc;
+				if (!freerdp_settings_set_bool(clientSettings, FreeRDP_GfxAVC444, FALSE))
+					return rc;
+
+				if (!freerdp_settings_set_bool(clientSettings, FreeRDP_GfxThinClient,
+				                               (flags & RDPGFX_CAPS_FLAG_THINCLIENT) ? TRUE
+				                                                                     : FALSE))
+					return rc;
+				if (!freerdp_settings_set_bool(clientSettings, FreeRDP_GfxSmallCache,
+				                               (flags & RDPGFX_CAPS_FLAG_SMALL_CACHE) ? TRUE
+				                                                                      : FALSE))
+					return rc;
+
+
+
+				if (h264)
+				{
+					if (!freerdp_settings_set_bool(
+					        clientSettings, FreeRDP_GfxH264,
+					        (flags & RDPGFX_CAPS_FLAG_AVC420_ENABLED) ? TRUE : FALSE))
+						return rc;
+				}
+				else
+				{
+					if (!freerdp_settings_set_bool(clientSettings, FreeRDP_GfxH264, FALSE))
+						return rc;
+				}
+
+				return shadow_client_send_caps_confirm(self,context, &pdu);
+			}
+		}
+	}
+
+	if (!shadow_are_caps_filtered(srvSettings, RDPGFX_CAPVERSION_8))
+	{
+		for (UINT32 index = 0; index < capsAdvertise->capsSetCount; index++)
+		{
+			const RDPGFX_CAPSET* currentCaps = &capsAdvertise->capsSets[index];
+
+			if (currentCaps->version == RDPGFX_CAPVERSION_8)
+			{
+				RDPGFX_CAPSET caps = *currentCaps;
+				RDPGFX_CAPS_CONFIRM_PDU pdu;
+				pdu.capsSet = &caps;
+				flags = pdu.capsSet->flags;
+
+				if (!freerdp_settings_set_bool(clientSettings, FreeRDP_GfxAVC444v2, FALSE))
+					return rc;
+				if (!freerdp_settings_set_bool(clientSettings, FreeRDP_GfxAVC444, FALSE))
+					return rc;
+				if (!freerdp_settings_set_bool(clientSettings, FreeRDP_GfxH264, FALSE))
+					return rc;
+
+				if (!freerdp_settings_set_bool(clientSettings, FreeRDP_GfxThinClient,
+				                               (flags & RDPGFX_CAPS_FLAG_THINCLIENT) ? TRUE
+				                                                                     : FALSE))
+					return rc;
+				if (!freerdp_settings_set_bool(clientSettings, FreeRDP_GfxSmallCache,
+				                               (flags & RDPGFX_CAPS_FLAG_SMALL_CACHE) ? TRUE
+				                                                                      : FALSE))
+					return rc;
+
+				return shadow_client_send_caps_confirm(self,context, &pdu);
+			}
+		}
+	}
+
+	return CHANNEL_RC_UNSUPPORTED_VERSION;
 }
 
 /*
@@ -638,7 +779,6 @@ drd_rdpgfx_frame_ack(RdpgfxServerContext *context,
         return CHANNEL_RC_OK;
     }
     g_mutex_lock(&self->lock);
-
     if (ack->queueDepth == SUSPEND_FRAME_ACKNOWLEDGEMENT)
     {
         if (!self->frame_acks_suspended)
@@ -665,10 +805,24 @@ drd_rdpgfx_frame_ack(RdpgfxServerContext *context,
      */
     if (self->outstanding_frames > 0)
     {
-        self->outstanding_frames--;
+        if (self->last_frame_h264)
+            self->outstanding_frames = 0;
+        else
+            self->outstanding_frames--;
     }
     g_cond_broadcast(&self->capacity_cond);
     g_mutex_unlock(&self->lock);
 
     return CHANNEL_RC_OK;
+}
+
+RdpgfxServerContext* drd_rdpgfx_get_context(DrdRdpGraphicsPipeline *self)
+{
+    return self->rdpgfx_context;
+}
+void drd_rdp_graphics_pipeline_set_last_frame_mode(DrdRdpGraphicsPipeline *self, gboolean h264)
+{
+    g_mutex_lock(&self->lock);
+    self->last_frame_h264 = h264;
+    g_mutex_unlock(&self->lock);
 }
