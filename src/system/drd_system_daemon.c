@@ -21,6 +21,7 @@ typedef struct _DrdRemoteClient
 {
     DrdSystemDaemon *daemon;
     gchar *id;
+    guint32 remote_id;
     DrdRoutingTokenInfo *routing;
     GSocketConnection *connection;
     DrdRdpSession *session;
@@ -473,6 +474,11 @@ drd_system_daemon_register_client(DrdSystemDaemon *self,
 
     client->id = g_steal_pointer(&remote_id);
     client->routing->routing_token = g_steal_pointer(&routing_token);
+    client->remote_id = 0;
+    if (parsed_token_value > 0)
+    {
+        client->remote_id = (guint32) parsed_token_value;
+    }
 
     client->use_system_credentials = FALSE;
     client->handover_count = 0;
@@ -625,6 +631,13 @@ drd_system_daemon_on_session_ready(DrdRdpListener *listener,
     }
 
     // call lightdm create remote display
+    if (client->remote_id == 0)
+    {
+        DRD_LOG_WARNING("Client %s missing remote id, skip remote display",
+                        client->id != NULL ? client->id : "unknown");
+        drd_system_daemon_touch_client(client);
+        return;
+    }
     if (!self->remote_display_factory)
     {
         self->remote_display_factory =
@@ -641,7 +654,7 @@ drd_system_daemon_on_session_ready(DrdRdpListener *listener,
     const gchar *peer_address = drd_rdp_session_get_peer_address(session);
     if (!drd_dbus_lightdm_remote_display_factory_call_create_remote_greeter_display_sync(
                 self->remote_display_factory,
-                g_random_int_range(0, 128),
+                client->remote_id,
                 1920,
                 1080,
                 peer_address,
