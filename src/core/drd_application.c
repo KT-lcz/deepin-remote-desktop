@@ -27,6 +27,7 @@ struct _DrdApplication
     DrdServerRuntime *runtime;
     DrdTlsCredentials *tls_credentials;
     GObject *mode_controller;
+    gboolean is_handover;
 };
 
 G_DEFINE_TYPE(DrdApplication, drd_application, G_TYPE_OBJECT)
@@ -182,7 +183,7 @@ drd_application_on_signal(gpointer user_data)
     DrdApplication *self = DRD_APPLICATION(user_data);
     if (self->loop != NULL && g_main_loop_is_running(self->loop))
     {
-        if (!drd_rdp_listener_is_handover_mode(self->listener))
+        if (!self->is_handover)
         {
             g_main_loop_quit(self->loop);
             return G_SOURCE_CONTINUE;
@@ -685,6 +686,7 @@ drd_application_init(DrdApplication *self)
     self->config = drd_config_new();
     self->runtime = drd_server_runtime_new();
     self->tls_credentials = NULL;
+    self->is_handover = FALSE;
     drd_log_init();
 
     if (!winpr_InitializeSSL(WINPR_SSL_INIT_DEFAULT))
@@ -763,6 +765,7 @@ drd_application_run(DrdApplication *self, int argc, char **argv, GError **error)
             }
             break;
         case DRD_RUNTIME_MODE_HANDOVER:
+            self->is_handover = TRUE;
             started = drd_application_start_handover_daemon(self, error);
             if (started)
             {
