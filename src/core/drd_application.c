@@ -53,14 +53,13 @@ drd_application_runtime_mode_to_string(DrdRuntimeMode mode)
     }
 }
 
-typedef struct
-{
-    const DrdEncodingOptions *encoding_opts;
-    gboolean nla_enabled;
-    const gchar *nla_username;
-    const gchar *nla_password;
-    const gchar *pam_service;
-    DrdRuntimeMode runtime_mode;
+typedef struct {
+  DrdEncodingOptions encoding_opts;
+  gboolean nla_enabled;
+  const gchar *nla_username;
+  const gchar *nla_password;
+  const gchar *pam_service;
+  DrdRuntimeMode runtime_mode;
 } DrdRuntimeContextSnapshot;
 
 /*
@@ -278,8 +277,8 @@ drd_application_prepare_runtime(DrdApplication *self,
         drd_server_runtime_set_tls_credentials(self->runtime, self->tls_credentials);
     }
 
-    const DrdEncodingOptions *encoding_opts = drd_config_get_encoding_options(self->config);
-    if (encoding_opts == NULL)
+    const DrdEncodingOptions *config_encoding_opts = drd_config_get_encoding_options(self->config);
+    if (config_encoding_opts == NULL)
     {
         g_set_error_literal(error,
                             G_IO_ERROR,
@@ -288,12 +287,33 @@ drd_application_prepare_runtime(DrdApplication *self,
         return FALSE;
     }
 
-    drd_server_runtime_set_encoding_options(self->runtime, encoding_opts);
+    DrdEncodingOptions encoding_opts = *config_encoding_opts;
+    if (runtime_mode != DRD_RUNTIME_MODE_SYSTEM)
+    {
+        guint display_width = 0;
+        guint display_height = 0;
+        DrdCaptureManager *capture = drd_server_runtime_get_capture(self->runtime);
+        if (capture == NULL ||
+            !drd_capture_manager_get_display_size(capture, &display_width, &display_height, error))
+        {
+            if (error != NULL && *error == NULL)
+            {
+                g_set_error_literal(error,
+                                    G_IO_ERROR,
+                                    G_IO_ERROR_FAILED,
+                                    "Failed to query current display resolution");
+            }
+            return FALSE;
+        }
+        encoding_opts.width = display_width;
+        encoding_opts.height = display_height;
+    }
+
+    drd_server_runtime_set_encoding_options(self->runtime, &encoding_opts);
 
     DRD_LOG_MESSAGE("Runtime initialized without capture/encoding setup "
                     "(runtime mode=%s, awaiting session activation)",
                     drd_application_runtime_mode_to_string(runtime_mode));
-
 
     if (snapshot != NULL)
     {
@@ -329,7 +349,7 @@ drd_application_start_listener(DrdApplication *self, GError **error)
     self->listener = drd_rdp_listener_new(drd_config_get_bind_address(self->config),
                                           drd_config_get_port(self->config),
                                           self->runtime,
-                                          snapshot.encoding_opts,
+                                          &snapshot.encoding_opts,
                                           snapshot.nla_enabled,
                                           snapshot.nla_username,
                                           snapshot.nla_password,

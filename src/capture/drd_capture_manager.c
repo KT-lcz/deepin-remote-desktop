@@ -150,6 +150,25 @@ drd_capture_manager_is_running(DrdCaptureManager *self)
 }
 
 /*
+ * 功能：获取当前显示的实际分辨率。
+ * 逻辑：委托 X11 捕获模块读取 Display 宽高。
+ * 参数：self 捕获管理器；out_width/out_height 输出值；error 错误输出。
+ * 外部接口：drd_x11_capture_get_display_size。
+ */
+gboolean
+drd_capture_manager_get_display_size(DrdCaptureManager *self,
+                                     guint *out_width,
+                                     guint *out_height,
+                                     GError **error)
+{
+    g_return_val_if_fail(DRD_IS_CAPTURE_MANAGER(self), FALSE);
+    g_return_val_if_fail(out_width != NULL, FALSE);
+    g_return_val_if_fail(out_height != NULL, FALSE);
+
+    return drd_x11_capture_get_display_size(self->x11_capture, NULL, out_width, out_height, error);
+}
+
+/*
  * 功能：获取内部帧队列。
  * 逻辑：类型校验后返回持有的队列指针。
  * 参数：self 管理器实例。

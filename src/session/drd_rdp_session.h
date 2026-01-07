@@ -46,10 +46,13 @@ void drd_rdp_session_notify_error(DrdRdpSession *self, DrdRdpSessionError error)
 gboolean drd_rdp_session_start_event_thread(DrdRdpSession *self);
 void drd_rdp_session_stop_event_thread(DrdRdpSession *self);
 gboolean drd_rdp_session_send_server_redirection(DrdRdpSession *self,
-                                                  const gchar *routing_token,
-                                                  const gchar *username,
-                                                  const gchar *password,
-                                                  const gchar *certificate);
+                                                 const gchar *routing_token,
+                                                 const gchar *username,
+                                                 const gchar *password,
+                                                 const gchar *certificate);
 gboolean drd_rdp_session_client_is_mstsc(DrdRdpSession *self);
+gboolean drd_rdp_session_get_peer_resolution(DrdRdpSession *self,
+                                             guint32 *out_width,
+                                             guint32 *out_height);
 
 G_END_DECLS

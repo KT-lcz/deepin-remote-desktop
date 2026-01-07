@@ -627,6 +627,32 @@ gboolean drd_rdp_session_client_is_mstsc(DrdRdpSession *self)
 }
 
 /*
+ * 功能：读取客户端上报的桌面分辨率。
+ * 逻辑：从 FreeRDP settings 获取 DesktopWidth/Height。
+ * 参数：self 会话；out_width/out_height 输出分辨率。
+ * 外部接口：freerdp_settings_get_uint32 读取设置。
+ */
+gboolean
+drd_rdp_session_get_peer_resolution(DrdRdpSession *self,
+                                    guint32 *out_width,
+                                    guint32 *out_height)
+{
+    g_return_val_if_fail(DRD_IS_RDP_SESSION(self), FALSE);
+    g_return_val_if_fail(out_width != NULL, FALSE);
+    g_return_val_if_fail(out_height != NULL, FALSE);
+
+    if (self->peer == NULL || self->peer->context == NULL || self->peer->context->settings == NULL)
+    {
+        return FALSE;
+    }
+
+    rdpSettings *settings = self->peer->context->settings;
+    *out_width = freerdp_settings_get_uint32(settings, FreeRDP_DesktopWidth);
+    *out_height = freerdp_settings_get_uint32(settings, FreeRDP_DesktopHeight);
+    return TRUE;
+}
+
+/*
  * 功能：将 UTF-8 字符串转换为 UTF-16（含终止符）。
  * 逻辑：调用 ConvertUtf8ToWCharAlloc 分配转换后的字符串，返回字节长度。
  * 参数：str 源字符串；size 输出字节长度。

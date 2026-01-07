@@ -31,6 +31,8 @@ typedef struct _DrdRemoteClient
     gboolean use_system_credentials;
     guint handover_count;
     gint64 last_activity_us;
+    guint32 client_width;
+    guint32 client_height;
 } DrdRemoteClient;
 
 typedef struct
@@ -606,6 +608,7 @@ drd_system_daemon_on_session_ready(DrdRdpListener *listener,
                                    GSocketConnection *connection,
                                    gpointer user_data)
 {
+    DRD_LOG_MESSAGE("on session ready");
     (void) listener;
     DrdSystemDaemon *self = DRD_SYSTEM_DAEMON(user_data);
     if (!DRD_IS_SYSTEM_DAEMON(self))
@@ -652,11 +655,35 @@ drd_system_daemon_on_session_ready(DrdRdpListener *listener,
     g_autofree gchar *session_path = NULL;
     g_autofree GError *error = NULL;
     const gchar *peer_address = drd_rdp_session_get_peer_address(session);
+    guint32 client_width = 0;
+    guint32 client_height = 0;
+    const DrdEncodingOptions *encoding_opts = drd_config_get_encoding_options(self->config);
+    if (encoding_opts == NULL)
+    {
+        DRD_LOG_WARNING("Encoding options unavailable for system session resolution");
+        return;
+    }
+
+    guint32 target_width = encoding_opts->width;
+    guint32 target_height = encoding_opts->height;
+    if (drd_rdp_session_get_peer_resolution(session, &client_width, &client_height) &&
+        client_width > 0 && client_height > 0)
+    {
+        client->client_width = client_width;
+        client->client_height = client_height;
+        target_width = client_width;
+        target_height = client_height;
+    }
+
+    DrdEncodingOptions runtime_opts = *encoding_opts;
+    runtime_opts.width = target_width;
+    runtime_opts.height = target_height;
+    drd_server_runtime_set_encoding_options(self->runtime, &runtime_opts);
     if (!drd_dbus_lightdm_remote_display_factory_call_create_remote_greeter_display_sync(
                 self->remote_display_factory,
                 client->remote_id,
-                1920,
-                1080,
+                target_width,
+                target_height,
                 peer_address,
                 &session_path,
                 NULL,

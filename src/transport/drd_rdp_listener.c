@@ -98,6 +98,37 @@ drd_rdp_listener_is_system_mode(DrdRdpListener *self)
 }
 
 /*
+ * 功能：在 system 模式下根据客户端分辨率更新编码配置。
+ * 逻辑：以配置中的编码选项为基准，若客户端提供分辨率则覆盖，并写入 runtime。
+ * 参数：self 监听器；client_width/client_height 客户端分辨率。
+ * 外部接口：drd_server_runtime_set_encoding_options 更新运行时参数。
+ */
+static void
+drd_rdp_listener_update_system_encoding(DrdRdpListener *self,
+                                        guint32 client_width,
+                                        guint32 client_height)
+{
+    if (!drd_rdp_listener_is_system_mode(self))
+    {
+        return;
+    }
+
+    if (self->runtime == NULL)
+    {
+        return;
+    }
+
+    DrdEncodingOptions updated = self->encoding_options;
+    if (client_width > 0 && client_height > 0)
+    {
+        updated.width = client_width;
+        updated.height = client_height;
+    }
+
+    drd_server_runtime_set_encoding_options(self->runtime, &updated);
+}
+
+/*
  * 功能：判断监听器是否处于 handover 模式。
  * 逻辑：检查实例非空且 runtime_mode 为 HANDOVER。
  * 参数：self 监听器。
@@ -639,6 +670,11 @@ drd_peer_capabilities(freerdp_peer *client)
                         client_width,
                         client_height);
         return FALSE;
+    }
+
+    if (ctx != NULL && ctx->listener != NULL)
+    {
+        drd_rdp_listener_update_system_encoding(ctx->listener, client_width, client_height);
     }
 
     DRD_LOG_MESSAGE("Peer %s capabilities accepted with DesktopResize enabled (%ux%u requested)",

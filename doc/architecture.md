@@ -712,6 +712,10 @@ stateDiagram-v2
     Closing --> Idle: drd_rdp_listener_session_closed\n(g_ptr_array_remove_fast)
 ```
 
+## 分辨率决策策略
+- **system 模式**：RDP 监听器在能力协商后读取客户端 DesktopWidth/Height，并将 runtime 编码参数更新为客户端分辨率；LightDM remote display 创建时同样使用客户端分辨率，若客户端未提供则回退到配置文件值。
+- **user/handover 模式**：启动 runtime 时查询当前显示器实际分辨率作为 capture/encoding 的目标分辨率，确保编码尺寸与本地桌面一致。
+
 ## 短期待优化（已落地功能）
 - **Rdpgfx 失联超时**：`drd_rdp_session_try_submit_graphics()` 仍以无限等待 ACK 为主，需要补充分级超时/自动降级策略，避免 renderer 阻塞。
 - **输入兼容性**：`drd_x11_input_inject_unicode()` 空置，Alt/组合键在部分客户端不可用；需补齐 UTF-16 → Keysym 映射与快捷键测试。

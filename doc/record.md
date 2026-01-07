@@ -160,3 +160,22 @@ session
 - src/session/drd_rdp_session.c:380-550：render 线程对 drd_server_runtime_pull_encoded_frame 的错误处理仅记录日志而不统计，
 - 可增加计数器并在 session 关闭时输出，以便定位 capture/encoding 瓶颈。
 
+### 运行模式分辨率策略调整
+
+#### 修改目的
+- 让 system 模式根据客户端分辨率决定采集/编码尺寸，并在创建 LightDM remote display 时同步传递客户端分辨率。
+- 让 user/handover 模式使用当前显示器实际分辨率作为采集与编码目标，避免配置与真实桌面不一致。
+
+#### 修改范围
+- 采集模块：新增显示分辨率查询接口（X11 DisplayWidth/Height）。
+- runtime 初始化与监听器：根据运行模式动态更新 DrdEncodingOptions 的 width/height。
+- system daemon：在 session ready 阶段读取客户端分辨率并更新 runtime，同时传递给 LightDM。
+
+#### 修改内容
+- 提供 drd_x11_capture_get_display_size 与 drd_capture_manager_get_display_size 供 runtime 读取实际分辨率。
+- drd_application_prepare_runtime 在非 system 模式下改用实时显示分辨率写入 runtime 编码选项。
+- system 模式下在能力协商/会话就绪时读取客户端分辨率，更新 runtime 编码参数并作为 LightDM remote display 的宽高参数。
+
+#### 对整体项目的影响
+- 提升 system 模式下远程登录分辨率适配性，避免固定分辨率导致画面拉伸或缩放。
+- user/handover 模式的捕获与编码与真实显示器一致，减少配置错误引起的黑边或裁切问题。

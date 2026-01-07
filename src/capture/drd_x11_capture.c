@@ -143,6 +143,52 @@ drd_x11_capture_new(DrdFrameQueue *queue)
 }
 
 /*
+ * 功能：读取当前显示的实际分辨率。
+ * 逻辑：打开 X11 Display，读取屏幕宽高后关闭连接。
+ * 参数：self 捕获实例；display_name 指定显示名（NULL 使用默认）；out_width/out_height 输出值；error 错误输出。
+ * 外部接口：X11 XOpenDisplay/DisplayWidth/DisplayHeight/XCloseDisplay。
+ */
+gboolean
+drd_x11_capture_get_display_size(DrdX11Capture *self,
+                                 const gchar *display_name,
+                                 guint *out_width,
+                                 guint *out_height,
+                                 GError **error)
+{
+    g_return_val_if_fail(DRD_IS_X11_CAPTURE(self), FALSE);
+    g_return_val_if_fail(out_width != NULL, FALSE);
+    g_return_val_if_fail(out_height != NULL, FALSE);
+
+    Display *display = XOpenDisplay(display_name);
+    if (display == NULL)
+    {
+        g_set_error_literal(error,
+                            G_IO_ERROR,
+                            G_IO_ERROR_FAILED,
+                            "Failed to open X11 display for resolution query");
+        return FALSE;
+    }
+
+    const int screen = DefaultScreen(display);
+    *out_width = (guint) DisplayWidth(display, screen);
+    *out_height = (guint) DisplayHeight(display, screen);
+    XCloseDisplay(display);
+
+    if (*out_width == 0 || *out_height == 0)
+    {
+        g_set_error(error,
+                    G_IO_ERROR,
+                    G_IO_ERROR_FAILED,
+                    "Invalid display size %ux%u",
+                    *out_width,
+                    *out_height);
+        return FALSE;
+    }
+
+    return TRUE;
+}
+
+/*
  * 功能：打开 X11 连接并准备共享内存截图资源。
  * 逻辑：依次打开 Display，检测 XShm/XDamage 扩展；获取屏幕/root 窗口与目标尺寸；创建 XShm 图像与共享内存段并附加；创建 Damage 句柄。
  * 参数：self 捕获实例；display_name 显示名称；requested_width/height 期望尺寸；error 错误输出。
