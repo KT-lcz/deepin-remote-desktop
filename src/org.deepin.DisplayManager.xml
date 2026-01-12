@@ -1,25 +1,26 @@
 <!DOCTYPE node PUBLIC "-//freedesktop//DTD D-BUS Object Introspection 1.0//EN" "http://www.freedesktop.org/standards/dbus/1.0/introspect.dtd">
 <node>
   <interface name="org.deepin.DisplayManager.RemoteDisplayFactory.Session">
-    <property name="UserName" type="s" access="read"/>
-    <property name="Address" type="s" access="read"/>
-    <property name="SessionId" type="s" access="read"/>
+    <property name="user_name" type="s" access="read"/>
+    <property name="address" type="s" access="read"/>
+    <property name="session_id" type="u" access="read"/>
+    <property name="client_id" type="u" access="read"/>
   </interface>
   <interface name="org.deepin.DisplayManager.RemoteDisplayFactory">
     <method name="CreateRemoteGreeterDisplay">
-      <arg name="remote_id" direction="in" type="u"/>
+      <arg name="client_id" direction="in" type="u"/>
       <arg name="width" direction="in" type="u"/>
       <arg name="height" direction="in" type="u"/>
       <arg name="address" direction="in" type="s"/>
-      <arg name="session" direction="out" type="o"/>
+      <arg name="session_path" direction="out" type="o"/>
     </method>
     <method name="CreateSingleLogonSession">
-      <arg name="remote_id" direction="in" type="y"/>
+      <arg name="client_id" direction="in" type="u"/>
       <arg name="width" direction="in" type="u"/>
       <arg name="height" direction="in" type="u"/>
       <arg name="user_name" direction="in" type="s"/>"
       <arg name="address" direction="in" type="s"/>
-      <arg name="session" direction="out" type="o"/>
+      <arg name="session_path" direction="out" type="o"/>
     </method>
   </interface>
 </node>
