@@ -16,7 +16,11 @@ Build-Depends: debhelper-compat (= 13),
                libxfixes-dev,
                libxtst-dev,
                freerdp3-dev,
-               libwinpr3-dev
+               libwinpr3-dev,
+               libavcodec-dev,
+               libva-dev,
+               libswscale-dev,
+               libavutil-dev
 Standards-Version: 4.7.0
 Rules-Requires-Root: no
 Homepage: https://github.com/linuxdeepin/deepin-remote-desktop

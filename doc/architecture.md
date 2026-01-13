@@ -339,6 +339,9 @@ runtime_mode=handover
 rdp_sso=false
 ```
 
+- 当 `h264_hw_accel=true` 且协商 AVC420 时，编码管理器会使用 libswscale 将 XShm 的 BGRA32 数据转换为 NV12，
+  再通过 VAAPI (`h264_vaapi`) 进行硬件编码；若硬件编码失败会回退到软件路径。
+
 ### LightDM RemoteDisplayFactory
 - LightDM 侧通过 `org.deepin.DisplayManager.RemoteDisplayFactory` 创建远程 greeter/SSO 会话，并将 client_id/尺寸/地址透传给 system daemon：
 
@@ -724,7 +727,7 @@ stateDiagram-v2
 ## 能力缺口（现代 RDP 必备）
 - **多媒体**：rdpsnd 音频播放/录制尚未集成；后续需与编码帧同步、处理采样率与缓冲策略。
 - **协作通道**：剪贴板、IME/Unicode 输入、触控/笔事件缺失，影响日常办公体验。
-- **视频编码**：H.264/AVC444 与硬件加速未落地，带宽自适应与 QoS 机制尚未实现。
+- **视频编码**：AVC420 的 VAAPI 硬件编码已支持（XShm BGRA→NV12→VAAPI），AVC444 与带宽自适应/QoS 仍待实现。
 - **虚拟设备**：文件/打印机/智能卡/USB 重定向均为空白，需要依次接入 rdpdr 子通道。
 - **服务化**：systemd/DBus handover、健康探针、Session 并发与策略控制尚未完成。
 - **平台适配**：Wayland 捕获与输入、加密密钥安全存储（如内核密钥环/硬件密钥）仍需规划。

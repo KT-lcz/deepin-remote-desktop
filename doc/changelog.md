@@ -1,5 +1,14 @@
 # 变更记录
 
+## 2026-01-12：AVC420 VAAPI 硬件编码接入
+- **目的**：在 Surface GFX 的 AVC420 分支启用 VAAPI 硬件编码，降低 CPU 编码负载。
+- **范围**：`src/encoding/drd_encoding_manager.c`、`meson.build`、`src/meson.build`、`doc/architecture.md`、`doc/encoding_vaapi_avc420.md`、`doc/changelog.md`、`.codex/plan/avc420-vaapi.md`。
+- **主要改动**：
+  1. 编码管理器新增 VAAPI 编码器准备/释放逻辑，使用 libswscale 将 BGRA 转 NV12 并通过 `h264_vaapi` 输出 H264 码流。
+  2. Surface GFX 的 AVC420 分支在 `h264_hw_accel` 开启时优先走 VAAPI，失败回退到软件编码。
+  3. 构建系统新增 libavcodec/libavutil/libswscale/libva 依赖，架构文档补充硬件编码说明。
+- **影响**：开启硬件加速后优先使用 VAAPI 编码，降低 CPU 压力；若硬件不可用则自动回退，编码行为与原路径一致。
+
 ## 2026-01-08：虚拟机 H264 开关
 - **目的**：新增配置项控制虚拟机是否允许 H264 编码，默认关闭以规避虚拟化兼容问题。
 - **范围**：`src/core/drd_config.c`、`src/core/drd_encoding_options.h`、`src/transport/drd_rdp_listener.c`、`src/utils/drd_system_info.*`、`data/config.d/*.ini`、`doc/architecture.md`、`doc/plan_task_log.md`。

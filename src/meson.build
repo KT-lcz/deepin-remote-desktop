@@ -14,7 +14,11 @@ deps = [
   xdamage_dep,
   xfixes_dep,
   xtst_dep,
-  pam_dep
+  pam_dep,
+  avcodec_dep,
+  avutil_dep,
+  swscale_dep,
+  vaapi_dep
 ]
 
 media_sources = files(

@@ -3,6 +3,12 @@
 #include <gio/gio.h>
 #include <string.h>
 
+#include <libavcodec/avcodec.h>
+#include <libavutil/avutil.h>
+#include <libavutil/hwcontext.h>
+#include <libavutil/imgutils.h>
+#include <libswscale/swscale.h>
+
 #include <freerdp/codec/color.h>
 #include <freerdp/codec/h264.h>
 #include <freerdp/codec/progressive.h>
@@ -13,6 +19,14 @@
 
 /* SurfaceBits 未实现标志，拒绝切换 */
 #define SURFACE_BITS_NOT_IMPLEMENTED
+
+static void drd_vaapi_encoder_release(DrdEncodingManager *self);
+static gboolean drd_vaapi_encoder_prepare(DrdEncodingManager *self, GError **error);
+static gboolean drd_h264_build_fullframe_metablock(const RECTANGLE_16 *regionRect, RDPGFX_H264_METABLOCK *meta,
+                                                   GError **error);
+static gboolean drd_vaapi_encode_avc420(DrdEncodingManager *self, const guint8 *data, guint stride,
+                                        const RECTANGLE_16 *regionRect, RDPGFX_AVC420_BITMAP_STREAM *avc420,
+                                        GByteArray **bitstream_out, GError **error);
 
 struct _DrdEncodingManager
 {
@@ -26,6 +40,14 @@ struct _DrdEncodingManager
     guint h264_framerate;
     guint h264_qp;
     gboolean h264_hw_accel;
+
+    AVCodecContext *vaapi_encoder;
+    AVBufferRef *vaapi_device;
+    AVBufferRef *vaapi_frames;
+    AVFrame *vaapi_sw_frame;
+    struct SwsContext *vaapi_sws;
+    guint vaapi_width;
+    guint vaapi_height;
 
     guint32 codecs;
     H264_CONTEXT *h264;
@@ -99,6 +121,13 @@ static void drd_encoding_manager_init(DrdEncodingManager *self)
     self->h264_framerate = DRD_H264_DEFAULT_FRAMERATE;
     self->h264_qp = DRD_H264_DEFAULT_QP;
     self->h264_hw_accel = DRD_H264_DEFAULT_HW_ACCEL;
+    self->vaapi_encoder = NULL;
+    self->vaapi_device = NULL;
+    self->vaapi_frames = NULL;
+    self->vaapi_sw_frame = NULL;
+    self->vaapi_sws = NULL;
+    self->vaapi_width = 0;
+    self->vaapi_height = 0;
     self->h264 = NULL;
     self->rfx = NULL;
     self->progressive = NULL;
@@ -118,6 +147,316 @@ static void drd_encoding_manager_init(DrdEncodingManager *self)
     self->gfx_last_codec = DRD_ENCODING_CODEC_CLASS_UNKNOWN;
     self->gfx_avc_to_non_avc_transition = FALSE;
     self->gfx_non_avc_switch_timestamp_us = 0;
+    drd_vaapi_encoder_release(self);
+}
+
+/*
+ * 功能：释放 VAAPI 编码器相关资源，避免重建或重置时泄漏。
+ * 逻辑：依次释放 sws 转换器、软帧、硬件帧池与编码器上下文，同时清零尺寸缓存。
+ * 参数：self 编码管理器实例。
+ * 外部接口：libswscale 的 sws_freeContext，libavutil 的 av_buffer_unref/av_frame_free，
+ *           libavcodec 的 avcodec_free_context。
+ */
+static void drd_vaapi_encoder_release(DrdEncodingManager *self)
+{
+    if (self->vaapi_sws != NULL)
+    {
+        sws_freeContext(self->vaapi_sws);
+        self->vaapi_sws = NULL;
+    }
+    if (self->vaapi_sw_frame != NULL)
+    {
+        av_frame_free(&self->vaapi_sw_frame);
+    }
+    if (self->vaapi_frames != NULL)
+    {
+        av_buffer_unref(&self->vaapi_frames);
+    }
+    if (self->vaapi_device != NULL)
+    {
+        av_buffer_unref(&self->vaapi_device);
+    }
+    if (self->vaapi_encoder != NULL)
+    {
+        avcodec_free_context(&self->vaapi_encoder);
+    }
+    self->vaapi_width = 0;
+    self->vaapi_height = 0;
+}
+
+/*
+ * 功能：准备 VAAPI 编码器上下文与 BGRA→NV12 的 swscale 转换器。
+ * 逻辑：按当前分辨率初始化 VAAPI 设备、frames 池、编码器上下文和 sws 颜色空间转换，
+ *       已准备且尺寸一致时直接复用；失败时释放中间资源并返回错误。
+ * 参数：self 编码管理器实例；error GLib 错误返回。
+ * 外部接口：libavcodec 的 avcodec_find_encoder_by_name/avcodec_alloc_context3/avcodec_open2，
+ *           libavutil 的 av_hwdevice_ctx_create/av_hwframe_ctx_alloc/av_hwframe_ctx_init，
+ *           libswscale 的 sws_getContext。
+ */
+static gboolean drd_vaapi_encoder_prepare(DrdEncodingManager *self, GError **error)
+{
+    const AVCodec *codec = NULL;
+    AVHWFramesContext *frames_ctx = NULL;
+    int ret = 0;
+
+    if (self->vaapi_encoder != NULL && self->vaapi_width == self->frame_width &&
+        self->vaapi_height == self->frame_height)
+    {
+        return TRUE;
+    }
+
+    drd_vaapi_encoder_release(self);
+
+    codec = avcodec_find_encoder_by_name("h264_vaapi");
+    if (codec == NULL)
+    {
+        g_set_error_literal(error, G_IO_ERROR, G_IO_ERROR_FAILED, "VAAPI encoder h264_vaapi not available");
+        return FALSE;
+    }
+
+    ret = av_hwdevice_ctx_create(&self->vaapi_device, AV_HWDEVICE_TYPE_VAAPI, NULL, NULL, 0);
+    if (ret < 0)
+    {
+        g_set_error_literal(error, G_IO_ERROR, G_IO_ERROR_FAILED, "Failed to create VAAPI device context");
+        drd_vaapi_encoder_release(self);
+        return FALSE;
+    }
+
+    self->vaapi_frames = av_hwframe_ctx_alloc(self->vaapi_device);
+    if (self->vaapi_frames == NULL)
+    {
+        g_set_error_literal(error, G_IO_ERROR, G_IO_ERROR_FAILED, "Failed to allocate VAAPI frames context");
+        drd_vaapi_encoder_release(self);
+        return FALSE;
+    }
+    // TODO 在 sws_scale时，是否可以将服务端的分辨率缩放成客户端的分辨率
+    frames_ctx = (AVHWFramesContext *) self->vaapi_frames->data;
+    frames_ctx->format = AV_PIX_FMT_VAAPI;
+    frames_ctx->sw_format = AV_PIX_FMT_NV12;
+    frames_ctx->width = (int) self->frame_width;
+    frames_ctx->height = (int) self->frame_height;
+    frames_ctx->initial_pool_size = 4;
+
+    ret = av_hwframe_ctx_init(self->vaapi_frames);
+    if (ret < 0)
+    {
+        g_set_error_literal(error, G_IO_ERROR, G_IO_ERROR_FAILED, "Failed to initialize VAAPI frames context");
+        drd_vaapi_encoder_release(self);
+        return FALSE;
+    }
+
+    self->vaapi_encoder = avcodec_alloc_context3(codec);
+    if (self->vaapi_encoder == NULL)
+    {
+        g_set_error_literal(error, G_IO_ERROR, G_IO_ERROR_FAILED, "Failed to allocate VAAPI encoder context");
+        drd_vaapi_encoder_release(self);
+        return FALSE;
+    }
+
+    self->vaapi_encoder->width = (int) self->frame_width;
+    self->vaapi_encoder->height = (int) self->frame_height;
+    self->vaapi_encoder->pix_fmt = AV_PIX_FMT_VAAPI;
+    self->vaapi_encoder->sw_pix_fmt = AV_PIX_FMT_NV12;
+    self->vaapi_encoder->time_base = (AVRational) {1, (int) self->h264_framerate};
+    self->vaapi_encoder->framerate = (AVRational) {(int) self->h264_framerate, 1};
+    self->vaapi_encoder->bit_rate = (int64_t) self->h264_bitrate;
+    self->vaapi_encoder->gop_size = (int) self->h264_framerate;
+    self->vaapi_encoder->max_b_frames = 0;
+    self->vaapi_encoder->hw_frames_ctx = av_buffer_ref(self->vaapi_frames);
+
+    if (self->vaapi_encoder->hw_frames_ctx == NULL)
+    {
+        g_set_error_literal(error, G_IO_ERROR, G_IO_ERROR_FAILED, "Failed to reference VAAPI frames context");
+        drd_vaapi_encoder_release(self);
+        return FALSE;
+    }
+
+    ret = avcodec_open2(self->vaapi_encoder, codec, NULL);
+    if (ret < 0)
+    {
+        g_set_error_literal(error, G_IO_ERROR, G_IO_ERROR_FAILED, "Failed to open VAAPI encoder");
+        drd_vaapi_encoder_release(self);
+        return FALSE;
+    }
+
+    self->vaapi_sws = sws_getContext((int) self->frame_width, (int) self->frame_height, AV_PIX_FMT_BGRA,
+                                     (int) self->frame_width, (int) self->frame_height, AV_PIX_FMT_NV12, SWS_BILINEAR,
+                                     NULL, NULL, NULL);
+    if (self->vaapi_sws == NULL)
+    {
+        g_set_error_literal(error, G_IO_ERROR, G_IO_ERROR_FAILED, "Failed to create swscale context");
+        drd_vaapi_encoder_release(self);
+        return FALSE;
+    }
+
+    self->vaapi_sw_frame = av_frame_alloc();
+    if (self->vaapi_sw_frame == NULL)
+    {
+        g_set_error_literal(error, G_IO_ERROR, G_IO_ERROR_FAILED, "Failed to allocate software frame");
+        drd_vaapi_encoder_release(self);
+        return FALSE;
+    }
+
+    self->vaapi_sw_frame->format = AV_PIX_FMT_NV12;
+    self->vaapi_sw_frame->width = (int) self->frame_width;
+    self->vaapi_sw_frame->height = (int) self->frame_height;
+
+    ret = av_frame_get_buffer(self->vaapi_sw_frame, 32);
+    if (ret < 0)
+    {
+        g_set_error_literal(error, G_IO_ERROR, G_IO_ERROR_FAILED, "Failed to allocate software frame buffer");
+        drd_vaapi_encoder_release(self);
+        return FALSE;
+    }
+
+    self->vaapi_width = self->frame_width;
+    self->vaapi_height = self->frame_height;
+    return TRUE;
+}
+
+/*
+ * 功能：构造 AVC420 全帧元数据，供 Rdpgfx H264 元数据发送。
+ * 逻辑：填充单区域矩形与量化/质量默认值；分配失败时释放并返回错误。
+ * 参数：regionRect 全帧矩形；meta 输出元数据；error GLib 错误。
+ * 外部接口：FreeRDP h264 的 free_h264_metablock。
+ */
+static gboolean drd_h264_build_fullframe_metablock(const RECTANGLE_16 *regionRect, RDPGFX_H264_METABLOCK *meta, GError **error)
+{
+    WINPR_ASSERT(regionRect != NULL);
+    WINPR_ASSERT(meta != NULL);
+
+    memset(meta, 0, sizeof(*meta));
+    meta->numRegionRects = 1;
+    meta->regionRects = g_malloc0(sizeof(*meta->regionRects));
+    meta->quantQualityVals = g_malloc0(sizeof(*meta->quantQualityVals));
+    if (meta->regionRects == NULL || meta->quantQualityVals == NULL)
+    {
+        free_h264_metablock(meta);
+        g_set_error_literal(error, G_IO_ERROR, G_IO_ERROR_FAILED, "Failed to allocate h264 metablock");
+        return FALSE;
+    }
+
+    meta->regionRects[0] = *regionRect;
+    memset(meta->quantQualityVals, 0, sizeof(*meta->quantQualityVals));
+    return TRUE;
+}
+
+/*
+ * 功能：使用 VAAPI 硬件加速编码 BGRA 帧为 AVC420，并填充 Rdpgfx 需要的元数据。
+ * 逻辑：通过 swscale 将 BGRA 转 NV12，上传到 VAAPI 硬件帧后编码，收集 H264 packet，
+ *       拼接输出到 avc420->data/length，并构造全帧元数据。
+ * 参数：self 编码管理器；data 原始 BGRA 像素；stride 行跨度；regionRect 全帧矩形；
+ *       avc420 输出结构；bitstream_out 返回缓存；error GLib 错误。
+ * 外部接口：libswscale 的 sws_scale，libavcodec 的 avcodec_send_frame/avcodec_receive_packet，
+ *           libavutil 的 av_hwframe_get_buffer/av_hwframe_transfer_data。
+ */
+static gboolean drd_vaapi_encode_avc420(DrdEncodingManager *self, const guint8 *data, guint stride,
+                                        const RECTANGLE_16 *regionRect, RDPGFX_AVC420_BITMAP_STREAM *avc420,
+                                        GByteArray **bitstream_out, GError **error)
+{
+    const uint8_t *src_slices[4] = {data, NULL, NULL, NULL};
+    int src_strides[4] = {(int) stride, 0, 0, 0};
+    GByteArray *bitstream = NULL;
+    AVPacket *packet = NULL;
+    AVFrame *hw_frame = NULL;
+    int ret = 0;
+
+    if (!drd_vaapi_encoder_prepare(self, error))
+    {
+        return FALSE;
+    }
+
+    ret = av_frame_make_writable(self->vaapi_sw_frame);
+    if (ret < 0)
+    {
+        g_set_error_literal(error, G_IO_ERROR, G_IO_ERROR_FAILED, "Failed to make software frame writable");
+        return FALSE;
+    }
+
+    ret = sws_scale(self->vaapi_sws, src_slices, src_strides, 0, (int) self->frame_height,
+                    self->vaapi_sw_frame->data, self->vaapi_sw_frame->linesize);
+    if (ret <= 0)
+    {
+        g_set_error_literal(error, G_IO_ERROR, G_IO_ERROR_FAILED, "sws_scale failed for BGRA to NV12 conversion");
+        return FALSE;
+    }
+
+    hw_frame = av_frame_alloc();
+    if (hw_frame == NULL)
+    {
+        g_set_error_literal(error, G_IO_ERROR, G_IO_ERROR_FAILED, "Failed to allocate VAAPI frame");
+        return FALSE;
+    }
+
+    hw_frame->format = AV_PIX_FMT_VAAPI;
+    hw_frame->width = (int) self->frame_width;
+    hw_frame->height = (int) self->frame_height;
+
+    ret = av_hwframe_get_buffer(self->vaapi_frames, hw_frame, 0);
+    if (ret < 0)
+    {
+        g_set_error_literal(error, G_IO_ERROR, G_IO_ERROR_FAILED, "Failed to get VAAPI frame buffer");
+        av_frame_free(&hw_frame);
+        return FALSE;
+    }
+
+    ret = av_hwframe_transfer_data(hw_frame, self->vaapi_sw_frame, 0);
+    if (ret < 0)
+    {
+        g_set_error_literal(error, G_IO_ERROR, G_IO_ERROR_FAILED, "Failed to upload data to VAAPI frame");
+        av_frame_free(&hw_frame);
+        return FALSE;
+    }
+
+    ret = avcodec_send_frame(self->vaapi_encoder, hw_frame);
+    av_frame_free(&hw_frame);
+    if (ret < 0)
+    {
+        g_set_error_literal(error, G_IO_ERROR, G_IO_ERROR_FAILED, "Failed to send VAAPI frame to encoder");
+        return FALSE;
+    }
+
+    bitstream = g_byte_array_new();
+    packet = av_packet_alloc();
+    if (packet == NULL)
+    {
+        g_byte_array_unref(bitstream);
+        g_set_error_literal(error, G_IO_ERROR, G_IO_ERROR_FAILED, "Failed to allocate AVPacket");
+        return FALSE;
+    }
+
+    while ((ret = avcodec_receive_packet(self->vaapi_encoder, packet)) == 0)
+    {
+        g_byte_array_append(bitstream, packet->data, packet->size);
+        av_packet_unref(packet);
+    }
+
+    av_packet_free(&packet);
+
+    if (ret != AVERROR(EAGAIN) && ret != AVERROR_EOF)
+    {
+        g_byte_array_unref(bitstream);
+        g_set_error_literal(error, G_IO_ERROR, G_IO_ERROR_FAILED, "Failed to receive VAAPI packet");
+        return FALSE;
+    }
+
+    if (bitstream->len == 0)
+    {
+        g_byte_array_unref(bitstream);
+        g_set_error_literal(error, G_IO_ERROR, G_IO_ERROR_PENDING, "no avc420 frame produced by VAAPI");
+        return FALSE;
+    }
+
+    if (!drd_h264_build_fullframe_metablock(regionRect, &avc420->meta, error))
+    {
+        g_byte_array_unref(bitstream);
+        return FALSE;
+    }
+
+    avc420->data = bitstream->data;
+    avc420->length = bitstream->len;
+    *bitstream_out = bitstream;
+    return TRUE;
 }
 
 /*
@@ -388,7 +727,7 @@ void drd_encoding_manager_register_codec_result(DrdEncodingManager *self,
 
 
 // copy from freerdp shadow
-
+// 可能开启硬件加速时，无需初始化 freerdp 的 h264，使用了 ffmpeg 的 h264 编码器
 static int drd_encoder_init_h264(DrdEncodingManager *encoder)
 {
     if (!encoder->h264)
@@ -408,9 +747,8 @@ static int drd_encoder_init_h264(DrdEncodingManager *encoder)
         goto fail;
     if (!h264_context_set_option(encoder->h264, H264_CONTEXT_OPTION_QP, encoder->h264_qp))
         goto fail;
-    if (!h264_context_set_option(encoder->h264, H264_CONTEXT_OPTION_HW_ACCEL, encoder->h264_hw_accel))
-        goto fail;
-    // if (!h264_context_set_option(encoder->h264, H264_CONTEXT_OPTION_USAGETYPE, H264_CAMERA_VIDEO_REAL_TIME))
+    // 不能使用 freerdp 的 HW_ACCEL 配置开启硬件加速，会导致 freerdp 崩溃
+    // if (!h264_context_set_option(encoder->h264, H264_CONTEXT_OPTION_HW_ACCEL, encoder->h264_hw_accel))
     //     goto fail;
     // guint hw = h264_context_get_option(encoder->h264, H264_CONTEXT_OPTION_HW_ACCEL);
     // DRD_LOG_MESSAGE("hw is %d",hw);
@@ -1011,10 +1349,11 @@ gboolean drd_encoding_manager_encode_surface_gfx(DrdEncodingManager *self, rdpSe
     }
     else if (use_avc420)
     {
-        DRD_LOG_MESSAGE("avc420 encode");
         INT32 rc = 0;
         RDPGFX_AVC420_BITMAP_STREAM avc420 = {0};
         RECTANGLE_16 regionRect;
+        g_autoptr(GByteArray) vaapi_bitstream = NULL;
+        gboolean use_vaapi = FALSE;
         *h264 = TRUE;
         if (!drd_encoder_prepare(self, FREERDP_CODEC_AVC420, settings))
         {
@@ -1025,18 +1364,41 @@ gboolean drd_encoding_manager_encode_surface_gfx(DrdEncodingManager *self, rdpSe
         regionRect.top = (UINT16) cmd.top;
         regionRect.right = (UINT16) cmd.right;
         regionRect.bottom = (UINT16) cmd.bottom;
-        rc = avc420_compress(self->h264, data, cmd.format, stride, self->frame_width, self->frame_height, &regionRect, &avc420.data,
-                             &avc420.length, &avc420.meta);
-        if (rc < 0)
+
+        if (self->h264_hw_accel)
         {
-            g_set_error_literal(error, G_IO_ERROR, G_IO_ERROR_FAILED, "avc420_compress failed");
-            goto out;
+            if (drd_vaapi_encode_avc420(self, data, stride, &regionRect, &avc420, &vaapi_bitstream, error))
+            {
+                DRD_LOG_MESSAGE("VAAPI avc420 encode");
+                rc = 1;
+                use_vaapi = TRUE;
+            }
+            else
+            {
+                if (error != NULL && *error != NULL && g_error_matches(*error, G_IO_ERROR, G_IO_ERROR_PENDING))
+                {
+                    goto out;
+                }
+                g_clear_error(error);
+                g_warning("VAAPI avc420 encode failed, fallback to software");
+            }
         }
-        if (rc == 0)
+
+        if (!use_vaapi)
         {
-            free_h264_metablock(&avc420.meta);
-            g_set_error_literal(error, G_IO_ERROR, G_IO_ERROR_PENDING, "no avc420 frame produced");
-            goto out;
+            rc = avc420_compress(self->h264, data, cmd.format, stride, self->frame_width, self->frame_height, &regionRect,
+                                 &avc420.data, &avc420.length, &avc420.meta);
+            if (rc < 0)
+            {
+                g_set_error_literal(error, G_IO_ERROR, G_IO_ERROR_FAILED, "avc420_compress failed");
+                goto out;
+            }
+            if (rc == 0)
+            {
+                free_h264_metablock(&avc420.meta);
+                g_set_error_literal(error, G_IO_ERROR, G_IO_ERROR_PENDING, "no avc420 frame produced");
+                goto out;
+            }
         }
         /* rc > 0 means new data */
         if (rc > 0)
@@ -1059,6 +1421,11 @@ gboolean drd_encoding_manager_encode_surface_gfx(DrdEncodingManager *self, rdpSe
             drd_encoding_manager_store_previous_frame(self, data, stride, self->frame_height);
             drd_encoding_manager_update_tile_hashes(self, data, stride);
             drd_encoding_manager_register_codec_result(self, DRD_ENCODING_CODEC_CLASS_AVC, TRUE);
+        }
+
+        if (use_vaapi)
+        {
+            g_clear_pointer(&vaapi_bitstream, g_byte_array_unref);
         }
     }
     else if (use_progressive)
