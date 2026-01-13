@@ -7,6 +7,7 @@
 #include <libavutil/avutil.h>
 #include <libavutil/hwcontext.h>
 #include <libavutil/imgutils.h>
+#include <libavutil/opt.h>
 #include <libswscale/swscale.h>
 
 #include <freerdp/codec/color.h>
@@ -263,6 +264,17 @@ static gboolean drd_vaapi_encoder_prepare(DrdEncodingManager *self, GError **err
     self->vaapi_encoder->gop_size = (int) self->h264_framerate;
     self->vaapi_encoder->max_b_frames = 0;
     self->vaapi_encoder->hw_frames_ctx = av_buffer_ref(self->vaapi_frames);
+    self->vaapi_encoder->trellis = 2;
+    self->vaapi_encoder->qmin = 1;
+    self->vaapi_encoder->qmax = 60;
+    self->vaapi_encoder->max_qdiff = 5;
+    self->vaapi_encoder->rc_max_rate = 5000000;
+    self->vaapi_encoder->rc_min_rate = 1000000;
+    self->vaapi_encoder->rc_buffer_size = 4000000;
+    self->vaapi_encoder->me_cmp = FF_CMP_VSAD;
+    self->vaapi_encoder->profile = FF_PROFILE_H264_CONSTRAINED_BASELINE;
+    self->vaapi_encoder->max_b_frames = 0;
+    self->vaapi_encoder->level = 41;
 
     if (self->vaapi_encoder->hw_frames_ctx == NULL)
     {
