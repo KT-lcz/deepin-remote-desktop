@@ -278,7 +278,7 @@ static gboolean drd_vaapi_encoder_prepare(DrdEncodingManager *self, GError **err
         drd_vaapi_encoder_release(self);
         return FALSE;
     }
-
+    // TODO 用 vaapi 替代 sws_scale完成色彩转换
     self->vaapi_sws = sws_getContext((int) self->frame_width, (int) self->frame_height, AV_PIX_FMT_BGRA,
                                      (int) self->frame_width, (int) self->frame_height, AV_PIX_FMT_NV12, SWS_BILINEAR,
                                      NULL, NULL, NULL);
@@ -1215,8 +1215,27 @@ gboolean drd_encoding_manager_encode_surface_gfx(DrdEncodingManager *self, rdpSe
     gboolean use_avc420 = FALSE;
     gboolean use_progressive = FALSE;
     gboolean use_remotefx = FALSE;
+    gboolean force_avc420 = FALSE;
 
-    if (auto_switch)
+    if (auto_switch && self->h264_hw_accel && gfx_avc420)
+    {
+        g_autoptr(GError) vaapi_error = NULL;
+
+        if (drd_vaapi_encoder_prepare(self, &vaapi_error))
+        {
+            force_avc420 = TRUE;
+        }
+        else
+        {
+            g_clear_error(&vaapi_error);
+        }
+    }
+
+    if (force_avc420)
+    {
+        use_avc420 = TRUE;
+    }
+    else if (auto_switch)
     {
         if (large_change)
         {
