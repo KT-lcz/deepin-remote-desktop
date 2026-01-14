@@ -273,7 +273,6 @@ static gboolean drd_vaapi_encoder_prepare(DrdEncodingManager *self, GError **err
     self->vaapi_encoder->rc_buffer_size = 4000000;
     self->vaapi_encoder->me_cmp = FF_CMP_VSAD;
     self->vaapi_encoder->profile = FF_PROFILE_H264_CONSTRAINED_BASELINE;
-    self->vaapi_encoder->max_b_frames = 0;
     self->vaapi_encoder->level = 41;
 
     if (self->vaapi_encoder->hw_frames_ctx == NULL)
