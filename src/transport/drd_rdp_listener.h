@@ -19,7 +19,6 @@ typedef gboolean (*DrdRdpListenerDelegateFunc)(DrdRdpListener *listener,
                                                GError **error);
 typedef void (*DrdRdpListenerSessionFunc)(DrdRdpListener *listener,
                                           DrdRdpSession *session,
-                                          GSocketConnection *connection,
                                           gpointer user_data);
 
 DrdRdpListener *drd_rdp_listener_new(const gchar *bind_address,
@@ -45,5 +44,5 @@ void drd_rdp_listener_set_session_callback(DrdRdpListener *self,
                                            gpointer user_data);
 
 gboolean drd_rdp_listener_is_handover_mode(DrdRdpListener *self);
-
+gboolean drd_rdp_listener_is_single_login(DrdRdpListener *self);
 G_END_DECLS

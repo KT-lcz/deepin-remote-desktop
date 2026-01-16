@@ -91,7 +91,7 @@ flowchart LR
 - `core/drd_config`：解析 INI/CLI 配置，集中管理绑定地址、TLS 证书、捕获尺寸及 `enable_nla`/`pam_service` 等安全参数。
 - `security/drd_tls_credentials`：加载并缓存 TLS 证书/私钥，供运行时向 FreeRDP Settings 注入。
 - `security/drd_nla_sam`：基于用户名/密码生成临时 SAM 文件，写入 `FreeRDP_NtlmSamFile`，允许 CredSSP 在 NLA 期间读取 NT 哈希。
-- `security/drd_local_session`：在关闭 NLA（TLS+PAM 单点登录）时运行，使用 PAM 完成 `pam_authenticate/pam_open_session`，生成可供 capture/input 复用的本地用户上下文，并负责凭据擦除与 `pam_close_session`。
+- `security/drd_local_session`：在关闭 NLA（TLS+PAM 单点登录）时运行，使用 PAM 完成 `pam_authenticate/pam_acct_mgmt` 后立即 `pam_end`，不长期持有句柄，并负责凭据擦除与必要的会话清理兜底。
 
 ### 2. 采集层
 - `capture/drd_capture_manager`：启动/停止屏幕捕获，维护帧队列。

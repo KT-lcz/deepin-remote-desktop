@@ -1,5 +1,40 @@
 # 变更记录
 
+## 2026-XX-XX：session_cb 迁移至 PostConnect
+- **目的**：确保会话回调在认证完成后触发，并解除对 `GSocketConnection` 的直接依赖。
+- **范围**：`src/transport/drd_rdp_listener.c`、`src/session/drd_rdp_session.[ch]`、`src/system/drd_system_daemon.c`、`src/system/drd_handover_daemon.c`、`doc/changelog.md`。
+- **主要改动**：
+  1. 会话回调签名简化为 `DrdRdpListener * + DrdRdpSession *`，触发时机改为 PostConnect。
+  2. 连接元数据（`drd-system-client`、`drd-system-keep-open`）在会话侧缓存。
+  3. system/handover 回调从会话读取元数据。
+- **影响**：回调触发点更靠后且语义更清晰，系统模式逻辑不再依赖连接对象生命周期。
+
+## 2026-01-16：单点登录认证载荷完善与会话清理优化
+- **目的**：完善单点登录认证载荷，缩短 PAM 句柄生命周期并清理敏感信息。
+- **范围**：`src/system/drd_system_daemon.c`、`src/security/drd_local_session.c`、`doc/architecture.md`、`doc/changelog.md`。
+- **主要改动**：
+  1. auth_payload 使用本地会话 `username\\npassword` 组成，并在调用 LightDM 接口后清零。
+  2. PAM 认证成功后立即 `pam_end`，不再长期持有句柄。
+  3. 架构说明同步更新认证与清理行为。
+- **影响**：敏感信息驻留时间更短，认证资源释放路径更清晰。
+
+## 2026-01-16：本地会话资源释放优化
+- **目的**：完善 PAM 认证流程中的资源释放与敏感信息清理。
+- **范围**：`src/security/drd_local_session.c`、`src/transport/drd_rdp_listener.c`、`doc/architecture.md`、`doc/changelog.md`。
+- **主要改动**：
+  1. 认证失败路径补齐清理，避免本地会话与凭据残留。
+  2. 关闭本地会话时释放域名、PAM 服务名、远端地址等字段，补齐失败路径清理。
+  3. 架构文档同步 PAM 认证/清理行为描述。
+- **影响**：资源释放更完整，减少句柄与敏感数据驻留风险。
+
+## 2026-01-16：单用户登录认证 FD 传递
+- **目的**：为单用户登录模式补齐 LightDM `CreateSingleLogonSession` 的认证共享内存 FD 传递。
+- **范围**：`src/system/drd_system_daemon.c`、`doc/changelog.md`、`.codex/plan/lightdm-single-logon-auth-fd.md`、`doc/task-lightdm-single-logon-auth-fd.md`。
+- **主要改动**：
+  1. 在单用户登录分支创建 POSIX 共享内存 FD，写入固定认证内容并通过 `GUnixFDList` 传递给 LightDM。
+  2. 完整补齐 `drd_dbus_lightdm_remote_display_factory_call_create_single_logon_session_sync` 的调用参数与错误处理。
+- **影响**：LightDM 可读取认证共享内存内容完成单用户登录流程，其它会话路径不受影响。
+
 ## 2026-01-12：AVC420 VAAPI 硬件编码接入
 - **目的**：在 Surface GFX 的 AVC420 分支启用 VAAPI 硬件编码，降低 CPU 编码负载。
 - **范围**：`src/encoding/drd_encoding_manager.c`、`meson.build`、`src/meson.build`、`doc/architecture.md`、`doc/encoding_vaapi_avc420.md`、`doc/changelog.md`、`.codex/plan/avc420-vaapi.md`。

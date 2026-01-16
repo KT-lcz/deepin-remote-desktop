@@ -11,6 +11,10 @@ struct _DrdLocalSession
 {
     pam_handle_t *handle;
     gchar *username;
+    gchar *password;
+    gchar *remote_host;
+    gchar *domain;
+    gchar *pam_service;
 };
 
 typedef struct
@@ -105,9 +109,89 @@ drd_local_session_cleanup_handle(pam_handle_t *handle)
     {
         return;
     }
-    pam_close_session(handle, PAM_SILENT);
-    pam_setcred(handle, PAM_DELETE_CRED | PAM_SILENT);
     pam_end(handle, PAM_SUCCESS);
+}
+
+void drd_local_session_auth(DrdLocalSession *self, GError **error)
+{
+    g_return_if_fail(self != NULL);
+
+    if (self->handle != NULL)
+    {
+        drd_local_session_cleanup_handle(self->handle);
+        self->handle = NULL;
+    }
+
+    DrdPamConversationData conv_data = {
+            .password = self->password,
+    };
+    struct pam_conv conv = {
+            .conv = drd_local_session_pam_conv,
+            .appdata_ptr = &conv_data,
+    };
+
+    pam_handle_t *handle = NULL;
+    int status = pam_start(self->pam_service, self->username, &conv, &handle);
+    if (status != PAM_SUCCESS)
+    {
+        g_set_error(error, G_IO_ERROR, G_IO_ERROR_FAILED, "pam_start(%s) failed: %s", self->pam_service,
+                    pam_strerror(NULL, status));
+        return;
+    }
+
+    if (self->remote_host != NULL)
+    {
+        pam_set_item(handle, PAM_RHOST, self->remote_host);
+    }
+    // TODO demain
+    //     if ( self->domain != NULL && * self->domain != '\0')
+    //     {
+    // #ifdef PAM_USER_HOST
+    //         pam_set_item(handle, PAM_USER_HOST, domain);
+    // #endif
+    //     }
+
+    status = pam_authenticate(handle, PAM_SILENT);
+    if (status != PAM_SUCCESS)
+    {
+        pam_end(handle, status);
+        g_set_error(error, G_IO_ERROR, G_IO_ERROR_PERMISSION_DENIED, "PAM authentication failed for %s: %s",
+                    self->username, pam_strerror(NULL, status));
+        return;
+    }
+
+    status = pam_acct_mgmt(handle, PAM_SILENT);
+    if (status != PAM_SUCCESS && status != PAM_NEW_AUTHTOK_REQD)
+    {
+        pam_end(handle, status);
+        g_set_error(error, G_IO_ERROR, G_IO_ERROR_PERMISSION_DENIED, "PAM account check failed for %s: %s",
+                    self->username, pam_strerror(NULL, status));
+        return;
+    }
+
+    pam_end(handle, PAM_SUCCESS);
+    self->handle = NULL;
+}
+
+const gchar *
+drd_local_session_get_username(DrdLocalSession *self)
+{
+    g_return_val_if_fail(self != NULL, NULL);
+    return self->username;
+}
+
+const gchar *
+drd_local_session_get_password(DrdLocalSession *self)
+{
+    g_return_val_if_fail(self != NULL, NULL);
+    return self->password;
+}
+
+void
+drd_local_session_clear_password(DrdLocalSession *self)
+{
+    g_return_if_fail(self != NULL);
+    drd_local_session_scrub_string(&self->password);
 }
 
 /*
@@ -121,101 +205,18 @@ drd_local_session_new(const gchar *pam_service,
                       const gchar *username,
                       const gchar *domain,
                       const gchar *password,
-                      const gchar *remote_host,
-                      GError **error)
+                      const gchar *remote_host)
 {
     g_return_val_if_fail(pam_service != NULL && *pam_service != '\0', NULL);
     g_return_val_if_fail(username != NULL && *username != '\0', NULL);
     g_return_val_if_fail(password != NULL && *password != '\0', NULL);
 
-    DrdPamConversationData conv_data = {
-        .password = password,
-    };
-    struct pam_conv conv = {
-        .conv = drd_local_session_pam_conv,
-        .appdata_ptr = &conv_data,
-    };
-
-    pam_handle_t *handle = NULL;
-    int status = pam_start(pam_service, username, &conv, &handle);
-    if (status != PAM_SUCCESS)
-    {
-        g_set_error(error,
-                    G_IO_ERROR,
-                    G_IO_ERROR_FAILED,
-                    "pam_start(%s) failed: %s",
-                    pam_service,
-                    pam_strerror(handle, status));
-        return NULL;
-    }
-
-    if (remote_host != NULL)
-    {
-        pam_set_item(handle, PAM_RHOST, remote_host);
-    }
-    if (domain != NULL && *domain != '\0')
-    {
-#ifdef PAM_USER_HOST
-        pam_set_item(handle, PAM_USER_HOST, domain);
-#endif
-    }
-
-    status = pam_authenticate(handle, PAM_SILENT);
-    if (status != PAM_SUCCESS)
-    {
-        pam_end(handle, status);
-        g_set_error(error,
-                    G_IO_ERROR,
-                    G_IO_ERROR_PERMISSION_DENIED,
-                    "PAM authentication failed for %s: %s",
-                    username,
-                    pam_strerror(NULL, status));
-        return NULL;
-    }
-
-    status = pam_acct_mgmt(handle, PAM_SILENT);
-    if (status != PAM_SUCCESS && status != PAM_NEW_AUTHTOK_REQD)
-    {
-        pam_end(handle, status);
-        g_set_error(error,
-                    G_IO_ERROR,
-                    G_IO_ERROR_PERMISSION_DENIED,
-                    "PAM account check failed for %s: %s",
-                    username,
-                    pam_strerror(NULL, status));
-        return NULL;
-    }
-
-    status = pam_setcred(handle, PAM_ESTABLISH_CRED | PAM_SILENT);
-    if (status != PAM_SUCCESS && status != PAM_CRED_UNAVAIL)
-    {
-        pam_end(handle, status);
-        g_set_error(error,
-                    G_IO_ERROR,
-                    G_IO_ERROR_FAILED,
-                    "Failed to establish PAM credentials: %s",
-                    pam_strerror(NULL, status));
-        return NULL;
-    }
-
-    status = pam_open_session(handle, PAM_SILENT);
-    if (status != PAM_SUCCESS)
-    {
-        pam_setcred(handle, PAM_DELETE_CRED | PAM_SILENT);
-        pam_end(handle, status);
-        g_set_error(error,
-                    G_IO_ERROR,
-                    G_IO_ERROR_FAILED,
-                    "Failed to open PAM session for %s: %s",
-                    username,
-                    pam_strerror(NULL, status));
-        return NULL;
-    }
-
     DrdLocalSession *session = g_new0(DrdLocalSession, 1);
-    session->handle = handle;
     session->username = g_strdup(username);
-    DRD_LOG_MESSAGE("Opened PAM session for %s via service %s", username, pam_service);
+    session->domain = g_strdup(domain);
+    session->pam_service = g_strdup(pam_service);
+    session->remote_host = g_strdup(remote_host);
+    session->password = g_strdup(password);
     return session;
 }
 
@@ -239,6 +240,10 @@ drd_local_session_close(DrdLocalSession *session)
         session->handle = NULL;
     }
 
+    drd_local_session_scrub_string(&session->password);
     drd_local_session_scrub_string(&session->username);
+    g_clear_pointer(&session->domain, g_free);
+    g_clear_pointer(&session->pam_service, g_free);
+    g_clear_pointer(&session->remote_host, g_free);
     g_free(session);
 }

@@ -59,14 +59,13 @@ typedef gboolean (*DrdRdpListenerDelegateFunc)(
 typedef void (*DrdRdpListenerSessionFunc)(
     DrdRdpListener *listener,
     DrdRdpSession *session,
-    GSocketConnection *connection,
     gpointer user_data
 );
 ```
 
 调用 `drd_rdp_listener_set_session_callback()` 注册：
-- 新会话创建时触发
-- 用于跟踪会话列表
+- 认证完成的 PostConnect 阶段触发
+- 会话携带 system 侧元数据（如 drd-system-client、drd-system-keep-open）
 
 ### 辅助方法
 

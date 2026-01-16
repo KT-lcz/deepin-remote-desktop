@@ -15,11 +15,11 @@
       <arg name="session_path" direction="out" type="o"/>
     </method>
     <method name="CreateSingleLogonSession">
-      <annotation name="org.gtk.GDBus.C.UnixFD" value="true" />
       <arg name="client_id" direction="in" type="u"/>
       <arg name="width" direction="in" type="u"/>
       <arg name="height" direction="in" type="u"/>
-      <arg name="auth_fd" direction="in" type="h"/>"
+      <annotation name="org.gtk.GDBus.C.UnixFD" value="true" />
+      <arg name="auth_fd" direction="in" type="h"/>
       <arg name="address" direction="in" type="s"/>
       <arg name="session_path" direction="out" type="o"/>
     </method>

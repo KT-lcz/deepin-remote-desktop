@@ -109,6 +109,11 @@ drd_rdp_listener_is_system_mode(DrdRdpListener *self)
     return self != NULL && self->runtime_mode == DRD_RUNTIME_MODE_SYSTEM;
 }
 
+gboolean drd_rdp_listener_is_single_login(DrdRdpListener *self)
+{
+    return self!=NULL && self->nla_enabled == FALSE;
+}
+
 /*
  * 功能：在 system 模式下根据客户端分辨率更新编码配置。
  * 逻辑：以配置中的编码选项为基准，若客户端提供分辨率则覆盖，并写入 runtime。
@@ -585,11 +590,19 @@ drd_peer_post_connect(freerdp_peer *client)
 
     if (ctx->listener != NULL && !ctx->listener->nla_enabled)
     {
-        if (!drd_rdp_listener_authenticate_tls_login(ctx, client))
+        if (drd_rdp_listener_is_system_mode(ctx->listener))
         {
-            drd_rdp_session_disconnect(ctx->session, "tls-rdp-sso-auth-failed");
-            return FALSE;
+            if (!drd_rdp_listener_authenticate_tls_login(ctx, client))
+            {
+                drd_rdp_session_disconnect(ctx->session, "tls-rdp-sso-auth-failed");
+                return FALSE;
+            }
         }
+    }
+
+    if (ctx->listener != NULL && ctx->listener->session_cb != NULL)
+    {
+        ctx->listener->session_cb(ctx->listener, ctx->session, ctx->listener->session_cb_data);
     }
     return result;
 }
@@ -1200,7 +1213,7 @@ drd_configure_peer_settings(DrdRdpListener *self, freerdp_peer *client, GError *
     }
     else
     {
-        if (!freerdp_settings_set_bool(settings, FreeRDP_TlsSecurity, FALSE) ||
+        if (!freerdp_settings_set_bool(settings, FreeRDP_TlsSecurity, TRUE) ||
             !freerdp_settings_set_bool(settings, FreeRDP_NlaSecurity, TRUE) ||
             !freerdp_settings_set_bool(settings, FreeRDP_RdpSecurity, FALSE))
         {
@@ -1378,7 +1391,7 @@ drd_rdp_listener_cleanup_peer(freerdp_peer *peer,
 
 /*
  * 功能：处理新的 socket 连接，构造 peer 并交由 accept_peer。
- * 逻辑：生成对端描述，按需求保持连接打开，创建 FreeRDP peer；若接受成功可调用 session 回调；
+ * 逻辑：生成对端描述，按需求保持连接打开，创建 FreeRDP peer；若接受成功记录 system 元数据；
  *       根据 keep_open 决定是否立即关闭 GLib 连接。
  * 参数：self 监听器；connection 套接字连接；error 错误输出。
  * 外部接口：drd_rdp_listener_peer_from_connection 创建 peer，drd_rdp_listener_accept_peer 完成配置。
@@ -1407,12 +1420,14 @@ drd_rdp_listener_handle_connection(DrdRdpListener *self,
         return FALSE;
     }
 
-    if (self->session_cb != NULL && peer->context != NULL)
+    if (peer->context != NULL)
     {
         DrdRdpPeerContext *ctx = (DrdRdpPeerContext *) peer->context;
         if (ctx != NULL && ctx->session != NULL)
         {
-            self->session_cb(self, ctx->session, connection, self->session_cb_data);
+            gpointer system_client = g_object_get_data(G_OBJECT(connection), "drd-system-client");
+            drd_rdp_session_set_system_client(ctx->session, system_client);
+            drd_rdp_session_set_connection_keep_open(ctx->session, keep_open);
         }
     }
 
@@ -1693,30 +1708,24 @@ drd_rdp_listener_authenticate_tls_login(DrdRdpPeerContext *ctx, freerdp_peer *cl
                                   username,
                                   domain,
                                   password,
-                                  client->hostname,
-                                  &auth_error);
-
-    if (password != NULL)
-    {
-        freerdp_settings_set_string(settings, FreeRDP_Password, "");
-    }
+                                  client->hostname);
 
     if (local_session == NULL)
     {
-        if (auth_error != NULL)
-        {
-            DRD_LOG_WARNING("Peer %s TLS/PAM single sign-on failure for %s: %s",
-                            client->hostname,
-                            username,
-                            auth_error->message);
-        }
-        else
-        {
-            DRD_LOG_WARNING("Peer %s TLS/PAM single sign-on failure for %s", client->hostname, username);
-        }
+        DRD_LOG_WARNING("%s Miss arg", client->hostname);
         return FALSE;
     }
-
+    drd_local_session_auth(local_session, &auth_error);
+    if (auth_error != NULL)
+    {
+        DRD_LOG_WARNING("Peer %s TLS/PAM single sign-on failure for %s: %s",
+                        client->hostname,
+                        username,
+                        auth_error->message);
+        drd_local_session_close(local_session);
+        return FALSE;
+    }
+    freerdp_settings_set_string(settings, FreeRDP_Password, "");
     drd_rdp_session_attach_local_session(ctx->session, local_session);
     DRD_LOG_MESSAGE("Peer %s TLS/PAM single sign-on accepted for %s", client->hostname, username);
     return TRUE;

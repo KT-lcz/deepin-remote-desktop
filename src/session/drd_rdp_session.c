@@ -45,6 +45,8 @@ struct _DrdRdpSession
     guint32 frame_sequence;
     gint max_surface_payload;
     gboolean is_activated;
+    gpointer system_client;
+    gboolean connection_keep_open;
     GThread *event_thread;
     HANDLE stop_event;
     gint connection_alive;
@@ -302,6 +304,42 @@ void drd_rdp_session_set_virtual_channel_manager(DrdRdpSession *self, HANDLE vcm
 }
 
 /*
+ * 功能：记录 system 侧客户端指针，不改变其生命周期。
+ * 逻辑：仅缓存指针供系统守护进程在认证后取回。
+ * 参数：self 会话；system_client system 侧客户端指针。
+ * 外部接口：无。
+ */
+void drd_rdp_session_set_system_client(DrdRdpSession *self, gpointer system_client)
+{
+    g_return_if_fail(DRD_IS_RDP_SESSION(self));
+    self->system_client = system_client;
+}
+
+gpointer drd_rdp_session_get_system_client(DrdRdpSession *self)
+{
+    g_return_val_if_fail(DRD_IS_RDP_SESSION(self), NULL);
+    return self->system_client;
+}
+
+/*
+ * 功能：记录是否需要保持底层连接打开。
+ * 逻辑：仅保存标志，供认证完成后回调读取。
+ * 参数：self 会话；keep_open 是否保持连接打开。
+ * 外部接口：无。
+ */
+void drd_rdp_session_set_connection_keep_open(DrdRdpSession *self, gboolean keep_open)
+{
+    g_return_if_fail(DRD_IS_RDP_SESSION(self));
+    self->connection_keep_open = keep_open;
+}
+
+gboolean drd_rdp_session_get_connection_keep_open(DrdRdpSession *self)
+{
+    g_return_val_if_fail(DRD_IS_RDP_SESSION(self), FALSE);
+    return self->connection_keep_open;
+}
+
+/*
  * 功能：设置会话关闭回调，支持在已关闭时立即触发。
  * 逻辑：保存回调与上下文；若回调置空则重置已调用标记；若连接已结束立即调用通知。
  * 参数：self 会话；callback 关闭回调；user_data 回调透传数据。
@@ -355,6 +393,13 @@ void drd_rdp_session_attach_local_session(DrdRdpSession *self, DrdLocalSession *
 
     g_clear_pointer(&self->local_session, drd_local_session_close);
     self->local_session = session;
+}
+
+DrdLocalSession *
+drd_rdp_session_get_local_session(DrdRdpSession *self)
+{
+    g_return_val_if_fail(DRD_IS_RDP_SESSION(self), NULL);
+    return self->local_session;
 }
 
 /*

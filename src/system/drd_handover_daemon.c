@@ -29,7 +29,6 @@ static void drd_handover_daemon_on_restart_handover(DrdDBusRemoteDesktopRdpHando
 
 static void drd_handover_daemon_on_session_ready(DrdRdpListener *listener,
                                                  DrdRdpSession *session,
-                                                 GSocketConnection *connection,
                                                  gpointer user_data);
 
 static gboolean drd_handover_daemon_redirect_active_client(DrdHandoverDaemon *self,
@@ -456,17 +455,15 @@ drd_handover_daemon_on_restart_handover(DrdDBusRemoteDesktopRdpHandover *interfa
 /*
  * 功能：监听器回调，记录当前活跃 RDP 会话。
  * 逻辑：替换 active_session 引用，确保为 handover 模式的最新会话。
- * 参数：listener 监听器；session 新会话；connection 底层连接；user_data handover 守护实例。
+ * 参数：listener 监听器；session 新会话；user_data handover 守护实例。
  * 外部接口：GLib g_clear_object/g_object_ref；日志 DRD_LOG_MESSAGE。
  */
 static void
 drd_handover_daemon_on_session_ready(DrdRdpListener *listener,
                                      DrdRdpSession *session,
-                                     GSocketConnection *connection,
                                      gpointer user_data)
 {
     (void) listener;
-    (void) connection;
     DrdHandoverDaemon *self = DRD_HANDOVER_DAEMON(user_data);
     if (!DRD_IS_HANDOVER_DAEMON(self))
     {

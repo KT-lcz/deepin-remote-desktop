@@ -3,6 +3,10 @@
 #include <gio/gio.h>
 #include <gio/gunixfdlist.h>
 #include <string.h>
+#include <errno.h>
+#include <fcntl.h>
+#include <sys/mman.h>
+#include <unistd.h>
 
 #include "core/drd_dbus_constants.h"
 #include "transport/drd_rdp_listener.h"
@@ -10,6 +14,7 @@
 #include "session/drd_rdp_session.h"
 #include "drd-dbus-remote-desktop.h"
 #include "drd-dbus-lightdm.h"
+#include "security/drd_local_session.h"
 #include "utils/drd_log.h"
 
 typedef struct _DrdSystemDaemon DrdSystemDaemon;
@@ -175,7 +180,6 @@ static gboolean drd_system_daemon_delegate(DrdRdpListener *listener,
 
 static void drd_system_daemon_on_session_ready(DrdRdpListener *listener,
                                                DrdRdpSession *session,
-                                               GSocketConnection *connection,
                                                gpointer user_data);
 
 static DrdRemoteClient *drd_system_daemon_find_client_by_token(DrdSystemDaemon *self,
@@ -603,16 +607,15 @@ drd_system_daemon_delegate(DrdRdpListener *listener,
 
 /*
  * 功能：监听器回调，记录连接对应的会话对象。
- * 逻辑：从连接 metadata 获取客户端结构；替换 session 引用并根据客户端请求的能力决定是否使用系统凭据；创建 LightDM 远程显示；刷新活跃时间。
- * 参数：listener 监听器；session 新会话；connection 底层连接；user_data system 守护实例。
- * 外部接口：GLib g_object_get_data/g_clear_object/g_object_ref；drd_rdp_session_client_is_mstsc；
+ * 逻辑：从会话 metadata 获取客户端结构；替换 session 引用并根据客户端请求的能力决定是否使用系统凭据；创建 LightDM 远程显示；刷新活跃时间。
+ * 参数：listener 监听器；session 新会话；user_data system 守护实例。
+ * 外部接口：GLib g_clear_object/g_object_ref；drd_rdp_session_client_is_mstsc；
  *           LightDM proxy drd_dbus_lightdm_remote_display_factory_proxy_new_for_bus_sync 与
  *           drd_dbus_lightdm_remote_display_factory_call_create_remote_greeter_display_sync。
  */
 static void
 drd_system_daemon_on_session_ready(DrdRdpListener *listener,
                                    DrdRdpSession *session,
-                                   GSocketConnection *connection,
                                    gpointer user_data)
 {
     DRD_LOG_MESSAGE("on session ready");
@@ -623,7 +626,7 @@ drd_system_daemon_on_session_ready(DrdRdpListener *listener,
         return;
     }
 
-    DrdRemoteClient *client = g_object_get_data(G_OBJECT(connection), "drd-system-client");
+    DrdRemoteClient *client = drd_rdp_session_get_system_client(session);
     if (client == NULL)
     {
         return;
@@ -686,20 +689,129 @@ drd_system_daemon_on_session_ready(DrdRdpListener *listener,
     runtime_opts.width = target_width;
     runtime_opts.height = target_height;
     drd_server_runtime_set_encoding_options(self->runtime, &runtime_opts);
-    if (!drd_dbus_lightdm_remote_display_factory_call_create_remote_greeter_display_sync(
-                self->remote_display_factory,
-                client->remote_id,
-                target_width,
-                target_height,
-                peer_address,
-                &session_path,
-                NULL,
-                &error))
+    if (drd_rdp_listener_is_single_login(self->listener))
     {
-        DRD_LOG_WARNING("create remote display failed %s", error->message);
-        drd_system_daemon_touch_client(client);
-        return;
+        g_autoptr(GVariant) fd_variant = NULL;
+        g_autoptr(GUnixFDList) fd_list = NULL;
+        g_autoptr(GUnixFDList) out_fd_list = NULL;
+        g_autoptr(GError) fd_error = NULL;
+        DrdLocalSession *local_session = drd_rdp_session_get_local_session(session);
+        const gchar *auth_username = drd_local_session_get_username(local_session);
+        const gchar *auth_password = drd_local_session_get_password(local_session);
+        g_autofree gchar *auth_payload = NULL;
+        gsize payload_len = 0;
+        g_autofree gchar *shm_name =
+                g_strdup_printf("/drd-auth-%d-%u", (int) getpid(), g_random_int());
+        int auth_fd = -1;
+        gboolean single_login_ok = FALSE;
+
+        if (local_session == NULL)
+        {
+            DRD_LOG_WARNING("single logon auth payload missing local session");
+            drd_system_daemon_touch_client(client);
+            return;
+        }
+        if (auth_username == NULL || *auth_username == '\0' ||
+            auth_password == NULL || *auth_password == '\0')
+        {
+            DRD_LOG_WARNING("single logon auth payload missing username/password");
+            drd_system_daemon_touch_client(client);
+            return;
+        }
+
+        auth_payload = g_strdup_printf("%s\n%s", auth_username, auth_password);
+        if (auth_payload == NULL)
+        {
+            DRD_LOG_WARNING("create single logon auth payload failed");
+            goto single_login_cleanup;
+        }
+        payload_len = strlen(auth_payload) + 1;
+        auth_fd = shm_open(shm_name, O_CREAT | O_EXCL | O_RDWR, 0600);
+        if (auth_fd < 0)
+        {
+            DRD_LOG_WARNING("create auth shm failed: %s", g_strerror(errno));
+            goto single_login_cleanup;
+        }
+        if (shm_unlink(shm_name) != 0)
+        {
+            DRD_LOG_WARNING("unlink auth shm failed: %s", g_strerror(errno));
+        }
+        if (ftruncate(auth_fd, (off_t) payload_len) != 0 ||
+            write(auth_fd, auth_payload, payload_len) != (ssize_t) payload_len ||
+            lseek(auth_fd, 0, SEEK_SET) < 0)
+        {
+            DRD_LOG_WARNING("prepare auth shm failed: %s", g_strerror(errno));
+            goto single_login_cleanup;
+        }
+        fd_list = g_unix_fd_list_new();
+        gint fd_index = g_unix_fd_list_append(fd_list, auth_fd, &fd_error);
+        if (auth_fd >= 0)
+        {
+            close(auth_fd);
+            auth_fd = -1;
+        }
+        if (fd_index < 0)
+        {
+            DRD_LOG_WARNING("append auth fd failed: %s",
+                            fd_error != NULL ? fd_error->message : "unknown");
+            goto single_login_cleanup;
+        }
+        fd_variant = g_variant_new_handle(fd_index);
+        if (!drd_dbus_lightdm_remote_display_factory_call_create_single_logon_session_sync(
+            self->remote_display_factory,
+            client->remote_id,
+            target_width,
+            target_height,
+            fd_variant,
+            peer_address,
+            fd_list,
+            &session_path,
+            &out_fd_list,
+            NULL,
+            &error))
+        {
+            DRD_LOG_WARNING("create single logon session failed %s",
+                            error != NULL ? error->message : "unknown");
+            goto single_login_cleanup;
+        }
+        single_login_ok = TRUE;
+
+single_login_cleanup:
+        if (auth_payload != NULL && payload_len > 0)
+        {
+            memset(auth_payload, 0, payload_len);
+        }
+        if (local_session != NULL)
+        {
+            drd_local_session_clear_password(local_session);
+        }
+        if (auth_fd >= 0)
+        {
+            close(auth_fd);
+        }
+        if (!single_login_ok)
+        {
+            drd_system_daemon_touch_client(client);
+            return;
+        }
+    }else
+    {
+        if (!drd_dbus_lightdm_remote_display_factory_call_create_remote_greeter_display_sync(
+            self->remote_display_factory,
+            client->remote_id,
+            target_width,
+            target_height,
+            peer_address,
+            &session_path,
+            NULL,
+            &error))
+        {
+            DRD_LOG_WARNING("create remote display failed %s", error->message);
+            drd_system_daemon_touch_client(client);
+            return;
+        }
     }
+
     DRD_LOG_MESSAGE("session_path=%s", session_path);
 
     drd_system_daemon_touch_client(client);

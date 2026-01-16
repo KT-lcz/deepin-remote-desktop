@@ -33,11 +33,16 @@ const gchar *drd_rdp_session_get_peer_address(DrdRdpSession *self);
 void drd_rdp_session_set_peer_state(DrdRdpSession *self, const gchar *state);
 void drd_rdp_session_set_runtime(DrdRdpSession *self, DrdServerRuntime *runtime);
 void drd_rdp_session_set_virtual_channel_manager(DrdRdpSession *self, HANDLE vcm);
+void drd_rdp_session_set_system_client(DrdRdpSession *self, gpointer system_client);
+gpointer drd_rdp_session_get_system_client(DrdRdpSession *self);
+void drd_rdp_session_set_connection_keep_open(DrdRdpSession *self, gboolean keep_open);
+gboolean drd_rdp_session_get_connection_keep_open(DrdRdpSession *self);
 void drd_rdp_session_set_closed_callback(DrdRdpSession *self,
                                          DrdRdpSessionClosedFunc callback,
                                          gpointer user_data);
 void drd_rdp_session_set_passive_mode(DrdRdpSession *self, gboolean passive);
 void drd_rdp_session_attach_local_session(DrdRdpSession *self, DrdLocalSession *session);
+DrdLocalSession *drd_rdp_session_get_local_session(DrdRdpSession *self);
 BOOL drd_rdp_session_post_connect(DrdRdpSession *self);
 BOOL drd_rdp_session_activate(DrdRdpSession *self);
 BOOL drd_rdp_session_pump(DrdRdpSession *self);
