@@ -1339,10 +1339,10 @@ drd_rdp_listener_accept_peer(DrdRdpListener *self,
         input->context = peer->context;
         if (!drd_rdp_listener_is_system_mode(self))
         {
-            input->KeyboardEvent = drd_rdp_peer_keyboard_event;
-            input->UnicodeKeyboardEvent = drd_rdp_peer_unicode_event;
-            input->MouseEvent = drd_rdp_peer_pointer_event;
-            input->ExtendedMouseEvent = drd_rdp_peer_pointer_event;
+            input->KeyboardEvent = drd_rdp_peer_keyboard_event_x11;
+            input->UnicodeKeyboardEvent = drd_rdp_peer_unicode_event_x11;
+            input->MouseEvent = drd_rdp_peer_pointer_event_x11;
+            input->ExtendedMouseEvent = drd_rdp_peer_extended_pointer_event;
         }
     }
 
