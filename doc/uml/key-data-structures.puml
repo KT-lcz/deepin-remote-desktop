@@ -44,7 +44,7 @@ package session {
     -DrdServerRuntime *runtime
     -DrdRdpGraphicsPipeline *graphics_pipeline
     -GThread *render_thread
-    -DrdLocalSession *local_session
+    -DrdPamAuth *pam_auth
     -DrdRdpSessionClosedFunc closed_cb
     +void prepare()
     +void activate()

@@ -1,5 +1,14 @@
 # 变更记录
 
+## 2026-XX-XX：PAM 认证模块重命名
+- **目的**：将 PAM 认证模块从 `drd_local_session` 更名为 `drd_pam_auth`，明确语义并统一命名风格。
+- **范围**：`src/security/drd_pam_auth.[ch]`、`src/session/drd_rdp_session.[ch]`、`src/transport/drd_rdp_listener.c`、`src/system/drd_system_daemon.c`、`doc/architecture.md`、`doc/uml/key-data-structures.puml`、`doc/changelog.md`。
+- **主要改动**：
+  1. 类型与函数统一为 `DrdPamAuth`/`drd_pam_auth_*`。
+  2. 会话层接口替换为 `drd_rdp_session_attach_pam_auth()` 与 `drd_rdp_session_get_pam_auth()`。
+  3. 文档与构建清单同步更新。
+- **影响**：调用方需要更新接口引用，模块语义更清晰。
+
 ## 2026-XX-XX：session_cb 迁移至 PostConnect
 - **目的**：确保会话回调在认证完成后触发，并解除对 `GSocketConnection` 的直接依赖。
 - **范围**：`src/transport/drd_rdp_listener.c`、`src/session/drd_rdp_session.[ch]`、`src/system/drd_system_daemon.c`、`src/system/drd_handover_daemon.c`、`doc/changelog.md`。
@@ -11,7 +20,7 @@
 
 ## 2026-01-16：单点登录认证载荷完善与会话清理优化
 - **目的**：完善单点登录认证载荷，缩短 PAM 句柄生命周期并清理敏感信息。
-- **范围**：`src/system/drd_system_daemon.c`、`src/security/drd_local_session.c`、`doc/architecture.md`、`doc/changelog.md`。
+- **范围**：`src/system/drd_system_daemon.c`、`src/security/drd_pam_auth.c`、`doc/architecture.md`、`doc/changelog.md`。
 - **主要改动**：
   1. auth_payload 使用本地会话 `username\\npassword` 组成，并在调用 LightDM 接口后清零。
   2. PAM 认证成功后立即 `pam_end`，不再长期持有句柄。
@@ -20,7 +29,7 @@
 
 ## 2026-01-16：本地会话资源释放优化
 - **目的**：完善 PAM 认证流程中的资源释放与敏感信息清理。
-- **范围**：`src/security/drd_local_session.c`、`src/transport/drd_rdp_listener.c`、`doc/architecture.md`、`doc/changelog.md`。
+- **范围**：`src/security/drd_pam_auth.c`、`src/transport/drd_rdp_listener.c`、`doc/architecture.md`、`doc/changelog.md`。
 - **主要改动**：
   1. 认证失败路径补齐清理，避免本地会话与凭据残留。
   2. 关闭本地会话时释放域名、PAM 服务名、远端地址等字段，补齐失败路径清理。
@@ -177,7 +186,7 @@
 - **主要改动**：
   1. `DrdCaptureManager`、`DrdX11Capture` 补充捕获启动/节流/唤醒管道等流程注释，标注 XDamage/XShm 与 GLib 线程/管道接口。
   2. `drd_application`、`drd_config`、`drd_server_runtime` 增加配置解析、TLS/NLA 校验、流启动与传输模式切换的中文说明，覆盖 g_option/GDBus/GLib 原子操作调用点。
-  3. `drd_local_session`、`drd_nla_sam`、`drd_tls_credentials` 记录 PAM/WinPR/FreeRDP 的交互接口，说明凭据加载、哈希生成与 PEM 注入 FreeRDP settings 的流程。
+  3. `drd_pam_auth`、`drd_nla_sam`、`drd_tls_credentials` 记录 PAM/WinPR/FreeRDP 的交互接口，说明凭据加载、哈希生成与 PEM 注入 FreeRDP settings 的流程。
   4. `drd_handover_daemon`、`drd_system_daemon` 描述 handover/system DBus 信号、routing token 分配、连接接管与 LightDM 远程 display 创建路径，明确 g_bus_own_name、DBus skeleton 导出与连接元数据的使用。
 - **影响**：提升跨模块代码可读性与外部库交互透明度，无行为改动，为后续维护和排障提供统一注释格式。
 
@@ -466,7 +475,7 @@
 - **主要改动**：
   1. 新增 `[auth] enable_nla` / `--enable-nla` / `--disable-nla`，默认开启 CredSSP，关闭时自动切换至 TLS+PAM；`[service] rdp_sso` 仅作为兼容别名。
   2. 删除 delegate 模式、FreeRDP `Logon` 回调及 `drd_rdp_session_handle_logon()`，监听器仅在 `enable_nla=false` 时读取 Client Info 凭据并调用 PAM。
-  3. 简化 RDP 监听/会话结构，去除委派状态与凭据擦除辅助函数，TLS 路径改为日志脱敏并直接挂接到 `drd_local_session`。
+  3. 简化 RDP 监听/会话结构，去除委派状态与凭据擦除辅助函数，TLS 路径改为日志脱敏并直接挂接到 `drd_pam_auth`。
   4. 示例配置与 service unit 统一描述 NLA on/off 两种模式，文档/README/计划文件同步更新。
 - **影响**：NLA 关闭时不再需要在配置里重复写用户名/密码，客户端凭据直接进入 PAM 并开启对应用户会话；delegate 场景彻底下线，部署和运维只需关注是否启用 NLA。
 
@@ -582,10 +591,10 @@
 - **影响**：服务端现在要求显式提供 NLA 凭据；凭据泄露范围限定在内存+一次性 SAM 文件，客户端需支持 NLA（CredSSP）才能接入。
 
 # 2025-11-16：CredSSP 凭据委派与 system 模式
-- **范围**：`core/drd_config.*`、`core/drd_application.c`、`transport/drd_rdp_listener.*`、`session/drd_rdp_session.*`、`security/drd_local_session.*`（新增）、`config/default.ini`、`config/deepin-remote-desktop.service`、`doc/architecture.md`、`.codex/plan/rdp-security-overview.md`。
+- **范围**：`core/drd_config.*`、`core/drd_application.c`、`transport/drd_rdp_listener.*`、`session/drd_rdp_session.*`、`security/drd_pam_auth.*`（新增）、`config/default.ini`、`config/deepin-remote-desktop.service`、`doc/architecture.md`、`.codex/plan/rdp-security-overview.md`。
 - **主要改动**：
   1. 配置层新增 `nla-mode`（static/delegate）、`--system` 开关与 PAM service 管理，delegate 模式自动启用 CredSSP 凭据委派且要求 root/systemd 托管。
-  2. `DrdRdpListener`/`DrdRdpSession` 挂载 FreeRDP `Logon` 回调，使用新模块 `drd_local_session` 与 PAM 建立 per-user 会话，失败时直接拒绝连接。
+  2. `DrdRdpListener`/`DrdRdpSession` 挂载 FreeRDP `Logon` 回调，使用新模块 `drd_pam_auth` 与 PAM 建立 per-user 会话，失败时直接拒绝连接。
   3. static 模式继续使用一次性 SAM 文件；delegate 模式关闭 `FreeRDP_NtlmSamFile`，在 `PostConnect` 后擦除凭据并在断开时调用 `pam_close_session`。
   4. CLI/INI 提供 `--nla-mode`、`--system` 以及 `--enable-rdp-sso`/`[service] rdp_sso`，配置日志输出 NLA 模式信息；`config/deepin-remote-desktop.service` 演示 systemd unit，在 system 模式下可选择保留 CredSSP（默认）或退回 TLS-only RDP 单点登录（直接读取 Client Info + PAM），且都跳过 X11 捕获/编码。
   5. 文档更新安全链路、模块分层与 system 模式说明，新增 CredSSP → PAM 序列图并记录计划完成情况。

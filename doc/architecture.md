@@ -91,7 +91,7 @@ flowchart LR
 - `core/drd_config`：解析 INI/CLI 配置，集中管理绑定地址、TLS 证书、捕获尺寸及 `enable_nla`/`pam_service` 等安全参数。
 - `security/drd_tls_credentials`：加载并缓存 TLS 证书/私钥，供运行时向 FreeRDP Settings 注入。
 - `security/drd_nla_sam`：基于用户名/密码生成临时 SAM 文件，写入 `FreeRDP_NtlmSamFile`，允许 CredSSP 在 NLA 期间读取 NT 哈希。
-- `security/drd_local_session`：在关闭 NLA（TLS+PAM 单点登录）时运行，使用 PAM 完成 `pam_authenticate/pam_acct_mgmt` 后立即 `pam_end`，不长期持有句柄，并负责凭据擦除与必要的会话清理兜底。
+- `security/drd_pam_auth`：在关闭 NLA（TLS+PAM 单点登录）时运行，使用 PAM 完成 `pam_authenticate/pam_acct_mgmt` 后立即 `pam_end`，不长期持有句柄，并负责凭据擦除与必要的会话清理兜底。
 
 ### 2. 采集层
 - `capture/drd_capture_manager`：启动/停止屏幕捕获，维护帧队列。
@@ -557,7 +557,7 @@ flowchart LR
 
 ## 安全链路（TLS + NLA）
 - `[auth] enable_nla=true`（默认）：沿用 SAM 文件策略，`DrdRdpListener` 读取 `[auth] username/password` 并调用 `drd_nla_sam_file_new()` 写入一次性数据库，FreeRDP 仅接受提前配置的帐密；CredSSP 完成后 SAM 立刻删除。
-- `[auth] enable_nla=false` + `--system`：禁用 NLA，监听器在 TLS-only 模式下读取 Client Info 的用户名/密码并交给 `security/drd_local_session` 走 PAM，完成“客户端凭据 → PAM 会话”的一次输入体验。
+- `[auth] enable_nla=false` + `--system`：禁用 NLA，监听器在 TLS-only 模式下读取 Client Info 的用户名/密码并交给 `security/drd_pam_auth` 走 PAM，完成“客户端凭据 → PAM 会话”的一次输入体验。
 - 无论哪种模式，都强制关闭纯 RDP Security（`RdpSecurity=FALSE`），要么使用 CredSSP（NLA），要么使用 TLS-only + PAM，避免降级导致凭据泄露。
 
 ```mermaid
@@ -593,7 +593,7 @@ sequenceDiagram
 
 ## System 模式与 systemd 托管
 - `--system` 仅允许 root 启动（建议通过 systemd 管理），在 `[auth] enable_nla=false` 时默认使用 `deepin-remote-desktop-system` PAM service，且不启动采集/编码线程。
-- PAM 会话由 `security/drd_local_session` 负责创建/关闭，服务退出或连接断开时调用 `pam_close_session + pam_setcred(PAM_DELETE_CRED)` 擦除凭据。
+- PAM 会话由 `security/drd_pam_auth` 负责创建/关闭，服务退出或连接断开时调用 `pam_close_session + pam_setcred(PAM_DELETE_CRED)` 擦除凭据。
 - 在该模式下不会初始化 X11 捕获/编码/输入线程，会话激活后仅保留 TLS/NLA 握手与 PAM 登录流程，不再尝试推流；当 `[auth] enable_nla=false`（或 CLI `--disable-nla`）时，监听器降级为 TLS-only RDP Security Layer，直接读取 Client Info 中的用户名/密码并交给 PAM，实现“无 NLA 的单点登录”。
 - `config/deepin-remote-desktop.service` 提供最小化的 unit 示例：`ExecStart=/usr/bin/deepin-remote-desktop --system --config /etc/deepin-remote-desktop.ini`，并启用 `NoNewPrivileges/ProtectSystem/PrivateTmp` 等加固选项。
 - 部署步骤：`cp config/deepin-remote-desktop.service /etc/systemd/system/` → 根据环境调整路径 → `systemctl enable --now deepin-remote-desktop`，systemd 负责重启和日志采集。

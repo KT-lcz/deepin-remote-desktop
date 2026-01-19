@@ -1,4 +1,4 @@
-#include "security/drd_local_session.h"
+#include "security/drd_pam_auth.h"
 
 #include <gio/gio.h>
 #include <security/pam_appl.h>
@@ -7,7 +7,7 @@
 
 #include "utils/drd_log.h"
 
-struct _DrdLocalSession
+struct _DrdPamAuth
 {
     pam_handle_t *handle;
     gchar *username;
@@ -29,7 +29,7 @@ typedef struct
  * 外部接口：PAM 回调协议，使用 calloc/strdup 分配内存，返回 PAM_SUCCESS/PAM_CONV_ERR；pam_message/pam_response 属于 PAM API。
  */
 static int
-drd_local_session_pam_conv(int num_msg, const struct pam_message **msg, struct pam_response **resp, void *user_data)
+drd_pam_auth_pam_conv(int num_msg, const struct pam_message **msg, struct pam_response **resp, void *user_data)
 {
     DrdPamConversationData *conv = (DrdPamConversationData *) user_data;
     struct pam_response *responses = calloc(num_msg, sizeof(struct pam_response));
@@ -81,7 +81,7 @@ drd_local_session_pam_conv(int num_msg, const struct pam_message **msg, struct p
  * 外部接口：C 库 strlen/memset，GLib g_free。
  */
 static void
-drd_local_session_scrub_string(gchar **value)
+drd_pam_auth_scrub_string(gchar **value)
 {
     if (value == NULL || *value == NULL)
     {
@@ -103,7 +103,7 @@ drd_local_session_scrub_string(gchar **value)
  * 外部接口：PAM API pam_close_session/pam_setcred/pam_end。
  */
 static void
-drd_local_session_cleanup_handle(pam_handle_t *handle)
+drd_pam_auth_cleanup_handle(pam_handle_t *handle)
 {
     if (handle == NULL)
     {
@@ -112,13 +112,13 @@ drd_local_session_cleanup_handle(pam_handle_t *handle)
     pam_end(handle, PAM_SUCCESS);
 }
 
-void drd_local_session_auth(DrdLocalSession *self, GError **error)
+void drd_pam_auth_auth(DrdPamAuth *self, GError **error)
 {
     g_return_if_fail(self != NULL);
 
     if (self->handle != NULL)
     {
-        drd_local_session_cleanup_handle(self->handle);
+        drd_pam_auth_cleanup_handle(self->handle);
         self->handle = NULL;
     }
 
@@ -126,7 +126,7 @@ void drd_local_session_auth(DrdLocalSession *self, GError **error)
             .password = self->password,
     };
     struct pam_conv conv = {
-            .conv = drd_local_session_pam_conv,
+            .conv = drd_pam_auth_pam_conv,
             .appdata_ptr = &conv_data,
     };
 
@@ -174,34 +174,34 @@ void drd_local_session_auth(DrdLocalSession *self, GError **error)
 }
 
 const gchar *
-drd_local_session_get_username(DrdLocalSession *self)
+drd_pam_auth_get_username(DrdPamAuth *self)
 {
     g_return_val_if_fail(self != NULL, NULL);
     return self->username;
 }
 
 const gchar *
-drd_local_session_get_password(DrdLocalSession *self)
+drd_pam_auth_get_password(DrdPamAuth *self)
 {
     g_return_val_if_fail(self != NULL, NULL);
     return self->password;
 }
 
 void
-drd_local_session_clear_password(DrdLocalSession *self)
+drd_pam_auth_clear_password(DrdPamAuth *self)
 {
     g_return_if_fail(self != NULL);
-    drd_local_session_scrub_string(&self->password);
+    drd_pam_auth_scrub_string(&self->password);
 }
 
 /*
  * 功能：使用 PAM 创建并打开本地会话。
- * 逻辑：构造 PAM 会话与自定义回调；设置远端主机与域字段；依次执行 pam_start、pam_authenticate、pam_acct_mgmt、pam_setcred、pam_open_session；任一步失败则写入错误并清理；成功返回封装的 DrdLocalSession。
+ * 逻辑：构造 PAM 会话与自定义回调；设置远端主机与域字段；依次执行 pam_start、pam_authenticate、pam_acct_mgmt、pam_setcred、pam_open_session；任一步失败则写入错误并清理；成功返回封装的 DrdPamAuth。
  * 参数：pam_service PAM 服务名；username 用户名；domain 域/主机信息；password 密码；remote_host 远端地址；error 错误输出。
  * 外部接口：PAM API pam_start/pam_set_item/pam_authenticate/pam_acct_mgmt/pam_setcred/pam_open_session/pam_end；日志 DRD_LOG_MESSAGE。
  */
-DrdLocalSession *
-drd_local_session_new(const gchar *pam_service,
+DrdPamAuth *
+drd_pam_auth_new(const gchar *pam_service,
                       const gchar *username,
                       const gchar *domain,
                       const gchar *password,
@@ -211,7 +211,7 @@ drd_local_session_new(const gchar *pam_service,
     g_return_val_if_fail(username != NULL && *username != '\0', NULL);
     g_return_val_if_fail(password != NULL && *password != '\0', NULL);
 
-    DrdLocalSession *session = g_new0(DrdLocalSession, 1);
+    DrdPamAuth *session = g_new0(DrdPamAuth, 1);
     session->username = g_strdup(username);
     session->domain = g_strdup(domain);
     session->pam_service = g_strdup(pam_service);
@@ -224,10 +224,10 @@ drd_local_session_new(const gchar *pam_service,
  * 功能：关闭并释放本地 PAM 会话。
  * 逻辑：若会话存在则清理 PAM 句柄、抹除用户名并释放结构体。
  * 参数：session 会话实例。
- * 外部接口：调用 drd_local_session_cleanup_handle、drd_local_session_scrub_string；GLib g_free。
+ * 外部接口：调用 drd_pam_auth_cleanup_handle、drd_pam_auth_scrub_string；GLib g_free。
  */
 void
-drd_local_session_close(DrdLocalSession *session)
+drd_pam_auth_close(DrdPamAuth *session)
 {
     if (session == NULL)
     {
@@ -236,12 +236,12 @@ drd_local_session_close(DrdLocalSession *session)
 
     if (session->handle != NULL)
     {
-        drd_local_session_cleanup_handle(session->handle);
+        drd_pam_auth_cleanup_handle(session->handle);
         session->handle = NULL;
     }
 
-    drd_local_session_scrub_string(&session->password);
-    drd_local_session_scrub_string(&session->username);
+    drd_pam_auth_scrub_string(&session->password);
+    drd_pam_auth_scrub_string(&session->username);
     g_clear_pointer(&session->domain, g_free);
     g_clear_pointer(&session->pam_service, g_free);
     g_clear_pointer(&session->remote_host, g_free);

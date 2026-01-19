@@ -41,7 +41,7 @@ core_sources = files(
   'transport/drd_rdp_listener.c',
   'transport/drd_rdp_routing_token.c',
   'security/drd_tls_credentials.c',
-  'security/drd_local_session.c',
+  'security/drd_pam_auth.c',
   'security/drd_nla_sam.c',
   'utils/drd_log.c',
   'utils/drd_system_info.c',

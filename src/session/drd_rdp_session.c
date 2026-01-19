@@ -20,7 +20,7 @@
 #include <winpr/wtypes.h>
 
 #include "core/drd_server_runtime.h"
-#include "security/drd_local_session.h"
+#include "security/drd_pam_auth.h"
 #include "session/drd_rdp_graphics_pipeline.h"
 #include "utils/drd_capture_metrics.h"
 #include "utils/drd_log.h"
@@ -55,7 +55,7 @@ struct _DrdRdpSession
     DrdRdpSessionClosedFunc closed_cb;
     gpointer closed_cb_data;
     gint closed_cb_invoked;
-    DrdLocalSession *local_session;
+    DrdPamAuth *pam_auth;
     gboolean passive_mode;
     DrdRdpSessionError last_error;
     guint64 frame_pull_errors;
@@ -108,7 +108,7 @@ static void drd_rdp_session_update_refresh_timer_state(DrdRdpSession *self);
  * 逻辑：停止事件线程与渲染管线，等待 VCM 线程结束；若 peer context 仍存在则交由 FreeRDP 管理；
  *       释放运行时与本地会话引用，交给父类做剩余清理。
  * 参数：object GObject 指针，预期为 DrdRdpSession。
- * 外部接口：调用 GLib g_thread_join 等线程接口，依赖 drd_local_session_close 关闭本地会话。
+ * 外部接口：调用 GLib g_thread_join 等线程接口，依赖 drd_pam_auth_close 关闭 PAM 会话。
  */
 static void drd_rdp_session_dispose(GObject *object)
 {
@@ -130,7 +130,7 @@ static void drd_rdp_session_dispose(GObject *object)
     }
 
     g_clear_object(&self->runtime);
-    g_clear_pointer(&self->local_session, drd_local_session_close);
+    g_clear_pointer(&self->pam_auth, drd_pam_auth_close);
 
     G_OBJECT_CLASS(drd_rdp_session_parent_class)->dispose(object);
 }
@@ -192,7 +192,7 @@ static void drd_rdp_session_init(DrdRdpSession *self)
     self->closed_cb = NULL;
     self->closed_cb_data = NULL;
     g_atomic_int_set(&self->closed_cb_invoked, 0);
-    self->local_session = NULL;
+    self->pam_auth = NULL;
     self->passive_mode = FALSE;
     self->last_error = DRD_RDP_SESSION_ERROR_NONE;
     self->frame_pull_errors = 0;
@@ -377,29 +377,29 @@ void drd_rdp_session_set_passive_mode(DrdRdpSession *self, gboolean passive)
 }
 
 /*
- * 功能：将 PAM/NLA 验证后得到的本地会话附加到 RDP 会话。
- * 逻辑：若 session 非空则替换旧的 local_session。
- * 参数：self 会话；session 本地会话对象。
- * 外部接口：调用 drd_local_session_close 关闭旧会话。
+ * 功能：将 PAM 认证对象附加到 RDP 会话。
+ * 逻辑：若 auth 非空则替换旧的 pam_auth。
+ * 参数：self 会话；auth PAM 认证对象。
+ * 外部接口：调用 drd_pam_auth_close 关闭旧会话。
  */
-void drd_rdp_session_attach_local_session(DrdRdpSession *self, DrdLocalSession *session)
+void drd_rdp_session_attach_pam_auth(DrdRdpSession *self, DrdPamAuth *auth)
 {
     g_return_if_fail(DRD_IS_RDP_SESSION(self));
 
-    if (session == NULL)
+    if (auth == NULL)
     {
         return;
     }
 
-    g_clear_pointer(&self->local_session, drd_local_session_close);
-    self->local_session = session;
+    g_clear_pointer(&self->pam_auth, drd_pam_auth_close);
+    self->pam_auth = auth;
 }
 
-DrdLocalSession *
-drd_rdp_session_get_local_session(DrdRdpSession *self)
+DrdPamAuth *
+drd_rdp_session_get_pam_auth(DrdRdpSession *self)
 {
     g_return_val_if_fail(DRD_IS_RDP_SESSION(self), NULL);
-    return self->local_session;
+    return self->pam_auth;
 }
 
 /*
@@ -961,7 +961,7 @@ void drd_rdp_session_disconnect(DrdRdpSession *self, const gchar *reason)
 
     drd_rdp_session_stop_event_thread(self);
     drd_rdp_session_disable_graphics_pipeline(self, NULL);
-    g_clear_pointer(&self->local_session, drd_local_session_close);
+    g_clear_pointer(&self->pam_auth, drd_pam_auth_close);
     g_atomic_int_set(&self->render_running, 0);
     g_atomic_int_set(&self->connection_alive, 0);
     if (self->peer != NULL && self->peer->Disconnect != NULL)

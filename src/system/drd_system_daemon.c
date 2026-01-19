@@ -14,7 +14,7 @@
 #include "session/drd_rdp_session.h"
 #include "drd-dbus-remote-desktop.h"
 #include "drd-dbus-lightdm.h"
-#include "security/drd_local_session.h"
+#include "security/drd_pam_auth.h"
 #include "utils/drd_log.h"
 
 typedef struct _DrdSystemDaemon DrdSystemDaemon;
@@ -695,9 +695,9 @@ drd_system_daemon_on_session_ready(DrdRdpListener *listener,
         g_autoptr(GUnixFDList) fd_list = NULL;
         g_autoptr(GUnixFDList) out_fd_list = NULL;
         g_autoptr(GError) fd_error = NULL;
-        DrdLocalSession *local_session = drd_rdp_session_get_local_session(session);
-        const gchar *auth_username = drd_local_session_get_username(local_session);
-        const gchar *auth_password = drd_local_session_get_password(local_session);
+        DrdPamAuth *pam_auth = drd_rdp_session_get_pam_auth(session);
+        const gchar *auth_username = drd_pam_auth_get_username(pam_auth);
+        const gchar *auth_password = drd_pam_auth_get_password(pam_auth);
         g_autofree gchar *auth_payload = NULL;
         gsize payload_len = 0;
         g_autofree gchar *shm_name =
@@ -705,9 +705,9 @@ drd_system_daemon_on_session_ready(DrdRdpListener *listener,
         int auth_fd = -1;
         gboolean single_login_ok = FALSE;
 
-        if (local_session == NULL)
+        if (pam_auth == NULL)
         {
-            DRD_LOG_WARNING("single logon auth payload missing local session");
+            DRD_LOG_WARNING("single logon auth payload missing PAM auth");
             drd_system_daemon_touch_client(client);
             return;
         }
@@ -781,9 +781,9 @@ single_login_cleanup:
         {
             memset(auth_payload, 0, payload_len);
         }
-        if (local_session != NULL)
+        if (pam_auth != NULL)
         {
-            drd_local_session_clear_password(local_session);
+            drd_pam_auth_clear_password(pam_auth);
         }
         if (auth_fd >= 0)
         {

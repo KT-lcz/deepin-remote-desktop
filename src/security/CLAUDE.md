@@ -51,14 +51,14 @@ system 端生成一次性 PEM 直接喂给 handover，避免使用共享文件�
   - `drd_nla_sam_file_new(username, password, error)` - 创建并返回文件路径
   - 文件使用 `g_mkstemp()` 生成，PostConnect 后立即删除
 
-### PAM 本地会话
+### PAM 认证
 
-- **头文件**: `drd_local_session.h`
+- **头文件**: `drd_pam_auth.h`
 - **功能**: TLS-only 模式下执行 PAM 认证与会话创建
 - **关键方法**:
-  - `drd_local_session_authenticate(username, password, service, error)` - 认证
-  - `drd_local_session_open_error(session, error)` - 打开会话
-  - `drd_local_session_close(session)` - 关闭会话并擦除凭据
+  - `drd_pam_auth_new(service, username, domain, password, remote_host)` - 创建 PAM 认证对象
+  - `drd_pam_auth_auth(auth, error)` - 执行认证与会话打开
+  - `drd_pam_auth_close(auth)` - 关闭会话并擦除凭据
 
 ## 关键依赖与配置
 
@@ -98,10 +98,10 @@ DrdTlsCredentials
 └── key_pem: string
 ```
 
-### DrdLocalSession 结构
+### DrdPamAuth 结构
 
 ```
-DrdLocalSession
+DrdPamAuth
 ├── username: string
 ├── service: string
 ├── pam_handle: pam_handle_t*
@@ -131,7 +131,7 @@ DrdLocalSession
 1. enable_nla=false
 2. 监听器设置 NlaSecurity = FALSE
 3. 客户端发送 Client Info（含用户名/密码）
-4. DrdLocalSession:
+4. DrdPamAuth:
    - pam_start(auth_service, username)
    - pam_authenticate(password)
    - pam_acct_mgmt()
@@ -205,8 +205,8 @@ src/security/
 ├── drd_tls_credentials.c   # TLS 凭据实现
 ├── drd_nla_sam.h           # NLA SAM 接口
 ├── drd_nla_sam.c           # NLA SAM 实现
-├── drd_local_session.h     # PAM 会话接口
-└── drd_local_session.c     # PAM 会话实现
+├── drd_pam_auth.h     # PAM 会话接口
+└── drd_pam_auth.c     # PAM 会话实现
 ```
 
 ## 变更记录 (Changelog)

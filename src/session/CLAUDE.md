@@ -92,7 +92,7 @@ DrdRdpSession
 ├── peer: freerdp_peer*
 ├── runtime: DrdServerRuntime*
 ├── graphics_pipeline: DrdRdpGraphicsPipeline*
-├── local_session: DrdLocalSession*
+├── pam_auth: DrdPamAuth*
 ├── vcm: HANDLE
 ├── closed_callback: DrdRdpSessionClosedFunc
 ├── passve_mode: boolean

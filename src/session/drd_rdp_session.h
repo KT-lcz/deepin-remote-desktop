@@ -7,7 +7,7 @@
 #include <glib-object.h>
 
 typedef struct _DrdServerRuntime DrdServerRuntime;
-typedef struct _DrdLocalSession DrdLocalSession;
+typedef struct _DrdPamAuth DrdPamAuth;
 
 
 G_BEGIN_DECLS
@@ -41,8 +41,8 @@ void drd_rdp_session_set_closed_callback(DrdRdpSession *self,
                                          DrdRdpSessionClosedFunc callback,
                                          gpointer user_data);
 void drd_rdp_session_set_passive_mode(DrdRdpSession *self, gboolean passive);
-void drd_rdp_session_attach_local_session(DrdRdpSession *self, DrdLocalSession *session);
-DrdLocalSession *drd_rdp_session_get_local_session(DrdRdpSession *self);
+void drd_rdp_session_attach_pam_auth(DrdRdpSession *self, DrdPamAuth *auth);
+DrdPamAuth *drd_rdp_session_get_pam_auth(DrdRdpSession *self);
 BOOL drd_rdp_session_post_connect(DrdRdpSession *self);
 BOOL drd_rdp_session_activate(DrdRdpSession *self);
 BOOL drd_rdp_session_pump(DrdRdpSession *self);

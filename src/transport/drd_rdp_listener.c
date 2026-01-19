@@ -21,7 +21,7 @@
 #include "input/drd_input_dispatcher.h"
 #include "session/drd_rdp_session.h"
 #include "security/drd_tls_credentials.h"
-#include "security/drd_local_session.h"
+#include "security/drd_pam_auth.h"
 #include "security/drd_nla_sam.h"
 #include "utils/drd_log.h"
 #include "utils/drd_system_info.h"
@@ -1678,10 +1678,10 @@ drd_rdp_listener_adopt_connection(DrdRdpListener *self,
 
 /*
  * 功能：在 TLS-only 模式下使用 PAM 验证客户端凭据并生成本地会话。
- * 逻辑：读取 FreeRDP settings 中的用户名/密码/域，调用 drd_local_session_new 进行 PAM 认证，
+ * 逻辑：读取 FreeRDP settings 中的用户名/密码/域，调用 drd_pam_auth_new 进行 PAM 认证，
  *       成功后附加到会话并清空密码；失败时记录警告。
  * 参数：ctx peer 上下文；client FreeRDP peer。
- * 外部接口：drd_local_session_new 进行 PAM/NSS 登录；freerdp_settings_get_string 读取凭据。
+ * 外部接口：drd_pam_auth_new 进行 PAM/NSS 登录；freerdp_settings_get_string 读取凭据。
  */
 static gboolean
 drd_rdp_listener_authenticate_tls_login(DrdRdpPeerContext *ctx, freerdp_peer *client)
@@ -1703,30 +1703,30 @@ drd_rdp_listener_authenticate_tls_login(DrdRdpPeerContext *ctx, freerdp_peer *cl
     }
 
     g_autoptr(GError) auth_error = NULL;
-    DrdLocalSession *local_session =
-            drd_local_session_new(ctx->listener->pam_service,
-                                  username,
-                                  domain,
-                                  password,
-                                  client->hostname);
+    DrdPamAuth *pam_auth =
+            drd_pam_auth_new(ctx->listener->pam_service,
+                             username,
+                             domain,
+                             password,
+                             client->hostname);
 
-    if (local_session == NULL)
+    if (pam_auth == NULL)
     {
         DRD_LOG_WARNING("%s Miss arg", client->hostname);
         return FALSE;
     }
-    drd_local_session_auth(local_session, &auth_error);
+    drd_pam_auth_auth(pam_auth, &auth_error);
     if (auth_error != NULL)
     {
         DRD_LOG_WARNING("Peer %s TLS/PAM single sign-on failure for %s: %s",
                         client->hostname,
                         username,
                         auth_error->message);
-        drd_local_session_close(local_session);
+        drd_pam_auth_close(pam_auth);
         return FALSE;
     }
     freerdp_settings_set_string(settings, FreeRDP_Password, "");
-    drd_rdp_session_attach_local_session(ctx->session, local_session);
+    drd_rdp_session_attach_pam_auth(ctx->session, pam_auth);
     DRD_LOG_MESSAGE("Peer %s TLS/PAM single sign-on accepted for %s", client->hostname, username);
     return TRUE;
 }
