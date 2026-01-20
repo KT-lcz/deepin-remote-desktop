@@ -17,9 +17,9 @@ typedef gboolean (*DrdRdpListenerDelegateFunc)(DrdRdpListener *listener,
                                                GSocketConnection *connection,
                                                gpointer user_data,
                                                GError **error);
-typedef void (*DrdRdpListenerSessionFunc)(DrdRdpListener *listener,
-                                          DrdRdpSession *session,
-                                          gpointer user_data);
+typedef gboolean (*DrdRdpListenerSessionFunc)(DrdRdpListener *listener,
+                                              DrdRdpSession *session,
+                                              gpointer user_data);
 
 DrdRdpListener *drd_rdp_listener_new(const gchar *bind_address,
                                      guint16 port,

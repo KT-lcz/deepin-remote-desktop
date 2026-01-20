@@ -602,7 +602,11 @@ drd_peer_post_connect(freerdp_peer *client)
 
     if (ctx->listener != NULL && ctx->listener->session_cb != NULL)
     {
-        ctx->listener->session_cb(ctx->listener, ctx->session, ctx->listener->session_cb_data);
+        if (!ctx->listener->session_cb(ctx->listener, ctx->session, ctx->listener->session_cb_data))
+        {
+            drd_rdp_session_disconnect(ctx->session, "session-callback-failed");
+            return FALSE;
+        }
     }
     return result;
 }

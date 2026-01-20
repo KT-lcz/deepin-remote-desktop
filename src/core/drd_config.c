@@ -23,6 +23,7 @@ struct _DrdConfig
     DrdEncodingOptions encoding;
     guint capture_target_fps;
     guint capture_stats_interval_sec;
+    gboolean single_login_logout_local_session;
 };
 
 G_DEFINE_TYPE(DrdConfig, drd_config, G_TYPE_OBJECT)
@@ -104,6 +105,7 @@ drd_config_init(DrdConfig *self)
     self->pam_service = NULL;
     self->capture_target_fps = 60;
     self->capture_stats_interval_sec = 5;
+    self->single_login_logout_local_session = FALSE;
     drd_config_refresh_pam_service(self);
 }
 
@@ -634,6 +636,18 @@ drd_config_load_from_key_file(DrdConfig *self, GKeyFile *keyfile, GError **error
         self->nla_enabled = !rdp_sso;
     }
 
+    if (g_key_file_has_key(keyfile, "service", "single_login_logout_local_session", NULL))
+    {
+        g_autofree gchar *logout_value =
+                g_key_file_get_string(keyfile, "service", "single_login_logout_local_session", NULL);
+        gboolean logout_local_session = FALSE;
+        if (!drd_config_parse_bool(logout_value, &logout_local_session, error))
+        {
+            return FALSE;
+        }
+        self->single_login_logout_local_session = logout_local_session;
+    }
+
     return TRUE;
 }
 
@@ -1065,4 +1079,17 @@ drd_config_get_encoding_options(DrdConfig *self)
 {
     g_return_val_if_fail(DRD_IS_CONFIG(self), NULL);
     return &self->encoding;
+}
+
+/*
+ * 功能：判断单点登录前是否需要注销本地图形会话。
+ * 逻辑：类型检查后返回开关值。
+ * 参数：self 配置实例。
+ * 外部接口：无额外外部库。
+ */
+gboolean
+drd_config_should_logout_local_session_on_single_login(DrdConfig *self)
+{
+    g_return_val_if_fail(DRD_IS_CONFIG(self), FALSE);
+    return self->single_login_logout_local_session;
 }

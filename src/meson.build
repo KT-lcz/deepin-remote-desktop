@@ -57,8 +57,13 @@ dbus_gen_lightdm = gnome.gdbus_codegen('drd-dbus-lightdm',
                                           'org.deepin.DisplayManager.xml',
                                           interface_prefix: 'org.deepin.DisplayManager.',
                                           namespace: 'DrdDBusLightdm')
+dbus_gen_logind = gnome.gdbus_codegen('drd-dbus-logind',
+                                     'org.freedesktop.login1.xml',
+                                     interface_prefix: 'org.freedesktop.login1.',
+                                     namespace: 'DrdDBusLogind')
 core_sources += dbus_gen_remote_desktop
 core_sources += dbus_gen_lightdm
+core_sources += dbus_gen_logind
 
 exe_sources = []
 exe_sources += media_sources

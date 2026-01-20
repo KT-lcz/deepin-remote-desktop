@@ -27,9 +27,9 @@ static void drd_handover_daemon_on_take_client_ready(DrdDBusRemoteDesktopRdpHand
 static void drd_handover_daemon_on_restart_handover(DrdDBusRemoteDesktopRdpHandover *interface,
                                                     gpointer user_data);
 
-static void drd_handover_daemon_on_session_ready(DrdRdpListener *listener,
-                                                 DrdRdpSession *session,
-                                                 gpointer user_data);
+static gboolean drd_handover_daemon_on_session_ready(DrdRdpListener *listener,
+                                                     DrdRdpSession *session,
+                                                     gpointer user_data);
 
 static gboolean drd_handover_daemon_redirect_active_client(DrdHandoverDaemon *self,
                                                            const gchar *routing_token,
@@ -458,7 +458,7 @@ drd_handover_daemon_on_restart_handover(DrdDBusRemoteDesktopRdpHandover *interfa
  * 参数：listener 监听器；session 新会话；user_data handover 守护实例。
  * 外部接口：GLib g_clear_object/g_object_ref；日志 DRD_LOG_MESSAGE。
  */
-static void
+static gboolean
 drd_handover_daemon_on_session_ready(DrdRdpListener *listener,
                                      DrdRdpSession *session,
                                      gpointer user_data)
@@ -467,7 +467,7 @@ drd_handover_daemon_on_session_ready(DrdRdpListener *listener,
     DrdHandoverDaemon *self = DRD_HANDOVER_DAEMON(user_data);
     if (!DRD_IS_HANDOVER_DAEMON(self))
     {
-        return;
+        return FALSE;
     }
     DRD_LOG_MESSAGE("handover on session ready");
     g_clear_object(&self->active_session);
@@ -475,6 +475,7 @@ drd_handover_daemon_on_session_ready(DrdRdpListener *listener,
     {
         self->active_session = g_object_ref(session);
     }
+    return TRUE;
 }
 
 /*

@@ -155,7 +155,7 @@ sequenceDiagram
 ### 6. 运行模式与 System/Handover
 - **`DrdRuntimeMode` 三态**：
   1. `user`：默认模式，单进程负责采集/编码/监听，直接通过 `DrdRdpListener` 服务客户端。
-  2. `system`：仅在 root/systemd 下使用，`DrdApplication` 跳过采集/编码，实例化 `DrdSystemDaemon`。system daemon 在 GLib `incoming` 勾子中先透过 `DrdRoutingTokenInfo` 窥探 `Cookie: msts=<routing-token>`，把 socket + token 包装成 `DrdRemoteClient`，注册成 `org.deepin.RemoteDesktop.Rdp.Handover` skeleton 并挂到 `/org/deepin/RemoteDesktop/Rdp/Handovers/<session>`；同时在 system bus 导出 `Rdp.Dispatcher`，供 handover 进程通过 `RequestHandover` 领取待处理对象。
+  2. `system`：仅在 root/systemd 下使用，`DrdApplication` 跳过采集/编码，实例化 `DrdSystemDaemon`。system daemon 在 GLib `incoming` 勾子中先透过 `DrdRoutingTokenInfo` 窥探 `Cookie: msts=<routing-token>`，把 socket + token 包装成 `DrdRemoteClient`，注册成 `org.deepin.RemoteDesktop.Rdp.Handover` skeleton 并挂到 `/org/deepin/RemoteDesktop/Rdp/Handovers/<session>`；同时在 system bus 导出 `Rdp.Dispatcher`，供 handover 进程通过 `RequestHandover` 领取待处理对象。单点登录前会通过 logind DBus 代理枚举本地图形会话并按需终止。
   3. `handover`：登陆会话进程，新建 `DrdHandoverDaemon`，先向 dispatcher 请求 handover 对象，再调用 `StartHandover` 获取一次性用户名/密码和 system 端 TLS 证书，监听 `RedirectClient`/`TakeClientReady`/`RestartHandover` 信号，并通过 `TakeClient` 拿到已经握手的 fd，交由本地 `DrdRdpListener` 继续进行 CredSSP / 会话激活。当前实现专注于 socket 与 DBus 框架，PAM 单点登录仍保持原状——lightdm/desktop 侧 SSO 能力就绪后，再在 `GetSystemCredentials`/handover proxy 里注入真实凭据。
 - **TLS 继承与缓存**：handover 端 `StartHandover` 返回的 PEM 证书/私钥会立即喂给 `DrdTlsCredentials` 的内存 reload 逻辑，后者同时缓存 PEM 数据，`drd_rdp_session_send_server_redirection()` 在递交下一段 handover 时读取到的始终是当前会话使用的同一份证书，确保客户端不会在 system→handover 切换时收到不同的 TLS 身份。
   - system 端也只提供 PEM 文本给 `DrdTlsCredentials`，在每次新的 FreeRDP 会话初始化时重新调用 `freerdp_certificate_new_from_pem()`/`freerdp_key_new_from_pem()` 并通过 `freerdp_settings_set_pointer_len()` 注入；这样 FreeRDP 在销毁旧的 `rdpSettings` 时释放的是该次握手私有的副本，避免重复使用已经被 `EVP_PKEY_free()` 清理的指针，system listener 可安全连续处理多次连接。
@@ -717,6 +717,7 @@ stateDiagram-v2
 
 ## 分辨率决策策略
 - **system 模式**：RDP 监听器在能力协商后读取客户端 DesktopWidth/Height，并将 runtime 编码参数更新为客户端分辨率；LightDM remote display 创建时同样使用客户端分辨率，若客户端未提供则回退到配置文件值。
+- **system 单点登录清理**：当 `[service] single_login_logout_local_session=true` 时，system daemon 会在单点登录创建会话前通过 logind 注销同名用户本地图形会话，避免本地与远程会话并存。
 - **user/handover 模式**：启动 runtime 时查询当前显示器实际分辨率作为 capture/encoding 的目标分辨率，确保编码尺寸与本地桌面一致。
 
 ## 短期待优化（已落地功能）

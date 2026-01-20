@@ -1,5 +1,14 @@
 # 变更记录
 
+## 2026-XX-XX：单点登录前注销本地图形会话
+- **目的**：在 system 单点登录场景下可选地清理用户已有的本地图形 session，避免本地与远程会话并存。
+- **范围**：`src/system/drd_system_daemon.c`、`src/core/drd_config.*`、`data/config.d/default-system.ini`、`data/config.d/full-example.ini`、`doc/architecture.md`、`doc/changelog.md`、`.codex/plan/system-single-login-local-session-logout.md`、`doc/task-system-single-login-local-session-logout.md`。
+- **主要改动**：
+  1. `DrdConfig` 新增 `single_login_logout_local_session` 开关，默认关闭并支持配置读取。
+  2. system daemon 在单点登录前通过 logind 枚举并终止同名用户的本地图形会话。
+  3. system 配置与完整示例补充该开关说明，架构与变更文档同步。
+- **影响**：开启开关后，单点登录会话建立前会主动注销本地图形会话；默认配置保持不启用。
+
 ## 2026-XX-XX：PAM 认证模块重命名
 - **目的**：将 PAM 认证模块从 `drd_local_session` 更名为 `drd_pam_auth`，明确语义并统一命名风格。
 - **范围**：`src/security/drd_pam_auth.[ch]`、`src/session/drd_rdp_session.[ch]`、`src/transport/drd_rdp_listener.c`、`src/system/drd_system_daemon.c`、`doc/architecture.md`、`doc/uml/key-data-structures.puml`、`doc/changelog.md`。

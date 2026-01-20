@@ -51,5 +51,6 @@ guint drd_config_get_capture_height(DrdConfig *self);
 guint drd_config_get_capture_target_fps(DrdConfig *self);
 guint drd_config_get_capture_stats_interval_sec(DrdConfig *self);
 const DrdEncodingOptions *drd_config_get_encoding_options(DrdConfig *self);
+gboolean drd_config_should_logout_local_session_on_single_login(DrdConfig *self);
 
 G_END_DECLS

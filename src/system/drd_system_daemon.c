@@ -9,12 +9,13 @@
 #include <unistd.h>
 
 #include "core/drd_dbus_constants.h"
+#include "drd-dbus-lightdm.h"
+#include "drd-dbus-logind.h"
+#include "drd-dbus-remote-desktop.h"
+#include "security/drd_pam_auth.h"
+#include "session/drd_rdp_session.h"
 #include "transport/drd_rdp_listener.h"
 #include "transport/drd_rdp_routing_token.h"
-#include "session/drd_rdp_session.h"
-#include "drd-dbus-remote-desktop.h"
-#include "drd-dbus-lightdm.h"
-#include "security/drd_pam_auth.h"
 #include "utils/drd_log.h"
 
 typedef struct _DrdSystemDaemon DrdSystemDaemon;
@@ -79,6 +80,184 @@ get_id_from_routing_token(guint32 routing_token)
     g_return_val_if_fail(routing_token != 0, NULL);
 
     return g_strdup_printf("%s/%u", DRD_REMOTE_DESKTOP_HANDOVERS_OBJECT_PATH, routing_token);
+}
+
+static gboolean
+drd_system_daemon_is_graphical_session_type(const gchar *type)
+{
+    return g_strcmp0(type, "x11") == 0 ||
+           g_strcmp0(type, "wayland") == 0 ||
+           g_strcmp0(type, "mir") == 0;
+}
+
+static gboolean
+drd_system_daemon_collect_local_graphical_sessions(DrdSystemDaemon *self,
+                                                   const gchar *username,
+                                                   DrdDBusLogindManager **manager_out,
+                                                   GPtrArray **sessions_out,
+                                                   GError **error)
+{
+    /*
+     * 功能：收集指定用户的本地图形会话 ID 列表。
+     * 逻辑：通过 logind 列举会话，筛选 Remote=false 且 Type=x11/wayland/mir 的本地会话，返回会话 ID 列表。
+     * 参数：self system 守护实例；username 目标用户名；manager_out 输出 logind manager；
+     *       sessions_out 输出会话 ID 列表；error 错误输出。
+     * 外部接口：org.freedesktop.login1.Manager/Session D-Bus 调用。
+     */
+    g_return_val_if_fail(DRD_IS_SYSTEM_DAEMON(self), FALSE);
+    g_return_val_if_fail(username != NULL && *username != '\0', FALSE);
+    g_return_val_if_fail(sessions_out != NULL, FALSE);
+
+    g_autoptr(GError) local_error = NULL;
+    g_autoptr(DrdDBusLogindManager) manager =
+            drd_dbus_logind_manager_proxy_new_for_bus_sync(
+                    G_BUS_TYPE_SYSTEM,
+                    G_DBUS_PROXY_FLAGS_DO_NOT_AUTO_START,
+                    DRD_LOGIND_BUS_NAME,
+                    DRD_LOGIND_MANAGER_OBJECT_PATH,
+                    NULL,
+                    &local_error);
+    if (manager == NULL)
+    {
+        if (error != NULL)
+        {
+            g_propagate_error(error, g_steal_pointer(&local_error));
+        }
+        else
+        {
+            g_clear_error(&local_error);
+        }
+        return FALSE;
+    }
+
+    g_autoptr(GVariant) sessions = NULL;
+    g_clear_error(&local_error);
+    if (!drd_dbus_logind_manager_call_list_sessions_sync(manager,
+                                                         &sessions,
+                                                         NULL,
+                                                         &local_error))
+    {
+        if (error != NULL)
+        {
+            g_propagate_error(error, g_steal_pointer(&local_error));
+        }
+        else
+        {
+            g_clear_error(&local_error);
+        }
+        return FALSE;
+    }
+    GVariantIter iter;
+    g_variant_iter_init(&iter, sessions);
+
+    g_autoptr(GPtrArray) session_ids = g_ptr_array_new_with_free_func(g_free);
+    const gchar *session_id = NULL;
+    const gchar *user = NULL;
+    const gchar *seat = NULL;
+    const gchar *path = NULL;
+    guint32 uid = 0;
+
+    while (g_variant_iter_loop(&iter, "(susso)", &session_id, &uid, &user, &seat, &path))
+    {
+        (void) uid;
+        (void) seat;
+
+        if (g_strcmp0(user, username) != 0)
+        {
+            continue;
+        }
+
+        g_clear_error(&local_error);
+        g_autoptr(DrdDBusLogindSession) session_proxy =
+                drd_dbus_logind_session_proxy_new_for_bus_sync(
+                        G_BUS_TYPE_SYSTEM,
+                        G_DBUS_PROXY_FLAGS_DO_NOT_AUTO_START,
+                        DRD_LOGIND_BUS_NAME,
+                        path,
+                        NULL,
+                        &local_error);
+        if (session_proxy == NULL)
+        {
+            if (error != NULL)
+            {
+                g_propagate_error(error, g_steal_pointer(&local_error));
+            }
+            else
+            {
+                g_clear_error(&local_error);
+            }
+            return FALSE;
+        }
+        const gchar *type = drd_dbus_logind_session_get_type_(session_proxy);
+        if (type == NULL)
+        {
+            if (error != NULL)
+            {
+                g_set_error(error,
+                            G_IO_ERROR,
+                            G_IO_ERROR_FAILED,
+                            "Session %s type unavailable",
+                            session_id);
+            }
+            return FALSE;
+        }
+        DRD_LOG_MESSAGE("session id is %s",session_id);
+        gboolean remote = drd_dbus_logind_session_get_remote(session_proxy);
+        if (remote || !drd_system_daemon_is_graphical_session_type(type))
+        {
+            continue;
+        }
+
+        g_ptr_array_add(session_ids, g_strdup(session_id));
+    }
+
+    if (manager_out != NULL)
+    {
+        *manager_out = g_object_ref(manager);
+    }
+    *sessions_out = g_steal_pointer(&session_ids);
+    return TRUE;
+}
+
+static gboolean
+drd_system_daemon_terminate_local_graphical_sessions(DrdDBusLogindManager *manager,
+                                                     GPtrArray *session_ids,
+                                                     const gchar *username,
+                                                     GError **error)
+{
+    /*
+     * 功能：终止指定会话 ID 列表中的本地图形会话。
+     * 逻辑：遍历列表依次调用 logind 终止会话，失败时返回错误。
+     * 参数：manager logind 管理器；session_ids 会话 ID 列表；username 目标用户名；error 错误输出。
+     * 外部接口：org.freedesktop.login1.Manager/TerminateSession D-Bus 调用。
+     */
+    g_return_val_if_fail(manager != NULL, FALSE);
+    g_return_val_if_fail(session_ids != NULL, FALSE);
+    g_return_val_if_fail(username != NULL && *username != '\0', FALSE);
+
+    for (guint i = 0; i < session_ids->len; i++)
+    {
+        const gchar *session_id = g_ptr_array_index(session_ids, i);
+        g_autoptr(GError) local_error = NULL;
+        if (!drd_dbus_logind_manager_call_terminate_session_sync(manager,
+                                                                 session_id,
+                                                                 NULL,
+                                                                 &local_error))
+        {
+            if (error != NULL)
+            {
+                g_propagate_error(error, g_steal_pointer(&local_error));
+            }
+            else
+            {
+                g_clear_error(&local_error);
+            }
+            return FALSE;
+        }
+        DRD_LOG_MESSAGE("terminated local session %s for user %s", session_id, username);
+    }
+
+    return TRUE;
 }
 
 /*
@@ -178,9 +357,9 @@ static gboolean drd_system_daemon_delegate(DrdRdpListener *listener,
                                            gpointer user_data,
                                            GError **error);
 
-static void drd_system_daemon_on_session_ready(DrdRdpListener *listener,
-                                               DrdRdpSession *session,
-                                               gpointer user_data);
+static gboolean drd_system_daemon_on_session_ready(DrdRdpListener *listener,
+                                                   DrdRdpSession *session,
+                                                   gpointer user_data);
 
 static DrdRemoteClient *drd_system_daemon_find_client_by_token(DrdSystemDaemon *self,
                                                                const gchar *routing_token);
@@ -613,7 +792,7 @@ drd_system_daemon_delegate(DrdRdpListener *listener,
  *           LightDM proxy drd_dbus_lightdm_remote_display_factory_proxy_new_for_bus_sync 与
  *           drd_dbus_lightdm_remote_display_factory_call_create_remote_greeter_display_sync。
  */
-static void
+static gboolean
 drd_system_daemon_on_session_ready(DrdRdpListener *listener,
                                    DrdRdpSession *session,
                                    gpointer user_data)
@@ -623,13 +802,13 @@ drd_system_daemon_on_session_ready(DrdRdpListener *listener,
     DrdSystemDaemon *self = DRD_SYSTEM_DAEMON(user_data);
     if (!DRD_IS_SYSTEM_DAEMON(self))
     {
-        return;
+        return FALSE;
     }
 
     DrdRemoteClient *client = drd_rdp_session_get_system_client(session);
     if (client == NULL)
     {
-        return;
+        return FALSE;
     }
 
     if (client->session != NULL)
@@ -649,7 +828,7 @@ drd_system_daemon_on_session_ready(DrdRdpListener *listener,
         DRD_LOG_WARNING("Client %s missing remote id, skip remote display",
                         client->id != NULL ? client->id : "unknown");
         drd_system_daemon_touch_client(client);
-        return;
+        return FALSE;
     }
     if (!self->remote_display_factory)
     {
@@ -671,7 +850,7 @@ drd_system_daemon_on_session_ready(DrdRdpListener *listener,
     if (encoding_opts == NULL)
     {
         DRD_LOG_WARNING("Encoding options unavailable for system session resolution");
-        return;
+        return FALSE;
     }
 
     guint32 target_width = encoding_opts->width;
@@ -709,14 +888,60 @@ drd_system_daemon_on_session_ready(DrdRdpListener *listener,
         {
             DRD_LOG_WARNING("single logon auth payload missing PAM auth");
             drd_system_daemon_touch_client(client);
-            return;
+            return FALSE;
         }
         if (auth_username == NULL || *auth_username == '\0' ||
             auth_password == NULL || *auth_password == '\0')
         {
             DRD_LOG_WARNING("single logon auth payload missing username/password");
             drd_system_daemon_touch_client(client);
-            return;
+            return FALSE;
+        }
+
+        g_autoptr(DrdDBusLogindManager) logind_manager = NULL;
+        g_autoptr(GPtrArray) local_sessions = NULL;
+        g_autoptr(GError) local_session_error = NULL;
+        if (!drd_system_daemon_collect_local_graphical_sessions(self,
+                                                                auth_username,
+                                                                &logind_manager,
+                                                                &local_sessions,
+                                                                &local_session_error))
+        {
+            DRD_LOG_WARNING("collect local sessions failed for user %s: %s",
+                            auth_username,
+                            local_session_error != NULL ? local_session_error->message : "unknown");
+            drd_system_daemon_touch_client(client);
+            return FALSE;
+        }
+
+        if (local_sessions->len > 0 &&
+            !drd_config_should_logout_local_session_on_single_login(self->config))
+        {
+            DRD_LOG_WARNING("local graphical session exists for user %s, single login rejected",
+                            auth_username);
+            drd_system_daemon_touch_client(client);
+            return FALSE;
+        }
+
+        if (local_sessions->len > 0)
+        {
+            DRD_LOG_MESSAGE("need terminate local graphics session");
+            g_clear_error(&local_session_error);
+            if (!drd_system_daemon_terminate_local_graphical_sessions(logind_manager,
+                                                                      local_sessions,
+                                                                      auth_username,
+                                                                      &local_session_error))
+            {
+                DRD_LOG_WARNING("terminate local session failed for user %s: %s",
+                                auth_username,
+                                local_session_error != NULL ? local_session_error->message : "unknown");
+                drd_system_daemon_touch_client(client);
+                return FALSE;
+            }
+        }
+        else
+        {
+            DRD_LOG_MESSAGE("no local graphical session for user %s", auth_username);
         }
 
         auth_payload = g_strdup_printf("%s\n%s", auth_username, auth_password);
@@ -792,7 +1017,7 @@ single_login_cleanup:
         if (!single_login_ok)
         {
             drd_system_daemon_touch_client(client);
-            return;
+            return FALSE;
         }
     }else
     {
@@ -808,13 +1033,14 @@ single_login_cleanup:
         {
             DRD_LOG_WARNING("create remote display failed %s", error->message);
             drd_system_daemon_touch_client(client);
-            return;
+            return FALSE;
         }
     }
 
     DRD_LOG_MESSAGE("session_path=%s", session_path);
 
     drd_system_daemon_touch_client(client);
+    return TRUE;
 }
 
 static gboolean

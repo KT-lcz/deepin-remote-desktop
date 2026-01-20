@@ -56,7 +56,7 @@ typedef gboolean (*DrdRdpListenerDelegateFunc)(
 ### 会话回调
 
 ```c
-typedef void (*DrdRdpListenerSessionFunc)(
+typedef gboolean (*DrdRdpListenerSessionFunc)(
     DrdRdpListener *listener,
     DrdRdpSession *session,
     gpointer user_data
