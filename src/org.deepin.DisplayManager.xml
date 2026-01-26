@@ -4,18 +4,18 @@
     <property name="user_name" type="s" access="read"/>
     <property name="address" type="s" access="read"/>
     <property name="session_id" type="u" access="read"/>
-    <property name="client_id" type="u" access="read"/>
+    <property name="client_id" type="s" access="read"/>
   </interface>
   <interface name="org.deepin.DisplayManager.RemoteDisplayFactory">
     <method name="CreateRemoteGreeterDisplay">
-      <arg name="client_id" direction="in" type="u"/>
+      <arg name="client_id" direction="in" type="s"/>
       <arg name="width" direction="in" type="u"/>
       <arg name="height" direction="in" type="u"/>
       <arg name="address" direction="in" type="s"/>
       <arg name="session_path" direction="out" type="o"/>
     </method>
     <method name="CreateSingleLogonSession">
-      <arg name="client_id" direction="in" type="u"/>
+      <arg name="client_id" direction="in" type="s"/>
       <arg name="width" direction="in" type="u"/>
       <arg name="height" direction="in" type="u"/>
       <annotation name="org.gtk.GDBus.C.UnixFD" value="true" />

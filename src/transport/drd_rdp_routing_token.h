@@ -9,7 +9,7 @@ G_BEGIN_DECLS
 typedef struct
 {
     gboolean requested_rdstls;
-    gchar *routing_token;
+    gchar *routing_token; // handover dbus path后缀的数字
 } DrdRoutingTokenInfo;
 
 DrdRoutingTokenInfo *drd_routing_token_info_new(void);

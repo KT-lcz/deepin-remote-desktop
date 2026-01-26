@@ -189,6 +189,7 @@ drd_server_runtime_stop(DrdServerRuntime *self)
 
     if (!self->stream_running)
     {
+        DRD_LOG_MESSAGE("stream is not running");
         return;
     }
 

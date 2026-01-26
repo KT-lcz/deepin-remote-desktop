@@ -321,6 +321,7 @@ drd_rdp_listener_session_closed(DrdRdpListener *self, DrdRdpSession *session)
 
     if (self->sessions->len == 0 && self->runtime != NULL)
     {
+        DRD_LOG_MESSAGE("stop server runtime");
         drd_server_runtime_stop(self->runtime);
     }
     return TRUE;
@@ -1429,6 +1430,7 @@ drd_rdp_listener_handle_connection(DrdRdpListener *self,
         DrdRdpPeerContext *ctx = (DrdRdpPeerContext *) peer->context;
         if (ctx != NULL && ctx->session != NULL)
         {
+            // 非system时，是否应该跳过
             gpointer system_client = g_object_get_data(G_OBJECT(connection), "drd-system-client");
             drd_rdp_session_set_system_client(ctx->session, system_client);
             drd_rdp_session_set_connection_keep_open(ctx->session, keep_open);

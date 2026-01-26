@@ -426,7 +426,7 @@ BOOL drd_rdp_session_post_connect(DrdRdpSession *self)
 BOOL drd_rdp_session_activate(DrdRdpSession *self)
 {
     g_return_val_if_fail(DRD_IS_RDP_SESSION(self), FALSE);
-
+    DRD_LOG_MESSAGE("rdp session activate");
     if (self->passive_mode)
     {
         drd_rdp_session_set_peer_state(self, "activated-passive");
