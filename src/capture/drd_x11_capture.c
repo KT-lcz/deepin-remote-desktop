@@ -2,16 +2,16 @@
 
 #include <X11/Xlib.h>
 #include <X11/Xutil.h>
-#include <X11/extensions/Xdamage.h>
 #include <X11/extensions/XShm.h>
+#include <X11/extensions/Xdamage.h>
 
 #include <gio/gio.h>
-#include <glib.h>
 #include <glib-unix.h>
+#include <glib.h>
 
 #include <errno.h>
-#include <string.h>
 #include <poll.h>
+#include <string.h>
 #include <sys/ipc.h>
 #include <sys/shm.h>
 #include <unistd.h>
@@ -68,8 +68,7 @@ static void drd_x11_capture_drain_wakeup_pipe(int fd);
  * 参数：object 基类指针，期望为 DrdX11Capture。
  * 外部接口：GLib g_clear_pointer/g_clear_object 释放资源，最终调用 GObjectClass::dispose。
  */
-static void
-drd_x11_capture_dispose(GObject *object)
+static void drd_x11_capture_dispose(GObject *object)
 {
     DrdX11Capture *self = DRD_X11_CAPTURE(object);
 
@@ -87,8 +86,7 @@ drd_x11_capture_dispose(GObject *object)
  * 参数：object 基类指针。
  * 外部接口：GLib g_mutex_clear。
  */
-static void
-drd_x11_capture_finalize(GObject *object)
+static void drd_x11_capture_finalize(GObject *object)
 {
     DrdX11Capture *self = DRD_X11_CAPTURE(object);
     g_mutex_clear(&self->state_mutex);
@@ -101,8 +99,7 @@ drd_x11_capture_finalize(GObject *object)
  * 参数：klass 类结构。
  * 外部接口：依赖 GLib 类型系统完成类初始化。
  */
-static void
-drd_x11_capture_class_init(DrdX11CaptureClass *klass)
+static void drd_x11_capture_class_init(DrdX11CaptureClass *klass)
 {
     GObjectClass *object_class = G_OBJECT_CLASS(klass);
     object_class->dispose = drd_x11_capture_dispose;
@@ -115,8 +112,7 @@ drd_x11_capture_class_init(DrdX11CaptureClass *klass)
  * 参数：self 捕获实例。
  * 外部接口：GLib g_mutex_init、C 库 memset。
  */
-static void
-drd_x11_capture_init(DrdX11Capture *self)
+static void drd_x11_capture_init(DrdX11Capture *self)
 {
     g_mutex_init(&self->state_mutex);
     memset(&self->shm.info, 0, sizeof(self->shm.info));
@@ -132,8 +128,7 @@ drd_x11_capture_init(DrdX11Capture *self)
  * 参数：queue 捕获帧输出队列。
  * 外部接口：GLib g_object_new/g_object_ref。
  */
-DrdX11Capture *
-drd_x11_capture_new(DrdFrameQueue *queue)
+DrdX11Capture *drd_x11_capture_new(DrdFrameQueue *queue)
 {
     g_return_val_if_fail(DRD_IS_FRAME_QUEUE(queue), NULL);
 
@@ -148,12 +143,7 @@ drd_x11_capture_new(DrdFrameQueue *queue)
  * 参数：self 捕获实例；display_name 指定显示名（NULL 使用默认）；out_width/out_height 输出值；error 错误输出。
  * 外部接口：X11 XOpenDisplay/DisplayWidth/DisplayHeight/XCloseDisplay。
  */
-gboolean
-drd_x11_capture_get_display_size(DrdX11Capture *self,
-                                 const gchar *display_name,
-                                 guint *out_width,
-                                 guint *out_height,
-                                 GError **error)
+gboolean drd_x11_capture_get_display_size(DrdX11Capture *self, const gchar *display_name, guint *out_width, guint *out_height, GError **error)
 {
     g_return_val_if_fail(DRD_IS_X11_CAPTURE(self), FALSE);
     g_return_val_if_fail(out_width != NULL, FALSE);
@@ -162,10 +152,7 @@ drd_x11_capture_get_display_size(DrdX11Capture *self,
     Display *display = XOpenDisplay(display_name);
     if (display == NULL)
     {
-        g_set_error_literal(error,
-                            G_IO_ERROR,
-                            G_IO_ERROR_FAILED,
-                            "Failed to open X11 display for resolution query");
+        g_set_error_literal(error, G_IO_ERROR, G_IO_ERROR_FAILED, "Failed to open X11 display for resolution query");
         return FALSE;
     }
 
@@ -176,12 +163,7 @@ drd_x11_capture_get_display_size(DrdX11Capture *self,
 
     if (*out_width == 0 || *out_height == 0)
     {
-        g_set_error(error,
-                    G_IO_ERROR,
-                    G_IO_ERROR_FAILED,
-                    "Invalid display size %ux%u",
-                    *out_width,
-                    *out_height);
+        g_set_error(error, G_IO_ERROR, G_IO_ERROR_FAILED, "Invalid display size %ux%u", *out_width, *out_height);
         return FALSE;
     }
 
@@ -192,31 +174,21 @@ drd_x11_capture_get_display_size(DrdX11Capture *self,
  * 功能：打开 X11 连接并准备共享内存截图资源。
  * 逻辑：依次打开 Display，检测 XShm/XDamage 扩展；获取屏幕/root 窗口与目标尺寸；创建 XShm 图像与共享内存段并附加；创建 Damage 句柄。
  * 参数：self 捕获实例；display_name 显示名称；requested_width/height 期望尺寸；error 错误输出。
- * 外部接口：X11/XShm/XDamage 相关 API：XOpenDisplay 打开连接；XShmQueryExtension/XDamageQueryExtension 检查扩展；XShmCreateImage 创建共享内存图像；shmget/shmat 创建并附加 SysV 共享内存；XShmAttach 绑定共享内存到 X 服务器；XDamageCreate 注册屏幕损坏事件；XSync 刷新事件队列。
+ * 外部接口：X11/XShm/XDamage 相关 API：XOpenDisplay 打开连接；XShmQueryExtension/XDamageQueryExtension 检查扩展；XShmCreateImage 创建共享内存图像；shmget/shmat 创建并附加 SysV 共享内存；XShmAttach 绑定共享内存到 X 服务器；XDamageCreate
+ * 注册屏幕损坏事件；XSync 刷新事件队列。
  */
-static gboolean
-drd_x11_capture_prepare_display(DrdX11Capture *self,
-                                const gchar *display_name,
-                                guint requested_width,
-                                guint requested_height,
-                                GError **error)
+static gboolean drd_x11_capture_prepare_display(DrdX11Capture *self, const gchar *display_name, guint requested_width, guint requested_height, GError **error)
 {
     self->display = XOpenDisplay(display_name);
     if (self->display == NULL)
     {
-        g_set_error_literal(error,
-                            G_IO_ERROR,
-                            G_IO_ERROR_FAILED,
-                            "Failed to open X11 display");
+        g_set_error_literal(error, G_IO_ERROR, G_IO_ERROR_FAILED, "Failed to open X11 display");
         return FALSE;
     }
 
     if (!XShmQueryExtension(self->display))
     {
-        g_set_error_literal(error,
-                            G_IO_ERROR,
-                            G_IO_ERROR_NOT_SUPPORTED,
-                            "XShm extension not available on X server");
+        g_set_error_literal(error, G_IO_ERROR, G_IO_ERROR_NOT_SUPPORTED, "XShm extension not available on X server");
         return FALSE;
     }
 
@@ -224,10 +196,7 @@ drd_x11_capture_prepare_display(DrdX11Capture *self,
     int damage_error = 0;
     if (!XDamageQueryExtension(self->display, &damage_event, &damage_error))
     {
-        g_set_error_literal(error,
-                            G_IO_ERROR,
-                            G_IO_ERROR_NOT_SUPPORTED,
-                            "XDamage extension not available on X server");
+        g_set_error_literal(error, G_IO_ERROR, G_IO_ERROR_NOT_SUPPORTED, "XDamage extension not available on X server");
         return FALSE;
     }
     self->damage_event_base = damage_event;
@@ -238,20 +207,10 @@ drd_x11_capture_prepare_display(DrdX11Capture *self,
     self->width = (requested_width > 0) ? requested_width : (guint) DisplayWidth(self->display, self->screen);
     self->height = (requested_height > 0) ? requested_height : (guint) DisplayHeight(self->display, self->screen);
 
-    self->image = XShmCreateImage(self->display,
-                                  DefaultVisual(self->display, self->screen),
-                                  DefaultDepth(self->display, self->screen),
-                                  ZPixmap,
-                                  NULL,
-                                  &self->shm.info,
-                                  (int) self->width,
-                                  (int) self->height);
+    self->image = XShmCreateImage(self->display, DefaultVisual(self->display, self->screen), DefaultDepth(self->display, self->screen), ZPixmap, NULL, &self->shm.info, (int) self->width, (int) self->height);
     if (self->image == NULL)
     {
-        g_set_error_literal(error,
-                            G_IO_ERROR,
-                            G_IO_ERROR_FAILED,
-                            "Failed to create XShm image");
+        g_set_error_literal(error, G_IO_ERROR, G_IO_ERROR_FAILED, "Failed to create XShm image");
         return FALSE;
     }
 
@@ -259,22 +218,14 @@ drd_x11_capture_prepare_display(DrdX11Capture *self,
     self->shm.info.shmid = shmget(IPC_PRIVATE, image_size, IPC_CREAT | 0600);
     if (self->shm.info.shmid < 0)
     {
-        g_set_error(error,
-                    G_IO_ERROR,
-                    g_io_error_from_errno(errno),
-                    "shmget failed: %s",
-                    g_strerror(errno));
+        g_set_error(error, G_IO_ERROR, g_io_error_from_errno(errno), "shmget failed: %s", g_strerror(errno));
         return FALSE;
     }
 
     self->shm.info.shmaddr = (char *) shmat(self->shm.info.shmid, NULL, 0);
     if (self->shm.info.shmaddr == (char *) (-1))
     {
-        g_set_error(error,
-                    G_IO_ERROR,
-                    g_io_error_from_errno(errno),
-                    "shmat failed: %s",
-                    g_strerror(errno));
+        g_set_error(error, G_IO_ERROR, g_io_error_from_errno(errno), "shmat failed: %s", g_strerror(errno));
         return FALSE;
     }
 
@@ -283,10 +234,7 @@ drd_x11_capture_prepare_display(DrdX11Capture *self,
 
     if (!XShmAttach(self->display, &self->shm.info))
     {
-        g_set_error_literal(error,
-                            G_IO_ERROR,
-                            G_IO_ERROR_FAILED,
-                            "XShmAttach failed");
+        g_set_error_literal(error, G_IO_ERROR, G_IO_ERROR_FAILED, "XShmAttach failed");
         return FALSE;
     }
     self->attached = TRUE;
@@ -294,10 +242,7 @@ drd_x11_capture_prepare_display(DrdX11Capture *self,
     self->damage = XDamageCreate(self->display, self->root, XDamageReportNonEmpty);
     if (self->damage == 0)
     {
-        g_set_error_literal(error,
-                            G_IO_ERROR,
-                            G_IO_ERROR_FAILED,
-                            "Failed to create XDamage handle");
+        g_set_error_literal(error, G_IO_ERROR, G_IO_ERROR_FAILED, "Failed to create XDamage handle");
         return FALSE;
     }
 
@@ -311,12 +256,7 @@ drd_x11_capture_prepare_display(DrdX11Capture *self,
  * 参数：self 捕获实例；display_name 目标显示；requested_width/height 期望尺寸；error 错误输出。
  * 外部接口：GLib g_mutex_lock/unlock、g_thread_new 创建线程；内部调用 drd_x11_capture_setup_wakeup_pipe 与 drd_x11_capture_prepare_display，日志通过 DRD_LOG_MESSAGE。
  */
-gboolean
-drd_x11_capture_start(DrdX11Capture *self,
-                      const gchar *display_name,
-                      guint requested_width,
-                      guint requested_height,
-                      GError **error)
+gboolean drd_x11_capture_start(DrdX11Capture *self, const gchar *display_name, guint requested_width, guint requested_height, GError **error)
 {
     g_return_val_if_fail(DRD_IS_X11_CAPTURE(self), FALSE);
 
@@ -339,11 +279,7 @@ drd_x11_capture_start(DrdX11Capture *self,
         return FALSE;
     }
 
-    if (!drd_x11_capture_prepare_display(self,
-                                         self->display_name,
-                                         requested_width,
-                                         requested_height,
-                                         error))
+    if (!drd_x11_capture_prepare_display(self, self->display_name, requested_width, requested_height, error))
     {
         drd_x11_capture_cleanup_locked(self);
         drd_x11_capture_close_wakeup_pipe(self);
@@ -365,8 +301,7 @@ drd_x11_capture_start(DrdX11Capture *self,
  * 参数：self 捕获实例。
  * 外部接口：XDamageDestroy/XShmDetach/XDestroyImage/shmdt/shmctl/XCloseDisplay 等 X11 与 SysV 共享内存 API。
  */
-static void
-drd_x11_capture_cleanup_locked(DrdX11Capture *self)
+static void drd_x11_capture_cleanup_locked(DrdX11Capture *self)
 {
     if (self->damage != 0 && self->display != NULL)
     {
@@ -413,8 +348,7 @@ drd_x11_capture_cleanup_locked(DrdX11Capture *self)
  * 参数：self 捕获实例。
  * 外部接口：XSync 同步 X 连接；write 唤醒管道；GLib g_thread_join/g_mutex；日志 DRD_LOG_MESSAGE。
  */
-void
-drd_x11_capture_stop(DrdX11Capture *self)
+void drd_x11_capture_stop(DrdX11Capture *self)
 {
     g_return_if_fail(DRD_IS_X11_CAPTURE(self));
 
@@ -463,8 +397,7 @@ drd_x11_capture_stop(DrdX11Capture *self)
  * 参数：self 捕获实例。
  * 外部接口：GLib g_mutex_lock/unlock。
  */
-gboolean
-drd_x11_capture_is_running(DrdX11Capture *self)
+gboolean drd_x11_capture_is_running(DrdX11Capture *self)
 {
     g_return_val_if_fail(DRD_IS_X11_CAPTURE(self), FALSE);
 
@@ -478,10 +411,10 @@ drd_x11_capture_is_running(DrdX11Capture *self)
  * 功能：捕获线程主循环，从 X11 拉帧并写入队列。
  * 逻辑：循环读取运行状态与资源；按 target_interval 驱动一次事件消费与抓帧，期间用 g_poll 监听 X 连接和唤醒管道；每个间隔都会触发一次抓帧，XDamage 事件仅用于清理队列与统计，避免被合成器合并后的事件频率限制帧率。
  * 参数：user_data 线程参数，DrdX11Capture 实例。
- * 外部接口：XPending/XNextEvent/XDamageSubtract 处理 Damage 事件；g_poll 监听文件描述符；XShmGetImage 抓帧；glib 时间函数 g_get_monotonic_time；DrdFrame API drd_frame_new/configure/ensure_capacity 与 drd_frame_queue_push；日志 DRD_LOG_MESSAGE/DRD_LOG_WARNING。
+ * 外部接口：XPending/XNextEvent/XDamageSubtract 处理 Damage 事件；g_poll 监听文件描述符；XShmGetImage 抓帧；glib 时间函数 g_get_monotonic_time；DrdFrame API drd_frame_new/configure/ensure_capacity 与 drd_frame_queue_push；日志
+ * DRD_LOG_MESSAGE/DRD_LOG_WARNING。
  */
-static gpointer
-drd_x11_capture_thread(gpointer user_data)
+static gpointer drd_x11_capture_thread(gpointer user_data)
 {
     DrdX11Capture *self = DRD_X11_CAPTURE(user_data);
 
@@ -543,7 +476,7 @@ drd_x11_capture_thread(gpointer user_data)
             poll_count++;
         }
 
-        gint poll_result = g_poll(pfds, poll_count,  target_interval/1000);
+        gint poll_result = g_poll(pfds, poll_count, target_interval / 1000);
         if (poll_result < 0)
         {
             continue;
@@ -580,11 +513,7 @@ drd_x11_capture_thread(gpointer user_data)
         stats_frames++;
         g_autoptr(DrdFrame) frame = drd_frame_new();
         now = g_get_monotonic_time();
-        drd_frame_configure(frame,
-                            width,
-                            height,
-                            (guint) image->bytes_per_line,
-                            (guint64) now);
+        drd_frame_configure(frame, width, height, (guint) image->bytes_per_line, (guint64) now);
 
         const gsize frame_size = (gsize) image->bytes_per_line * (gsize) image->height;
         guint8 *buffer = drd_frame_ensure_capacity(frame, frame_size);
@@ -603,13 +532,9 @@ drd_x11_capture_thread(gpointer user_data)
             const gint64 stats_elapsed = now - stats_window_start;
             if (stats_elapsed >= stats_interval)
             {
-                const gdouble actual_fps =
-                    (gdouble) stats_frames * (gdouble) G_USEC_PER_SEC / (gdouble) stats_elapsed;
+                const gdouble actual_fps = (gdouble) stats_frames * (gdouble) G_USEC_PER_SEC / (gdouble) stats_elapsed;
                 const gboolean reached_target = actual_fps >= (gdouble) target_fps;
-                DRD_LOG_MESSAGE("X11 capture fps=%.2f (target=%u): %s",
-                                actual_fps,
-                                target_fps,
-                                reached_target ? "reached target" : "below target");
+                DRD_LOG_MESSAGE("X11 capture fps=%.2f (target=%u): %s", actual_fps, target_fps, reached_target ? "reached target" : "below target");
                 stats_frames = 0;
                 stats_window_start = now;
             }
@@ -632,8 +557,7 @@ drd_x11_capture_thread(gpointer user_data)
  * 参数：self 捕获实例；error 错误输出。
  * 外部接口：glib-unix g_unix_open_pipe 创建管道。
  */
-static gboolean
-drd_x11_capture_setup_wakeup_pipe(DrdX11Capture *self, GError **error)
+static gboolean drd_x11_capture_setup_wakeup_pipe(DrdX11Capture *self, GError **error)
 {
     if (self->wakeup_pipe[0] >= 0 && self->wakeup_pipe[1] >= 0)
     {
@@ -643,6 +567,13 @@ drd_x11_capture_setup_wakeup_pipe(DrdX11Capture *self, GError **error)
     int fds[2] = {-1, -1};
     if (!g_unix_open_pipe(fds, O_CLOEXEC, error))
     {
+        return FALSE;
+    }
+
+    if (!g_unix_set_fd_nonblocking(fds[0], TRUE, error) || !g_unix_set_fd_nonblocking(fds[1], TRUE, error))
+    {
+        close(fds[0]);
+        close(fds[1]);
         return FALSE;
     }
 
@@ -657,8 +588,7 @@ drd_x11_capture_setup_wakeup_pipe(DrdX11Capture *self, GError **error)
  * 参数：self 捕获实例。
  * 外部接口：POSIX close。
  */
-static void
-drd_x11_capture_close_wakeup_pipe(DrdX11Capture *self)
+static void drd_x11_capture_close_wakeup_pipe(DrdX11Capture *self)
 {
     for (int i = 0; i < 2; ++i)
     {
@@ -676,8 +606,7 @@ drd_x11_capture_close_wakeup_pipe(DrdX11Capture *self)
  * 参数：fd 管道读端。
  * 外部接口：POSIX read。
  */
-static void
-drd_x11_capture_drain_wakeup_pipe(int fd)
+static void drd_x11_capture_drain_wakeup_pipe(int fd)
 {
     if (fd < 0)
     {
@@ -685,7 +614,25 @@ drd_x11_capture_drain_wakeup_pipe(int fd)
     }
 
     char buffer[64];
-    while (read(fd, buffer, sizeof(buffer)) > 0)
+    for (;;)
     {
+        const ssize_t ret = read(fd, buffer, sizeof(buffer));
+        if (ret > 0)
+        {
+            continue;
+        }
+        if (ret == 0)
+        {
+            break;
+        }
+        if (errno == EINTR)
+        {
+            continue;
+        }
+        if (errno == EAGAIN || errno == EWOULDBLOCK)
+        {
+            break;
+        }
+        break;
     }
 }
