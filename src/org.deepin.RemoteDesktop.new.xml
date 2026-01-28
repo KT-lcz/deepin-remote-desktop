@@ -1,13 +1,14 @@
 <!DOCTYPE node PUBLIC '-//freedesktop//DTD D-BUS Object Introspection 1.0//EN' 'http://www.freedesktop.org/standards/dbus/1.0/introspect.dtd'>
 <node>
   <!-- DBus Name: org.deepin.RemoteDesktop -->
+  <!-- 通用 -->
   <interface name="org.deepin.RemoteDesktop1">
 
     <property name="RuntimeMode" type="s" access="read" />
     <property name="Version" type="s" access="read" />
 
   </interface>
-  <!-- 远程桌面 -->
+  <!-- drd system -->
   <interface name="org.deepin.RemoteDesktop1.RemoteLogin">
 
     <property name="Enabled" type="b" access="read" />
@@ -53,6 +54,76 @@
     </method>
   </interface>
 
+  <!-- dbus path:/org/deepin/RemoteDesktop1/HandoverSessionXXX -->
+  <interface name="org.deepin.RemoteDesktop1.HandoverSession">
+
+    <!--远程登录只有一个IP-->
+    <property name="IP" type="s" access="read" />
+    <!--
+        StartHandover:
+
+        The dst server is ready and starts the handover process, sending its
+        one time username/password and getting the certificate and key used
+        by the system server.
+    -->
+    <method name="StartHandover">
+      <arg name="OneTimeAuthToken" direction="in" type="s" />
+      <arg name="Certificate" direction="out" type="s" />
+      <arg name="Key" direction="out" type="s" />
+    </method>
+
+    <!--
+        RedirectClient:
+
+        Signal to make the src server send the Server Redirection PDU with the
+        routing token and one time username/password to the client.
+    -->
+    <signal name="RedirectClient">
+      <arg name="RoutingToken" type="s" />
+      <arg name="AuthToken" type="s" />
+    </signal>
+
+    <!--
+        TakeClientReady:
+
+        Signal to make the dst server aware that the client was redirected
+        successfully and is ready to be taken.
+    -->
+    <signal name="TakeClientReady">
+      <arg name="UseSystemCredentials" type="b" />
+    </signal>
+
+    <!--
+        TakeClient:
+
+        The dst server takes the file descriptor which has the active
+        connection of the redirected client.
+    -->
+    <method name="TakeClient">
+      <annotation name="org.gtk.GDBus.C.UnixFD" value="true" />
+      <arg name="Fd" direction="out" type="h" />
+    </method>
+
+    <!--
+        GetSystemCredentials:
+
+        Get the system credentials to be used instead of the one-time
+        generated to authenticate the redirected client.
+    -->
+    <method name="GetSystemCredentials">
+      <arg name="AuthToken" direction="out" type="s" />
+    </method>
+
+    <!--
+        RestartHandover:
+
+        Signal to inform the dst server that a new handover is ready to start.
+        This happens after the first handover.
+    -->
+    <signal name="RestartHandover" />
+
+  </interface>
+  <!-- drd user -->
   <interface name="org.deepin.RemoteDesktop1.Shadow">
 
     <property name="Enabled" type="b" access="read" />
@@ -124,74 +195,6 @@
     <method name="GenNlaCredential" />
 
   </interface>
-  <!-- dbus path:/org/deepin/RemoteDesktop1/HandoverSession1 -->
-  <interface name="org.deepin.RemoteDesktop1.HandoverSession">
 
-    <!--远程登录只有一个IP-->
-    <property name="IP" type="s" access="read" />
-    <!--
-        StartHandover:
-
-        The dst server is ready and starts the handover process, sending its
-        one time username/password and getting the certificate and key used
-        by the system server.
-    -->
-    <method name="StartHandover">
-      <arg name="OneTimeAuthToken" direction="in" type="s" />
-      <arg name="Certificate" direction="out" type="s" />
-      <arg name="Key" direction="out" type="s" />
-    </method>
-
-    <!--
-        RedirectClient:
-
-        Signal to make the src server send the Server Redirection PDU with the
-        routing token and one time username/password to the client.
-    -->
-    <signal name="RedirectClient">
-      <arg name="RoutingToken" type="s" />
-      <arg name="AuthToken" type="s" />
-    </signal>
-
-    <!--
-        TakeClientReady:
-
-        Signal to make the dst server aware that the client was redirected
-        successfully and is ready to be taken.
-    -->
-    <signal name="TakeClientReady">
-      <arg name="UseSystemCredentials" type="b" />
-    </signal>
-
-    <!--
-        TakeClient:
-
-        The dst server takes the file descriptor which has the active
-        connection of the redirected client.
-    -->
-    <method name="TakeClient">
-      <annotation name="org.gtk.GDBus.C.UnixFD" value="true" />
-      <arg name="Fd" direction="out" type="h" />
-    </method>
-
-    <!--
-        GetSystemCredentials:
-
-        Get the system credentials to be used instead of the one-time
-        generated to authenticate the redirected client.
-    -->
-    <method name="GetSystemCredentials">
-      <arg name="AuthToken" direction="out" type="s" />
-    </method>
-
-    <!--
-        RestartHandover:
-
-        Signal to inform the dst server that a new handover is ready to start.
-        This happens after the first handover.
-    -->
-    <signal name="RestartHandover" />
-
-  </interface>
 
 </node>
