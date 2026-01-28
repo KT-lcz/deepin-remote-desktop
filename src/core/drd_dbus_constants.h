@@ -2,6 +2,8 @@
 
 #define DRD_REMOTE_DESKTOP_BUS_NAME "org.deepin.RemoteDesktop1"
 #define DRD_REMOTE_DESKTOP_OBJECT_PATH "/org/deepin/RemoteDesktop1"
+#define DRD_REMOTE_DESKTOP_REMOTE_LOGIN_OBJECT_PATH "/org/deepin/RemoteDesktop1/RemoteLogin"
+#define DRD_REMOTE_DESKTOP_SHADOW_OBJECT_PATH "/org/deepin/RemoteDesktop1/Shadow"
 #define DRD_REMOTE_DESKTOP_HANDOVER_SESSION_PATH_PREFIX "/org/deepin/RemoteDesktop1/HandoverSession"
 
 #define DRD_LIGHTDM_REMOTE_FACTORY_BUS_NAME "org.deepin.DisplayManager"

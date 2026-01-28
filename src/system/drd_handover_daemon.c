@@ -573,8 +573,8 @@ gboolean drd_handover_daemon_start(DrdHandoverDaemon *self, GError **error)
     if (self->remote_login_proxy == NULL)
     {
         self->remote_login_proxy = drd_dbus_remote_desktop1_remote_desktop1_remote_login_proxy_new_for_bus_sync(
-                G_BUS_TYPE_SYSTEM, G_DBUS_PROXY_FLAGS_NONE, DRD_REMOTE_DESKTOP_BUS_NAME, DRD_REMOTE_DESKTOP_OBJECT_PATH,
-                NULL, error);
+                G_BUS_TYPE_SYSTEM, G_DBUS_PROXY_FLAGS_NONE, DRD_REMOTE_DESKTOP_BUS_NAME,
+                DRD_REMOTE_DESKTOP_REMOTE_LOGIN_OBJECT_PATH, NULL, error);
         if (self->remote_login_proxy == NULL)
         {
             return FALSE;

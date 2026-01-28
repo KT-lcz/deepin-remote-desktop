@@ -57,10 +57,10 @@ core_sources = files(
   'system/drd_handover_daemon.c'
 )
 
-dbus_gen_remote_desktop = gnome.gdbus_codegen('drd-dbus-remote-desktop',
-                                              'org.deepin.RemoteDesktop.xml',
-                                              interface_prefix: 'org.deepin.RemoteDesktop.',
-                                              namespace: 'DrdDBusRemoteDesktop')
+#dbus_gen_remote_desktop = gnome.gdbus_codegen('drd-dbus-remote-desktop',
+#                                              'org.deepin.RemoteDesktop.xml',
+#                                              interface_prefix: 'org.deepin.RemoteDesktop.',
+#                                              namespace: 'DrdDBusRemoteDesktop')
 dbus_gen_remote_desktop1 = gnome.gdbus_codegen('drd-dbus-remote-desktop1',
                                                'org.deepin.RemoteDesktop.new.xml',
                                                interface_prefix: 'org.deepin.',
@@ -73,7 +73,7 @@ dbus_gen_logind = gnome.gdbus_codegen('drd-dbus-logind',
                                      'org.freedesktop.login1.xml',
                                      interface_prefix: 'org.freedesktop.login1.',
                                      namespace: 'DrdDBusLogind')
-core_sources += dbus_gen_remote_desktop
+#core_sources += dbus_gen_remote_desktop
 core_sources += dbus_gen_remote_desktop1
 core_sources += dbus_gen_lightdm
 core_sources += dbus_gen_logind

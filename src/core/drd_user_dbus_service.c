@@ -19,8 +19,6 @@ struct _DrdUserDbusService
 
     GDBusConnection *connection;
     guint bus_name_owner_id;
-    GDBusObjectManagerServer *object_manager;
-    GDBusObjectSkeleton *root_object;
 
     DrdDBusRemoteDesktop1RemoteDesktop1 *common_iface;
     DrdDBusRemoteDesktop1RemoteDesktop1Shadow *shadow_iface;
@@ -39,15 +37,17 @@ static gboolean drd_user_dbus_method_not_supported(GDBusMethodInvocation *invoca
 
 static void drd_user_dbus_service_reset_bus_context(DrdUserDbusService *self)
 {
-    if (self->object_manager != NULL)
+    if (self->common_iface != NULL)
     {
-        g_dbus_object_manager_server_set_connection(self->object_manager, NULL);
-        g_clear_object(&self->object_manager);
+        g_dbus_interface_skeleton_unexport(G_DBUS_INTERFACE_SKELETON(self->common_iface));
+        g_clear_object(&self->common_iface);
     }
 
-    g_clear_object(&self->common_iface);
-    g_clear_object(&self->shadow_iface);
-    g_clear_object(&self->root_object);
+    if (self->shadow_iface != NULL)
+    {
+        g_dbus_interface_skeleton_unexport(G_DBUS_INTERFACE_SKELETON(self->shadow_iface));
+        g_clear_object(&self->shadow_iface);
+    }
 
     if (self->bus_name_owner_id != 0)
     {
@@ -75,8 +75,6 @@ static void drd_user_dbus_service_init(DrdUserDbusService *self)
 {
     self->connection = NULL;
     self->bus_name_owner_id = 0;
-    self->object_manager = NULL;
-    self->root_object = NULL;
     self->common_iface = NULL;
     self->shadow_iface = NULL;
 }
@@ -215,10 +213,6 @@ gboolean drd_user_dbus_service_start(DrdUserDbusService *self, GError **error)
         return FALSE;
     }
 
-    self->object_manager = g_dbus_object_manager_server_new(DRD_REMOTE_DESKTOP_OBJECT_PATH);
-    g_dbus_object_manager_server_set_connection(self->object_manager, self->connection);
-
-    self->root_object = g_dbus_object_skeleton_new(DRD_REMOTE_DESKTOP_OBJECT_PATH);
     self->common_iface = drd_dbus_remote_desktop1_remote_desktop1_skeleton_new();
     drd_dbus_remote_desktop1_remote_desktop1_set_runtime_mode(self->common_iface, "user");
     drd_dbus_remote_desktop1_remote_desktop1_set_version(self->common_iface, DRD_PROJECT_VERSION);
@@ -270,9 +264,19 @@ gboolean drd_user_dbus_service_start(DrdUserDbusService *self, GError **error)
     g_signal_connect(self->shadow_iface, "handle-gen-nla-credential",
                      G_CALLBACK(drd_user_dbus_shadow_handle_gen_nla_credential), self);
 
-    g_dbus_object_skeleton_add_interface(self->root_object, G_DBUS_INTERFACE_SKELETON(self->common_iface));
-    g_dbus_object_skeleton_add_interface(self->root_object, G_DBUS_INTERFACE_SKELETON(self->shadow_iface));
-    g_dbus_object_manager_server_export(self->object_manager, self->root_object);
+    if (!g_dbus_interface_skeleton_export(G_DBUS_INTERFACE_SKELETON(self->common_iface), self->connection,
+                                          DRD_REMOTE_DESKTOP_OBJECT_PATH, error))
+    {
+        drd_user_dbus_service_reset_bus_context(self);
+        return FALSE;
+    }
+
+    if (!g_dbus_interface_skeleton_export(G_DBUS_INTERFACE_SKELETON(self->shadow_iface), self->connection,
+                                          DRD_REMOTE_DESKTOP_SHADOW_OBJECT_PATH, error))
+    {
+        drd_user_dbus_service_reset_bus_context(self);
+        return FALSE;
+    }
     return TRUE;
 }
 

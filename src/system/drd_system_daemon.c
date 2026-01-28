@@ -54,7 +54,6 @@ typedef struct
     DrdDBusRemoteDesktop1RemoteDesktop1 *common_iface;
     DrdDBusRemoteDesktop1RemoteDesktop1RemoteLogin *remote_login_iface;
     GDBusObjectManagerServer *object_manager;
-    GDBusObjectSkeleton *root_object;
     guint bus_name_owner_id;
     GDBusConnection *connection;
 } DrdSystemDaemonBusContext;
@@ -1278,9 +1277,17 @@ static void drd_system_daemon_reset_bus_context(DrdSystemDaemon *self)
         g_clear_object(&self->bus.object_manager);
     }
 
-    g_clear_object(&self->bus.common_iface);
-    g_clear_object(&self->bus.remote_login_iface);
-    g_clear_object(&self->bus.root_object);
+    if (self->bus.common_iface != NULL)
+    {
+        g_dbus_interface_skeleton_unexport(G_DBUS_INTERFACE_SKELETON(self->bus.common_iface));
+        g_clear_object(&self->bus.common_iface);
+    }
+
+    if (self->bus.remote_login_iface != NULL)
+    {
+        g_dbus_interface_skeleton_unexport(G_DBUS_INTERFACE_SKELETON(self->bus.remote_login_iface));
+        g_clear_object(&self->bus.remote_login_iface);
+    }
 
     if (self->bus.bus_name_owner_id != 0)
     {
@@ -1440,7 +1447,6 @@ static void drd_system_daemon_init(DrdSystemDaemon *self)
     self->bus.common_iface = NULL;
     self->bus.remote_login_iface = NULL;
     self->bus.object_manager = NULL;
-    self->bus.root_object = NULL;
     self->bus.bus_name_owner_id = 0;
     self->bus.connection = NULL;
     self->remote_clients =
@@ -1596,8 +1602,6 @@ static gboolean drd_system_daemon_start_bus(DrdSystemDaemon *self, GError **erro
     self->bus.object_manager = g_dbus_object_manager_server_new(DRD_REMOTE_DESKTOP_OBJECT_PATH);
     g_dbus_object_manager_server_set_connection(self->bus.object_manager, self->bus.connection);
 
-    self->bus.root_object = g_dbus_object_skeleton_new(DRD_REMOTE_DESKTOP_OBJECT_PATH);
-
     self->bus.common_iface = drd_dbus_remote_desktop1_remote_desktop1_skeleton_new();
     drd_dbus_remote_desktop1_remote_desktop1_set_runtime_mode(self->bus.common_iface, "system");
     drd_dbus_remote_desktop1_remote_desktop1_set_version(self->bus.common_iface, DRD_PROJECT_VERSION);
@@ -1634,10 +1638,17 @@ static gboolean drd_system_daemon_start_bus(DrdSystemDaemon *self, GError **erro
     g_signal_connect(self->bus.remote_login_iface, "handle-gen-nla-credential",
                      G_CALLBACK(drd_system_daemon_handle_gen_nla_credential), self);
 
-    g_dbus_object_skeleton_add_interface(self->bus.root_object, G_DBUS_INTERFACE_SKELETON(self->bus.common_iface));
-    g_dbus_object_skeleton_add_interface(self->bus.root_object,
-                                         G_DBUS_INTERFACE_SKELETON(self->bus.remote_login_iface));
-    g_dbus_object_manager_server_export(self->bus.object_manager, self->bus.root_object);
+    if (!g_dbus_interface_skeleton_export(G_DBUS_INTERFACE_SKELETON(self->bus.common_iface), self->bus.connection,
+                                          DRD_REMOTE_DESKTOP_OBJECT_PATH, error))
+    {
+        return FALSE;
+    }
+
+    if (!g_dbus_interface_skeleton_export(G_DBUS_INTERFACE_SKELETON(self->bus.remote_login_iface), self->bus.connection,
+                                          DRD_REMOTE_DESKTOP_REMOTE_LOGIN_OBJECT_PATH, error))
+    {
+        return FALSE;
+    }
     drd_system_daemon_update_session_list(self);
 
     DRD_LOG_MESSAGE("System daemon exported %s at %s", DRD_REMOTE_DESKTOP_BUS_NAME, DRD_REMOTE_DESKTOP_OBJECT_PATH);
