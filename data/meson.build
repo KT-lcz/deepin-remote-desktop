@@ -21,7 +21,7 @@ else
   systemd_user_unit_dir = join_paths(get_option('prefix'), 'lib', 'systemd', 'user')
 endif
 
-install_data('org.deepin.RemoteDesktop.conf',
+install_data('org.deepin.RemoteDesktop1.conf',
              install_dir: dbus_confdir)
 
 install_subdir('config.d',

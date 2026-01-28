@@ -1,6 +1,6 @@
 <!DOCTYPE node PUBLIC '-//freedesktop//DTD D-BUS Object Introspection 1.0//EN' 'http://www.freedesktop.org/standards/dbus/1.0/introspect.dtd'>
 <node>
-  <!-- DBus Name: org.deepin.RemoteDesktop -->
+  <!-- DBus Name: org.deepin.RemoteDesktop1 -->
   <!-- 通用 -->
   <interface name="org.deepin.RemoteDesktop1">
 

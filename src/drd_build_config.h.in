@@ -1,0 +1,3 @@
+#pragma once
+
+#define DRD_PROJECT_VERSION @DRD_PROJECT_VERSION@

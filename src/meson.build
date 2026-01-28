@@ -1,4 +1,10 @@
 src_inc = include_directories('.')
+
+conf = configuration_data()
+conf.set_quoted('DRD_PROJECT_VERSION', meson.project_version())
+configure_file(input: 'drd_build_config.h.in',
+               output: 'drd_build_config.h',
+               configuration: conf)
 gnome = import('gnome')
 
 deps = [
@@ -34,6 +40,7 @@ media_sources = files(
 
 core_sources = files(
   'core/drd_application.c',
+  'core/drd_user_dbus_service.c',
   'core/drd_server_runtime.c',
   'core/drd_config.c',
   'session/drd_rdp_session.c',
@@ -44,6 +51,7 @@ core_sources = files(
   'security/drd_pam_auth.c',
   'security/drd_nla_sam.c',
   'utils/drd_log.c',
+  'utils/drd_dbus_auth_token.c',
   'utils/drd_system_info.c',
   'system/drd_system_daemon.c',
   'system/drd_handover_daemon.c'
@@ -53,6 +61,10 @@ dbus_gen_remote_desktop = gnome.gdbus_codegen('drd-dbus-remote-desktop',
                                               'org.deepin.RemoteDesktop.xml',
                                               interface_prefix: 'org.deepin.RemoteDesktop.',
                                               namespace: 'DrdDBusRemoteDesktop')
+dbus_gen_remote_desktop1 = gnome.gdbus_codegen('drd-dbus-remote-desktop1',
+                                               'org.deepin.RemoteDesktop.new.xml',
+                                               interface_prefix: 'org.deepin.',
+                                               namespace: 'DrdDBusRemoteDesktop1')
 dbus_gen_lightdm = gnome.gdbus_codegen('drd-dbus-lightdm',
                                           'org.deepin.DisplayManager.xml',
                                           interface_prefix: 'org.deepin.DisplayManager.',
@@ -62,6 +74,7 @@ dbus_gen_logind = gnome.gdbus_codegen('drd-dbus-logind',
                                      interface_prefix: 'org.freedesktop.login1.',
                                      namespace: 'DrdDBusLogind')
 core_sources += dbus_gen_remote_desktop
+core_sources += dbus_gen_remote_desktop1
 core_sources += dbus_gen_lightdm
 core_sources += dbus_gen_logind
 
