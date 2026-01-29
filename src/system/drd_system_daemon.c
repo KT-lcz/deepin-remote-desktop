@@ -47,6 +47,7 @@ typedef struct _DrdRemoteClient
 
     gchar *lightdm_session_path;
     DrdDBusLightdmRemoteDisplayFactorySession *lightdm_session_proxy;
+    gchar *login1_session_id;
 } DrdRemoteClient; // 实际应该作为 handover 对象的抽象
 
 typedef struct
@@ -471,6 +472,7 @@ static void drd_remote_client_free(DrdRemoteClient *client)
     g_clear_object(&client->session);
     drd_routing_token_info_free(client->routing);
     g_clear_pointer(&client->handover_dbus_path, g_free);
+    g_clear_pointer(&client->login1_session_id,g_free);
     g_free(client);
 }
 
@@ -595,6 +597,7 @@ static gboolean drd_system_daemon_watch_display_session(DrdRemoteClient *client,
         return FALSE;
     }
     client->lightdm_session_path = g_strdup(session_path);
+    client->login1_session_id = drd_dbus_lightdm_remote_display_factory_session_dup_session_id(client->lightdm_session_proxy);
     g_signal_connect(client->lightdm_session_proxy, "g-properties-changed",
                      G_CALLBACK(drd_system_daemon_on_lightdm_session_properties_changed), client);
     return TRUE;
@@ -1112,7 +1115,6 @@ static gboolean drd_system_daemon_on_session_ready(DrdRdpListener *listener, Drd
         {
             DRD_LOG_MESSAGE("session_path=%s", session_path);
         }
-        drd_system_daemon_watch_display_session(client, session_path);
     }
     else
     {
@@ -1125,7 +1127,7 @@ static gboolean drd_system_daemon_on_session_ready(DrdRdpListener *listener, Drd
             return FALSE;
         }
     }
-
+    drd_system_daemon_watch_display_session(client, session_path);
 
     drd_system_daemon_touch_client(client);
     return TRUE;
