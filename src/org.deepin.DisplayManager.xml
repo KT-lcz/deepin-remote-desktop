@@ -3,7 +3,7 @@
   <interface name="org.deepin.DisplayManager.RemoteDisplayFactory.Session">
     <property name="user_name" type="s" access="read"/>
     <property name="address" type="s" access="read"/>
-    <property name="session_id" type="u" access="read"/>
+    <property name="session_id" type="s" access="read"/>
     <property name="client_id" type="s" access="read"/>
   </interface>
   <interface name="org.deepin.DisplayManager.RemoteDisplayFactory">
