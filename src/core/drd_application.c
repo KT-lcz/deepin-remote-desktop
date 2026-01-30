@@ -174,6 +174,7 @@ static gboolean quit_loop(gpointer user_data)
 static gboolean drd_application_on_signal(gpointer user_data)
 {
     DrdApplication *self = DRD_APPLICATION(user_data);
+    DRD_LOG_MESSAGE("Termination signal received");
     if (self->loop != NULL && g_main_loop_is_running(self->loop))
     {
         if (!self->is_handover || getuid() >= 1000)

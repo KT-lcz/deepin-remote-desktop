@@ -1460,7 +1460,7 @@ gboolean drd_encoding_manager_encode_surface_gfx(DrdEncodingManager *self, rdpSe
     }
     else if (use_progressive)
     {
-        DRD_LOG_MESSAGE("progressive encode");
+        // DRD_LOG_MESSAGE("progressive encode");
         INT32 rc = 0;
         REGION16 region;
         RECTANGLE_16 regionRect;

@@ -396,7 +396,7 @@ static void drd_handover_daemon_on_take_client_ready(DrdDBusRemoteDesktop1Remote
     (void) interface;
     (void) use_system_credentials;
     DrdHandoverDaemon *self = user_data;
-
+    DRD_LOG_MESSAGE("handover received take client ready for %s", self->handover_object_path);
     g_autoptr(GError) error = NULL;
     if (!drd_handover_daemon_take_client(self, &error) && error != NULL)
     {

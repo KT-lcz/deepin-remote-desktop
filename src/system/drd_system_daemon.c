@@ -44,7 +44,7 @@ typedef struct _DrdRemoteClient
     guint32 reserved_uid;
     gboolean use_system_credentials;
     guint handover_count;
-    gint64 last_activity_us;
+    gint64 last_activity_us; // TODO delete
     guint32 client_width;
     guint32 client_height;
 
@@ -80,6 +80,39 @@ struct _DrdSystemDaemon
 };
 
 static void drd_system_daemon_request_shutdown(DrdSystemDaemon *self);
+
+static void drd_system_daemon_remove_client(DrdSystemDaemon *self, DrdRemoteClient *client);
+
+static void drd_system_daemon_update_session_list(DrdSystemDaemon *self);
+
+static gboolean drd_system_daemon_register_client(DrdSystemDaemon *self, GSocketConnection *connection,
+                                                  DrdRoutingTokenInfo *info);
+
+static gboolean drd_system_daemon_delegate(DrdRdpListener *listener, GSocketConnection *connection, gpointer user_data,
+                                           GError **error);
+
+static gboolean drd_system_daemon_on_session_ready(DrdRdpListener *listener, DrdRdpSession *session,
+                                                   gpointer user_data);
+
+static DrdRemoteClient *drd_system_daemon_find_client_by_token(DrdSystemDaemon *self, const gchar *routing_token);
+
+static gboolean drd_system_daemon_on_start_handover(DrdDBusRemoteDesktop1RemoteDesktop1HandoverSession *interface,
+                                                    GDBusMethodInvocation *invocation, const gchar *one_time_auth_token,
+                                                    gpointer user_data);
+
+static gboolean drd_system_daemon_on_take_client(DrdDBusRemoteDesktop1RemoteDesktop1HandoverSession *interface,
+                                                 GDBusMethodInvocation *invocation, GUnixFDList *fd_list,
+                                                 gpointer user_data);
+
+static gboolean
+drd_system_daemon_on_get_system_credentials(DrdDBusRemoteDesktop1RemoteDesktop1HandoverSession *interface,
+                                            GDBusMethodInvocation *invocation, gpointer user_data);
+
+static void drd_system_daemon_on_bus_name_acquired(GDBusConnection *connection, const gchar *name, gpointer user_data);
+
+static void drd_system_daemon_on_bus_name_lost(GDBusConnection *connection, const gchar *name, gpointer user_data);
+
+G_DEFINE_TYPE(DrdSystemDaemon, drd_system_daemon, G_TYPE_OBJECT)
 
 static gchar *get_dbus_path_from_routing_token(guint32 routing_token)
 {
@@ -267,35 +300,6 @@ static gboolean drd_system_daemon_terminate_local_graphical_sessions(DrdDBusLogi
 }
 
 /*
- * 功能：从 handover 对象路径提取 routing token。
- * 逻辑：校验路径是否带 handover 前缀，缺失 token 或前缀不符时记录警告并返回 NULL，否则返回 token 字符串副本。
- * 参数：handover_dbus_path handover 对象路径。
- * 外部接口：GLib g_str_has_prefix/g_strdup；日志 DRD_LOG_WARNING。
- */
-static gchar *get_routing_token_from_dbus_path(const gchar *id)
-{
-    const gchar *prefix = DRD_REMOTE_DESKTOP_HANDOVER_SESSION_PATH_PREFIX;
-    gsize prefix_len;
-
-    g_return_val_if_fail(id != NULL, NULL);
-
-    prefix_len = strlen(prefix);
-    if (!g_str_has_prefix(id, prefix))
-    {
-        DRD_LOG_WARNING("remote handover_dbus_path %s missing handover prefix %s", id, prefix);
-        return NULL;
-    }
-
-    if (id[prefix_len] == '\0')
-    {
-        DRD_LOG_WARNING("remote handover_dbus_path %s missing routing token segment", id);
-        return NULL;
-    }
-
-    return g_strdup(id + prefix_len);
-}
-
-/*
  * 功能：生成唯一的 handover 对象路径与 routing token。
  * 逻辑：循环随机产生非零 token，转换成 remote_id 并检查哈希表中是否已存在；成功后派生对应的 routing_token
  * 字符串并输出。 参数：self system 守护实例；remote_id_out 输出 handover 对象路径；routing_token_out 输出 token
@@ -304,78 +308,46 @@ static gchar *get_routing_token_from_dbus_path(const gchar *id)
 static gboolean drd_system_daemon_generate_remote_identity(DrdSystemDaemon *self, gchar **remote_id_out,
                                                            gchar **routing_token_out)
 {
-    g_autofree gchar *remote_id = NULL;
+    g_autofree gchar *handover_dbus_path = NULL;
     gchar *routing_token = NULL;
-
+    guint32 routing_token_value = 0;
     g_return_val_if_fail(DRD_IS_SYSTEM_DAEMON(self), FALSE);
     g_return_val_if_fail(remote_id_out != NULL, FALSE);
     g_return_val_if_fail(routing_token_out != NULL, FALSE);
 
     while (TRUE)
     {
-        guint32 routing_token_value = g_random_int();
+        routing_token_value = g_random_int();
 
         if (routing_token_value == 0)
         {
             continue;
         }
 
-        g_clear_pointer(&remote_id, g_free);
-        remote_id = get_dbus_path_from_routing_token(routing_token_value);
-        if (remote_id == NULL)
+        g_clear_pointer(&handover_dbus_path, g_free);
+        handover_dbus_path = get_dbus_path_from_routing_token(routing_token_value);
+        if (handover_dbus_path == NULL)
         {
             continue;
         }
 
-        if (!g_hash_table_contains(self->remote_clients, remote_id)) // TODO
+        if (!g_hash_table_contains(self->remote_clients, handover_dbus_path))
         {
             break;
         }
     }
 
-    routing_token = get_routing_token_from_dbus_path(remote_id);
+    routing_token = g_strdup_printf("%u", routing_token_value);
     if (routing_token == NULL)
     {
         return FALSE;
     }
 
-    *remote_id_out = g_steal_pointer(&remote_id);
+    *remote_id_out = g_steal_pointer(&handover_dbus_path);
     *routing_token_out = routing_token;
     return TRUE;
 }
 
-static void drd_system_daemon_remove_client(DrdSystemDaemon *self, DrdRemoteClient *client);
-
-static void drd_system_daemon_update_session_list(DrdSystemDaemon *self);
-
-static gboolean drd_system_daemon_register_client(DrdSystemDaemon *self, GSocketConnection *connection,
-                                                  DrdRoutingTokenInfo *info);
-
-static gboolean drd_system_daemon_delegate(DrdRdpListener *listener, GSocketConnection *connection, gpointer user_data,
-                                           GError **error);
-
-static gboolean drd_system_daemon_on_session_ready(DrdRdpListener *listener, DrdRdpSession *session,
-                                                   gpointer user_data);
-
-static DrdRemoteClient *drd_system_daemon_find_client_by_token(DrdSystemDaemon *self, const gchar *routing_token);
-
-static gboolean drd_system_daemon_on_start_handover(DrdDBusRemoteDesktop1RemoteDesktop1HandoverSession *interface,
-                                                    GDBusMethodInvocation *invocation, const gchar *one_time_auth_token,
-                                                    gpointer user_data);
-
-static gboolean drd_system_daemon_on_take_client(DrdDBusRemoteDesktop1RemoteDesktop1HandoverSession *interface,
-                                                 GDBusMethodInvocation *invocation, GUnixFDList *fd_list,
-                                                 gpointer user_data);
-
-static gboolean
-drd_system_daemon_on_get_system_credentials(DrdDBusRemoteDesktop1RemoteDesktop1HandoverSession *interface,
-                                            GDBusMethodInvocation *invocation, gpointer user_data);
-
-static void drd_system_daemon_on_bus_name_acquired(GDBusConnection *connection, const gchar *name, gpointer user_data);
-
-static void drd_system_daemon_on_bus_name_lost(GDBusConnection *connection, const gchar *name, gpointer user_data);
-
-G_DEFINE_TYPE(DrdSystemDaemon, drd_system_daemon, G_TYPE_OBJECT)
 
 /*
  * 功能：获取当前单调时钟值（微秒）。
@@ -522,7 +494,7 @@ static void drd_system_daemon_on_lightdm_session_properties_changed(GDBusProxy *
     g_autofree gchar *user_name = NULL;
     if (g_variant_lookup(changed_properties, "user_name", "s", &user_name))
     {
-        DRD_LOG_MESSAGE("changed user name is %s",user_name);
+        DRD_LOG_MESSAGE("changed user name is %s", user_name);
         watch_client->user_name = g_strdup(user_name);
         struct passwd *pwd = getpwnam(user_name);
         if (pwd != NULL)
@@ -562,12 +534,6 @@ static void drd_system_daemon_on_lightdm_session_properties_changed(GDBusProxy *
         DRD_LOG_ERROR("not found client by %s", new_client_id);
         return;
     }
-    if (watch_client->routing != NULL)
-    {
-        g_clear_pointer(&watch_client->routing->routing_token, g_free);
-        watch_client->routing->routing_token = g_strdup(new_client->routing->routing_token);
-        watch_client->routing->requested_rdstls = new_client->routing->requested_rdstls;
-    }
 
     if (watch_client->connection != NULL)
     {
@@ -591,14 +557,13 @@ static void drd_system_daemon_on_lightdm_session_properties_changed(GDBusProxy *
     watch_client->client_width = new_client->client_width;
     watch_client->client_height = new_client->client_height;
     drd_system_daemon_touch_client(watch_client);
-    drd_dbus_remote_desktop1_remote_desktop1_handover_session_emit_restart_handover(watch_client->handover_iface);
-    // free new client
-
-    if (new_client->lightdm_session_proxy != NULL)
+    if (new_client && new_client->routing)
     {
-        g_signal_handlers_disconnect_by_data(new_client->lightdm_session_proxy, new_client);
+        g_clear_pointer(&watch_client->greeter_client_id, g_free);
+        watch_client->greeter_client_id = g_strdup(new_client->routing->routing_token);
     }
-    drd_system_daemon_remove_client(watch_client->daemon, new_client);
+
+    drd_dbus_remote_desktop1_remote_desktop1_handover_session_emit_restart_handover(watch_client->handover_iface);
 }
 
 static gboolean drd_system_daemon_watch_display_session(DrdRemoteClient *client, const gchar *session_path)
@@ -632,6 +597,7 @@ static gboolean drd_system_daemon_watch_display_session(DrdRemoteClient *client,
         return FALSE;
     }
     client->lightdm_session_path = g_strdup(session_path);
+    g_clear_pointer(&client->login1_session_id, g_free);
     client->login1_session_id = drd_dbus_lightdm_remote_display_factory_session_dup_session_id(client->lightdm_session_proxy);
     g_signal_connect(client->lightdm_session_proxy, "g-properties-changed",
                      G_CALLBACK(drd_system_daemon_on_lightdm_session_properties_changed), client);
@@ -642,23 +608,12 @@ static gboolean drd_system_daemon_watch_display_session(DrdRemoteClient *client,
  * 功能：通过 routing token 定位远程客户端。
  * 逻辑：将字符串 token 转为整数生成 remote_id，再在哈希表中查找匹配的客户端，非法 token 会记录警告。
  * 参数：self system 守护实例；routing_token 路由 token 字符串。
- * 外部接口：GLib g_ascii_string_to_unsigned/g_hash_table_lookup；日志 DRD_LOG_WARNING。
+ * 外部接口：GLib g_hash_table_lookup；日志 DRD_LOG_WARNING。
  */
 static DrdRemoteClient *drd_system_daemon_find_client_by_token(DrdSystemDaemon *self, const gchar *routing_token)
 {
     g_return_val_if_fail(DRD_IS_SYSTEM_DAEMON(self), NULL);
     g_return_val_if_fail(routing_token != NULL, NULL);
-
-    guint64 parsed_token = 0;
-    gboolean success = FALSE;
-    success = g_ascii_string_to_unsigned(routing_token, 10, 1, G_MAXUINT32, &parsed_token, NULL);
-    if (!success)
-    {
-        DRD_LOG_WARNING("Invalid routing token string %s", routing_token);
-        return NULL;
-    }
-
-    (void) parsed_token;
     if (self->remote_clients == NULL)
     {
         return NULL;
@@ -745,7 +700,7 @@ static void drd_system_daemon_update_session_list(DrdSystemDaemon *self)
  * 功能：将新连接注册为 handover 客户端并导出 DBus 接口。
  * 逻辑：生成或复用 routing token/remote_id，构建 handover skeleton 并导出到 handover
  * manager；在连接上写入元数据；入队等待。 参数：self system 守护实例；connection 新连接；info peek 到的 routing token
- * 信息。 外部接口：GLib g_ascii_string_to_unsigned/g_hash_table_contains/g_object_set_data；GDBus
+ * 信息。 外部接口：GLib g_hash_table_contains/g_object_set_data；GDBus
  * drd_dbus_remote_desktop_rdp_handover_skeleton_new/g_dbus_object_skeleton_add_interface/export。
  */
 static gboolean drd_system_daemon_register_client(DrdSystemDaemon *self, GSocketConnection *connection,
@@ -766,7 +721,6 @@ static gboolean drd_system_daemon_register_client(DrdSystemDaemon *self, GSocket
     DrdRemoteClient *client = g_new0(DrdRemoteClient, 1);
     g_autofree gchar *handover_dbus_path = NULL;
     g_autofree gchar *routing_token = NULL;
-    guint64 parsed_token_value = 0;
 
     client->daemon = self;
     client->connection = g_object_ref(connection);
@@ -775,20 +729,14 @@ static gboolean drd_system_daemon_register_client(DrdSystemDaemon *self, GSocket
 
     if (info->routing_token != NULL)
     {
-        if (g_ascii_string_to_unsigned(info->routing_token, 10, 1, G_MAXUINT32, &parsed_token_value, NULL))
+        handover_dbus_path =
+                g_strdup_printf("%s%s", DRD_REMOTE_DESKTOP_HANDOVER_SESSION_PATH_PREFIX, info->routing_token);
+        routing_token = g_strdup(info->routing_token);
+        if (handover_dbus_path != NULL && g_hash_table_contains(self->remote_clients, handover_dbus_path))
         {
-            handover_dbus_path = get_dbus_path_from_routing_token((guint32) parsed_token_value);
-            routing_token = g_strdup(info->routing_token);
-            if (handover_dbus_path != NULL && g_hash_table_contains(self->remote_clients, handover_dbus_path))
-            {
-                DRD_LOG_WARNING("Routing token %s already tracked, generating a new one", info->routing_token);
-                g_clear_pointer(&handover_dbus_path, g_free);
-                g_clear_pointer(&routing_token, g_free);
-            }
-        }
-        else
-        {
-            DRD_LOG_WARNING("Ignoring invalid routing token %s from peek", info->routing_token);
+            DRD_LOG_WARNING("Routing token %s already tracked, generating a new one", info->routing_token);
+            g_clear_pointer(&handover_dbus_path, g_free);
+            g_clear_pointer(&routing_token, g_free);
         }
     }
 
@@ -836,8 +784,8 @@ static gboolean drd_system_daemon_register_client(DrdSystemDaemon *self, GSocket
     client->last_activity_us = now_us;
 
     const gchar *token_preview = client->routing != NULL && client->routing->routing_token != NULL
-                                         ? client->routing->routing_token
-                                         : "unknown";
+                                     ? client->routing->routing_token
+                                     : "unknown";
     DRD_LOG_MESSAGE("Registered handover client %s (token=%s)", client->handover_dbus_path, token_preview);
 
     return TRUE;
@@ -1076,8 +1024,8 @@ static gboolean drd_system_daemon_on_session_ready(DrdRdpListener *listener, Drd
         }
         fd_variant = g_variant_new_handle(fd_index);
         if (!drd_dbus_lightdm_remote_display_factory_call_create_single_logon_session_sync(
-                    self->remote_display_factory, client->routing->routing_token, target_width, target_height,
-                    fd_variant, peer_address, fd_list, &session_path, &out_fd_list, NULL, &error))
+                self->remote_display_factory, client->routing->routing_token, target_width, target_height,
+                fd_variant, peer_address, fd_list, &session_path, &out_fd_list, NULL, &error))
         {
             DRD_LOG_WARNING("create single logon session failed %s", error != NULL ? error->message : "unknown");
             goto single_login_cleanup;
@@ -1110,8 +1058,8 @@ static gboolean drd_system_daemon_on_session_ready(DrdRdpListener *listener, Drd
     else
     {
         if (!drd_dbus_lightdm_remote_display_factory_call_create_remote_greeter_display_sync(
-                    self->remote_display_factory, client->routing->routing_token, target_width, target_height,
-                    peer_address, &session_path, NULL, &error))
+                self->remote_display_factory, client->routing->routing_token, target_width, target_height,
+                peer_address, &session_path, NULL, &error))
         {
             DRD_LOG_WARNING("create remote display failed %s", error != NULL ? error->message : "unknown");
             drd_system_daemon_touch_client(client);
@@ -1725,13 +1673,14 @@ static gboolean drd_system_daemon_on_start_handover(DrdDBusRemoteDesktop1RemoteD
     g_autofree gchar *certificate = NULL;
     g_autofree gchar *key = NULL;
     gboolean redirected_locally = FALSE;
-    const gboolean has_routing_token = client->routing != NULL && client->routing->routing_token != NULL;
+
     drd_system_daemon_touch_client(client);
 
-    if (!drd_system_daemon_get_caller_identity(self, invocation, &caller_uid, &caller_name) || client->reserved_uid != caller_uid)
+    if (!drd_system_daemon_get_caller_identity(self, invocation, &caller_uid, &caller_name) ||
+        client->reserved_uid != caller_uid)
     {
-        DRD_LOG_MESSAGE("caller uid is %d",caller_uid);
-        DRD_LOG_MESSAGE("reserved uid is %d",client->reserved_uid);
+        DRD_LOG_MESSAGE("caller uid is %d", caller_uid);
+        DRD_LOG_MESSAGE("reserved uid is %d", client->reserved_uid);
         g_dbus_method_invocation_return_error(invocation, G_DBUS_ERROR, G_DBUS_ERROR_ACCESS_DENIED, "Access denied");
         return TRUE;
     }
@@ -1749,7 +1698,7 @@ static gboolean drd_system_daemon_on_start_handover(DrdDBusRemoteDesktop1RemoteD
         g_dbus_method_invocation_return_gerror(invocation, io_error);
         return TRUE;
     }
-
+    // session还持有在system进程时
     if (client->session != NULL)
     {
         // gchar *gen_routing_token=g_strdup (client->handover_dbus_path + strlen (REMOTE_DESKTOP_CLIENT_OBJECT_PATH
@@ -1773,14 +1722,58 @@ static gboolean drd_system_daemon_on_start_handover(DrdDBusRemoteDesktop1RemoteD
     }
     else
     {
+        // session已经重定向到handover进程
         DRD_LOG_MESSAGE("client session is NULL");
-        if (has_routing_token)
+        DrdRemoteClient *redirected_client = NULL;
+        gboolean greeter_client_redirected = FALSE;
+        if (client->greeter_client_id != NULL)
         {
-            drd_dbus_remote_desktop1_remote_desktop1_handover_session_emit_redirect_client(
-                    interface, client->routing->routing_token, one_time_auth_token);
+            DRD_LOG_MESSAGE("greeter client id is %s", client->greeter_client_id);
+            redirected_client = drd_system_daemon_find_client_by_token(client->daemon, client->greeter_client_id);
+            greeter_client_redirected = TRUE;
+            g_clear_pointer(&client->greeter_client_id, g_free);
         }
         else
         {
+            redirected_client = client;
+        }
+        if (!redirected_client)
+        {
+            DRD_LOG_MESSAGE("redirected_client not found");
+            g_dbus_method_invocation_return_error(invocation, G_IO_ERROR, G_IO_ERROR_FAILED,
+                                                  "Failed to redirect client session: not found client need redirect");
+            return TRUE;
+        }
+
+
+        const gboolean has_routing_token =
+                redirected_client->routing != NULL && redirected_client->routing->routing_token != NULL;
+        if (has_routing_token)
+        {
+            DRD_LOG_MESSAGE("routing token is %s", redirected_client->routing->routing_token);
+            drd_dbus_remote_desktop1_remote_desktop1_handover_session_emit_redirect_client(
+                    redirected_client->handover_iface, redirected_client->routing->routing_token, one_time_auth_token);
+            if (greeter_client_redirected)
+            {
+                if (client->routing != NULL)
+                {
+                    g_clear_pointer(&client->routing->routing_token, g_free);
+                    client->routing->routing_token = g_strdup(redirected_client->routing->routing_token);
+                    client->routing->requested_rdstls = redirected_client->routing->requested_rdstls;
+                }
+                if (redirected_client->lightdm_session_proxy != NULL)
+                    g_signal_handlers_disconnect_by_data(redirected_client->lightdm_session_proxy, redirected_client);
+                drd_system_daemon_remove_client(redirected_client->daemon, redirected_client);
+            }
+        }
+        else
+        {
+            if (greeter_client_redirected)
+            {
+                if (redirected_client->lightdm_session_proxy != NULL)
+                    g_signal_handlers_disconnect_by_data(redirected_client->lightdm_session_proxy, redirected_client);
+                drd_system_daemon_remove_client(redirected_client->daemon, redirected_client);
+            }
             DRD_LOG_WARNING("StartHandover for %s missing routing token; skipping RedirectClient signal",
                             client->handover_dbus_path);
         }
@@ -1815,10 +1808,11 @@ static gboolean drd_system_daemon_on_take_client(DrdDBusRemoteDesktop1RemoteDesk
     guint32 caller_uid = 0;
     g_autofree gchar *caller_name = NULL;
     drd_system_daemon_touch_client(client);
-    if (!drd_system_daemon_get_caller_identity(self, invocation, &caller_uid, &caller_name) || client->reserved_uid != caller_uid)
+    if (!drd_system_daemon_get_caller_identity(self, invocation, &caller_uid, &caller_name) ||
+        client->reserved_uid != caller_uid)
     {
-        DRD_LOG_MESSAGE("caller uid is %d",caller_uid);
-        DRD_LOG_MESSAGE("reserved uid is %d",client->reserved_uid);
+        DRD_LOG_MESSAGE("caller uid is %d", caller_uid);
+        DRD_LOG_MESSAGE("reserved uid is %d", client->reserved_uid);
         g_dbus_method_invocation_return_error(invocation, G_DBUS_ERROR, G_DBUS_ERROR_ACCESS_DENIED, "Access denied");
         return TRUE;
     }
@@ -1842,7 +1836,7 @@ static gboolean drd_system_daemon_on_take_client(DrdDBusRemoteDesktop1RemoteDesk
 
     g_autoptr(GVariant) handle = g_variant_new_handle(idx);
     drd_dbus_remote_desktop1_remote_desktop1_handover_session_complete_take_client(interface, invocation, out_list,
-                                                                                   handle);
+                                                                                   g_steal_pointer(&handle));
 
     g_io_stream_close(G_IO_STREAM(client->connection), NULL, NULL);
     g_clear_object(&client->connection);
