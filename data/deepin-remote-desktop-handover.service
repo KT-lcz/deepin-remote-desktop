@@ -1,13 +1,13 @@
 [Unit]
 Description=Deepin Remote Desktop Handover Daemon(TLS/PAM mode : Single sign-on and remote login)
 ConditionEnvironment=REMOTE_ID
-
+PartOf=graphical-session.target
 
 [Service]
 Type=simple
 StandardError=journal
 StandardOutput=journal
 ExecStart=/usr/bin/deepin-remote-desktop --mode handover --config /usr/share/deepin-remote-desktop/config.d/default-handover.ini
-
+Slice=session.slice
 [Install]
-WantedBy=graphical-session-pre.target
+WantedBy=graphical-session.target

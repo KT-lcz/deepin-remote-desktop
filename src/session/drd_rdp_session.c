@@ -112,6 +112,7 @@ static void drd_rdp_session_update_refresh_timer_state(DrdRdpSession *self);
  */
 static void drd_rdp_session_dispose(GObject *object)
 {
+    DRD_LOG_MESSAGE("rdp session dispose");
     DrdRdpSession *self = DRD_RDP_SESSION(object);
 
     drd_rdp_session_stop_event_thread(self);
@@ -966,7 +967,10 @@ void drd_rdp_session_disconnect(DrdRdpSession *self, const gchar *reason)
     g_atomic_int_set(&self->connection_alive, 0);
     if (self->peer != NULL && self->peer->Disconnect != NULL)
     {
+        self->peer->Close(self->peer);
         self->peer->Disconnect(self->peer);
+        freerdp_peer_context_free(self->peer);
+        g_clear_pointer (&self->peer, freerdp_peer_free);
         self->peer = NULL;
     }
 
@@ -1242,7 +1246,7 @@ static gpointer drd_rdp_session_render_thread(gpointer user_data)
 
             if (self->graphics_pipeline_ready)
             {
-                if (!drd_rdp_session_wait_for_graphics_capacity(self, -1) || !drd_rdp_graphics_pipeline_can_submit(self->graphics_pipeline))
+                if (!drd_rdp_session_wait_for_graphics_capacity(self, 200*1000) || !drd_rdp_graphics_pipeline_can_submit(self->graphics_pipeline))
                 {
                     DRD_LOG_WARNING("Session %s Rdpgfx congestion persists, disabling graphics pipeline",
                                                        self->peer_address);
@@ -1312,6 +1316,7 @@ static gpointer drd_rdp_session_render_thread(gpointer user_data)
                             self->frame_pull_errors++;
                             DRD_LOG_WARNING("Session %s failed to pull encoded frame: %s (errors=%" G_GUINT64_FORMAT ")",
                                             self->peer_address, error->message, self->frame_pull_errors);
+                            g_usleep(200*1000);
                         }
                         continue;
                     }

@@ -1,12 +1,12 @@
 [Unit]
 Description=Deepin Remote Desktop Share Screen Daemon
-
+PartOf=graphical-session.target
 # TODO DBus type
 [Service]
 Type=simple
 StandardError=journal
 StandardOutput=journal
 ExecStart=/usr/bin/deepin-remote-desktop --mode user --config /usr/share/deepin-remote-desktop/config.d/default-user.ini
-
+Slice=session.slice
 [Install]
-WantedBy=graphical-session-pre.target
+WantedBy=graphical-session.target

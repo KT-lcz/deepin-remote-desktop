@@ -101,6 +101,7 @@ static void drd_application_log_effective_config(DrdApplication *self)
  */
 static void drd_application_dispose(GObject *object)
 {
+    DRD_LOG_MESSAGE("application dispose");
     DrdApplication *self = DRD_APPLICATION(object);
 
     if (self->sigint_id != 0)
@@ -179,14 +180,15 @@ static gboolean drd_application_on_signal(gpointer user_data)
     {
         if (!self->is_handover || getuid() >= 1000)
         {
+            DRD_LOG_MESSAGE("quit loop");
             g_main_loop_quit(self->loop);
-            return G_SOURCE_CONTINUE;
+            return G_SOURCE_REMOVE;
         }
         DRD_LOG_MESSAGE("Termination signal received, shutting down main loop");
         g_timeout_add(5 * 1000, quit_loop, self->loop);
     }
 
-    return G_SOURCE_CONTINUE;
+    return G_SOURCE_REMOVE;
 }
 
 /*

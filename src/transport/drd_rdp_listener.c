@@ -1570,14 +1570,19 @@ drd_rdp_listener_bind(DrdRdpListener *self, GError **error)
 static void
 drd_rdp_listener_stop_internal(DrdRdpListener *self)
 {
+    DRD_LOG_MESSAGE("listener_stop");
     if (self->is_bound)
     {
         g_socket_service_stop(G_SOCKET_SERVICE(self));
         g_socket_listener_close(G_SOCKET_LISTENER(self));
         self->is_bound = FALSE;
     }
-
-    g_ptr_array_set_size(self->sessions, 0);
+    for (guint i = 0; i < self->sessions->len; i++) {
+        DrdRdpSession *d = self->sessions->pdata[i];
+        DRD_LOG_MESSAGE("free session");
+        drd_rdp_session_disconnect(d,"logout");
+    }
+    g_ptr_array_free(self->sessions,TRUE);
 
     if (self->runtime != NULL)
     {

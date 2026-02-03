@@ -5,4 +5,4 @@ else
     exit 0
 fi
 sleep 3;
-setsid -f /usr/bin/deepin-remote-desktop --mode handover --config /usr/share/deepin-remote-desktop/config.d/default-handover.ini &
+/usr/bin/deepin-remote-desktop --mode handover --config /usr/share/deepin-remote-desktop/config.d/default-handover.ini &
