@@ -67,6 +67,7 @@ dbus_gen_remote_desktop1 = gnome.gdbus_codegen('drd-dbus-remote-desktop1',
                                                namespace: 'DrdDBusRemoteDesktop1')
 dbus_gen_lightdm = gnome.gdbus_codegen('drd-dbus-lightdm',
                                           'org.deepin.DisplayManager.xml',
+                                          object_manager: true,
                                           interface_prefix: 'org.deepin.DisplayManager.',
                                           namespace: 'DrdDBusLightdm')
 dbus_gen_logind = gnome.gdbus_codegen('drd-dbus-logind',
