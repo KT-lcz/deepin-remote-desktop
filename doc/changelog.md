@@ -1,5 +1,16 @@
 # 变更记录
 
+## 2026-02-05：LightDM DisplayManager 监听改用 ObjectManager client
+- **目的**：使用 gdbus-codegen 生成的 ObjectManager client 监听 DisplayManager 对象/接口移除，替代 `InterfacesRemoved` 手写订阅。
+- **范围**：`src/system/drd_system_daemon.c`、`.codex/plan/lightdm-object-manager-listener.md`、`doc/task-lightdm-object-manager-listener.md`、`doc/changelog.md`。
+- **主要改动**：
+  1. 通过 `drd_dbus_lightdm_object_manager_client_new_sync()` 创建 object manager，并监听 `object-removed/interface-removed`。
+  1.1. `object-removed` 连接使用 `g_signal_connect_object()`，确保 daemon 释放后不会再触发回调。
+  2. 保留原有按 `lightdm_session_path` 匹配移除对象路径后清理客户端的行为。
+  3. 删除旧的 `g_dbus_connection_signal_subscribe()` + unsubscribe 订阅 ID 逻辑。
+- **影响**：监听实现更类型化、更易维护；客户端清理触发条件与原逻辑保持一致。
+
+
 ## 2026-XX-XX：单点登录前注销本地图形会话
 - **目的**：在 system 单点登录场景下可选地清理用户已有的本地图形 session，避免本地与远程会话并存。
 - **范围**：`src/system/drd_system_daemon.c`、`src/core/drd_config.*`、`data/config.d/default-system.ini`、`data/config.d/full-example.ini`、`doc/architecture.md`、`doc/changelog.md`、`.codex/plan/system-single-login-local-session-logout.md`、`doc/task-system-single-login-local-session-logout.md`。

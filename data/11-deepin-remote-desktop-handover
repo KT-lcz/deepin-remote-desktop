@@ -4,5 +4,5 @@ if [[ "${REMOTE_ID:-}" =~ ^[0-9]+$ ]] && [ "${REMOTE_ID}" -gt 0 ]; then
 else
     exit 0
 fi
-sleep 3;
+#sleep 3;
 /usr/bin/deepin-remote-desktop --mode handover --config /usr/share/deepin-remote-desktop/config.d/default-handover.ini &
